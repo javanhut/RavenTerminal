@@ -20,6 +20,14 @@ const (
 	ActionNextTab
 	ActionPrevTab
 	ActionToggleFullscreen
+	ActionSplitVertical
+	ActionSplitHorizontal
+	ActionClosePane
+	ActionNextPane
+	ActionPrevPane
+	ActionShowHelp
+	ActionHelpScrollUp
+	ActionHelpScrollDown
 )
 
 // KeyResult contains the result of processing a key
@@ -45,6 +53,30 @@ func TranslateKey(key glfw.Key, mods glfw.ModifierKey, appCursorMode bool) KeyRe
 
 	if ctrl && shift && key == glfw.KeyX {
 		return KeyResult{Action: ActionCloseTab}
+	}
+
+	if ctrl && shift && key == glfw.KeyV {
+		return KeyResult{Action: ActionSplitVertical}
+	}
+
+	if ctrl && shift && key == glfw.KeyH {
+		return KeyResult{Action: ActionSplitHorizontal}
+	}
+
+	if ctrl && shift && key == glfw.KeyW {
+		return KeyResult{Action: ActionClosePane}
+	}
+
+	if ctrl && shift && key == glfw.KeyK {
+		return KeyResult{Action: ActionShowHelp}
+	}
+
+	if ctrl && shift && key == glfw.KeyRightBracket {
+		return KeyResult{Action: ActionNextPane}
+	}
+
+	if ctrl && shift && key == glfw.KeyLeftBracket {
+		return KeyResult{Action: ActionPrevPane}
 	}
 
 	if ctrl && key == glfw.KeyTab {
@@ -157,10 +189,13 @@ func TranslateKey(key glfw.Key, mods glfw.ModifierKey, appCursorMode bool) KeyRe
 
 	// Tab
 	if key == glfw.KeyTab {
-		if shift {
-			return KeyResult{Action: ActionInput, Data: []byte("\x1b[Z")}
+		if shift && !ctrl {
+			// Shift+Tab cycles through split panes
+			return KeyResult{Action: ActionNextPane}
 		}
-		return KeyResult{Action: ActionInput, Data: []byte{'\t'}}
+		if !ctrl && !shift {
+			return KeyResult{Action: ActionInput, Data: []byte{'\t'}}
+		}
 	}
 
 	// Escape

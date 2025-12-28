@@ -74,6 +74,9 @@ type Renderer struct {
 	texColorLoc int32
 	texProjLoc  int32
 	texLoc      int32
+
+	// Help panel scroll state
+	helpScrollOffset int
 }
 
 // NewRenderer creates a new renderer with smooth font rendering
@@ -317,6 +320,11 @@ func (r *Renderer) initGL() error {
 
 // Render renders the terminal
 func (r *Renderer) Render(tm *tab.TabManager, width, height int, cursorVisible bool) {
+	r.RenderWithHelp(tm, width, height, cursorVisible, false)
+}
+
+// RenderWithHelp renders the terminal with optional help panel
+func (r *Renderer) RenderWithHelp(tm *tab.TabManager, width, height int, cursorVisible bool, showHelp bool) {
 	proj := orthoMatrix(0, float32(width), float32(height), 0, -1, 1)
 
 	// Clear background
@@ -326,10 +334,342 @@ func (r *Renderer) Render(tm *tab.TabManager, width, height int, cursorVisible b
 	// Render tab bar
 	r.renderTabBar(tm, width, height, proj)
 
-	// Render terminal content
+	// Render terminal content with split pane support
 	activeTab := tm.ActiveTab()
 	if activeTab != nil {
-		r.renderGrid(activeTab.Terminal.Grid, width, height, proj, cursorVisible)
+		r.renderPanes(activeTab, width, height, proj, cursorVisible)
+	}
+
+	// Render help panel overlay if requested
+	if showHelp {
+		r.renderHelpPanel(width, height, proj)
+	}
+}
+
+// getHelpSections returns all keybinding sections for the help panel
+func (r *Renderer) getHelpSections() []struct {
+	title    string
+	bindings [][2]string
+} {
+	return []struct {
+		title    string
+		bindings [][2]string
+	}{
+		{
+			title: "General",
+			bindings: [][2]string{
+				{"Ctrl+Q", "Exit terminal"},
+				{"Shift+Enter", "Toggle fullscreen"},
+				{"Ctrl+Shift+K", "Show/hide help"},
+			},
+		},
+		{
+			title: "Tab Management",
+			bindings: [][2]string{
+				{"Ctrl+Shift+T", "New tab"},
+				{"Ctrl+Shift+X", "Close current tab"},
+				{"Ctrl+Tab", "Next tab"},
+				{"Ctrl+Shift+Tab", "Previous tab"},
+			},
+		},
+		{
+			title: "Split Panes",
+			bindings: [][2]string{
+				{"Ctrl+Shift+V", "Split vertical"},
+				{"Ctrl+Shift+H", "Split horizontal"},
+				{"Ctrl+Shift+W", "Close pane"},
+				{"Shift+Tab", "Cycle panes"},
+				{"Ctrl+Shift+]", "Next pane"},
+				{"Ctrl+Shift+[", "Previous pane"},
+			},
+		},
+		{
+			title: "Scrolling",
+			bindings: [][2]string{
+				{"Mouse Wheel", "Scroll 3 lines"},
+				{"Shift+Up", "Scroll up 1 line"},
+				{"Shift+Down", "Scroll down 1 line"},
+				{"Shift+PageUp", "Scroll up 5 lines"},
+				{"Shift+PageDown", "Scroll down 5 lines"},
+			},
+		},
+		{
+			title: "Text Navigation",
+			bindings: [][2]string{
+				{"Home", "Beginning of line"},
+				{"End", "End of line"},
+				{"PageUp", "Page up"},
+				{"PageDown", "Page down"},
+				{"Insert", "Toggle insert mode"},
+				{"Delete", "Delete character"},
+			},
+		},
+		{
+			title: "Modifier Keys",
+			bindings: [][2]string{
+				{"Ctrl+letter", "Control character"},
+				{"Alt+letter", "ESC + letter"},
+				{"Ctrl+C", "Interrupt"},
+				{"Ctrl+D", "End of input"},
+				{"Ctrl+Z", "Suspend process"},
+				{"Ctrl+L", "Clear screen"},
+			},
+		},
+		{
+			title: "Function Keys",
+			bindings: [][2]string{
+				{"F1-F12", "Passed to app"},
+			},
+		},
+	}
+}
+
+// getTotalHelpLines calculates total lines needed for help content
+func (r *Renderer) getTotalHelpLines() int {
+	sections := r.getHelpSections()
+	total := 0
+	for _, section := range sections {
+		total += 1 + len(section.bindings) + 1 // title + bindings + spacing
+	}
+	return total
+}
+
+// ScrollHelpUp scrolls the help panel up
+func (r *Renderer) ScrollHelpUp() {
+	if r.helpScrollOffset > 0 {
+		r.helpScrollOffset--
+	}
+}
+
+// ScrollHelpDown scrolls the help panel down
+func (r *Renderer) ScrollHelpDown() {
+	// Estimate visible lines based on default panel size
+	visibleLines := 20
+	maxScroll := r.getTotalHelpLines() - visibleLines
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if r.helpScrollOffset < maxScroll {
+		r.helpScrollOffset++
+	}
+}
+
+// ResetHelpScroll resets the help scroll position
+func (r *Renderer) ResetHelpScroll() {
+	r.helpScrollOffset = 0
+}
+
+// renderHelpPanel renders the keybindings help overlay
+func (r *Renderer) renderHelpPanel(width, height int, proj [16]float32) {
+	// Panel dimensions - dynamically sized based on window
+	// Use 80% of window size for the panel
+	panelWidth := float32(width) * 0.80
+	panelHeight := float32(height) * 0.85
+
+	// Set reasonable min/max constraints
+	if panelWidth < 350 {
+		panelWidth = 350
+	}
+	if panelWidth > 700 {
+		panelWidth = 700
+	}
+	if panelHeight < 250 {
+		panelHeight = 250
+	}
+	if panelHeight > 800 {
+		panelHeight = 800
+	}
+
+	// Center the panel in the window
+	panelX := (float32(width) - panelWidth) / 2
+	panelY := (float32(height) - panelHeight) / 2
+
+	// Draw semi-transparent background overlay over entire window
+	overlayColor := [4]float32{0.0, 0.0, 0.0, 0.75}
+	r.drawRect(0, 0, float32(width), float32(height), overlayColor, proj)
+
+	// Draw panel background
+	panelBg := [4]float32{0.06, 0.07, 0.10, 1.0}
+	r.drawRect(panelX, panelY, panelWidth, panelHeight, panelBg, proj)
+
+	// Draw panel border
+	borderColor := r.theme.TabActive
+	borderWidth := float32(3)
+	r.drawRect(panelX, panelY, panelWidth, borderWidth, borderColor, proj)
+	r.drawRect(panelX, panelY+panelHeight-borderWidth, panelWidth, borderWidth, borderColor, proj)
+	r.drawRect(panelX, panelY, borderWidth, panelHeight, borderColor, proj)
+	r.drawRect(panelX+panelWidth-borderWidth, panelY, borderWidth, panelHeight, borderColor, proj)
+
+	// Content positioning with dynamic margins
+	marginX := panelWidth * 0.05
+	if marginX < 20 {
+		marginX = 20
+	}
+	contentX := panelX + marginX
+	contentWidth := panelWidth - marginX*2 - 25 // Leave room for scrollbar
+
+	lineHeight := r.cellHeight * 1.5
+	headerY := panelY + 40
+	contentStartY := headerY + lineHeight*2
+	footerHeight := float32(50)
+	contentEndY := panelY + panelHeight - footerHeight
+	visibleHeight := contentEndY - contentStartY
+	visibleLines := int(visibleHeight / lineHeight)
+
+	// Calculate column positions - fixed key column width to prevent overlap
+	// Longest key is "Ctrl+Shift+Tab" or "Shift+PageDown" which needs ~15 chars
+	keyColWidth := r.cellWidth * 18 // 18 characters worth of space
+	descColX := contentX + keyColWidth
+
+	// Title (fixed, doesn't scroll)
+	r.drawText(contentX, headerY, "Keybindings Help", r.theme.TabActive, proj)
+
+	// Draw a separator line under the title
+	separatorY := headerY + lineHeight*0.8
+	r.drawRect(contentX, separatorY, contentWidth, 1, r.theme.Foreground, proj)
+
+	// Scroll indicators
+	totalLines := r.getTotalHelpLines()
+	maxScroll := totalLines - visibleLines
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+
+	// Draw scroll indicator on right side
+	scrollBarX := panelX + panelWidth - 18
+	scrollBarHeight := contentEndY - contentStartY
+	scrollBarY := contentStartY
+
+	if maxScroll > 0 {
+		// Scroll track
+		trackColor := [4]float32{0.12, 0.13, 0.18, 1.0}
+		r.drawRect(scrollBarX, scrollBarY, 8, scrollBarHeight, trackColor, proj)
+
+		// Scroll thumb - size proportional to visible content
+		scrollThumbHeight := scrollBarHeight * float32(visibleLines) / float32(totalLines)
+		if scrollThumbHeight < 30 {
+			scrollThumbHeight = 30
+		}
+		scrollThumbY := scrollBarY + (scrollBarHeight-scrollThumbHeight)*float32(r.helpScrollOffset)/float32(maxScroll)
+
+		r.drawRect(scrollBarX, scrollThumbY, 8, scrollThumbHeight, r.theme.TabActive, proj)
+	}
+
+	// Draw content with clipping
+	sections := r.getHelpSections()
+	currentLine := 0
+
+	for _, section := range sections {
+		// Section title
+		if currentLine >= r.helpScrollOffset && currentLine < r.helpScrollOffset+visibleLines {
+			drawY := contentStartY + float32(currentLine-r.helpScrollOffset)*lineHeight
+			if drawY+lineHeight <= contentEndY {
+				r.drawText(contentX, drawY, section.title, r.theme.TabActive, proj)
+			}
+		}
+		currentLine++
+
+		// Bindings
+		for _, binding := range section.bindings {
+			if currentLine >= r.helpScrollOffset && currentLine < r.helpScrollOffset+visibleLines {
+				drawY := contentStartY + float32(currentLine-r.helpScrollOffset)*lineHeight
+				if drawY+lineHeight <= contentEndY {
+					r.drawText(contentX+15, drawY, binding[0], r.theme.Cursor, proj)
+					r.drawText(descColX, drawY, binding[1], r.theme.Foreground, proj)
+				}
+			}
+			currentLine++
+		}
+
+		// Spacing after section
+		currentLine++
+	}
+
+	// Footer separator and text (fixed, doesn't scroll)
+	footerSepY := panelY + panelHeight - footerHeight
+	r.drawRect(contentX, footerSepY, contentWidth, 1, r.theme.Foreground, proj)
+
+	footerY := panelY + panelHeight - 30
+	footerText := "Up/Down: scroll | Esc: close"
+	r.drawText(contentX, footerY, footerText, [4]float32{0.5, 0.5, 0.5, 1.0}, proj)
+}
+
+// renderPanes renders all panes in a tab
+func (r *Renderer) renderPanes(t *tab.Tab, width, height int, proj [16]float32, cursorVisible bool) {
+	panes := t.GetPanes()
+	if len(panes) == 0 {
+		return
+	}
+
+	// Calculate available area (after tab bar)
+	availableWidth := float32(width) - r.tabBarWidth - 5
+	availableHeight := float32(height) - r.paddingTop - r.paddingBottom
+
+	splitDir := t.GetSplitDirection()
+	activePaneIdx := t.ActivePaneIndex()
+	separatorWidth := float32(2)
+
+	for i, pane := range panes {
+		var offsetX, offsetY, paneWidth, paneHeight float32
+
+		if len(panes) == 1 {
+			// Single pane - full size
+			offsetX = r.tabBarWidth + 5
+			offsetY = r.paddingTop
+			paneWidth = availableWidth
+			paneHeight = availableHeight
+		} else {
+			switch splitDir {
+			case tab.SplitVertical:
+				// Side by side
+				paneWidth = (availableWidth - separatorWidth*float32(len(panes)-1)) / float32(len(panes))
+				paneHeight = availableHeight
+				offsetX = r.tabBarWidth + 5 + float32(i)*(paneWidth+separatorWidth)
+				offsetY = r.paddingTop
+
+				// Draw separator between panes
+				if i > 0 {
+					sepX := offsetX - separatorWidth
+					r.drawRect(sepX, offsetY, separatorWidth, paneHeight, r.theme.Foreground, proj)
+				}
+			case tab.SplitHorizontal:
+				// Stacked vertically
+				paneWidth = availableWidth
+				paneHeight = (availableHeight - separatorWidth*float32(len(panes)-1)) / float32(len(panes))
+				offsetX = r.tabBarWidth + 5
+				offsetY = r.paddingTop + float32(i)*(paneHeight+separatorWidth)
+
+				// Draw separator between panes
+				if i > 0 {
+					sepY := offsetY - separatorWidth
+					r.drawRect(offsetX, sepY, paneWidth, separatorWidth, r.theme.Foreground, proj)
+				}
+			default:
+				// Fallback to single pane behavior
+				offsetX = r.tabBarWidth + 5
+				offsetY = r.paddingTop
+				paneWidth = availableWidth
+				paneHeight = availableHeight
+			}
+		}
+
+		// Draw active pane indicator (subtle border)
+		if i == activePaneIdx && len(panes) > 1 {
+			borderColor := r.theme.TabActive
+			borderWidth := float32(2)
+			// Top border
+			r.drawRect(offsetX, offsetY, paneWidth, borderWidth, borderColor, proj)
+			// Bottom border
+			r.drawRect(offsetX, offsetY+paneHeight-borderWidth, paneWidth, borderWidth, borderColor, proj)
+			// Left border
+			r.drawRect(offsetX, offsetY, borderWidth, paneHeight, borderColor, proj)
+			// Right border
+			r.drawRect(offsetX+paneWidth-borderWidth, offsetY, borderWidth, paneHeight, borderColor, proj)
+		}
+
+		// Render the pane's grid
+		showCursor := cursorVisible && i == activePaneIdx
+		r.renderGridAt(pane.Terminal.Grid, offsetX, offsetY, paneWidth, paneHeight, proj, showCursor)
 	}
 }
 
@@ -342,7 +682,7 @@ func (r *Renderer) renderTabBar(tm *tab.TabManager, width, height int, proj [16]
 	r.drawRect(r.tabBarWidth-2, 0, 2, float32(height), r.theme.Foreground, proj)
 
 	// Draw header
-	header := fmt.Sprintf("Raven %d/%d", tm.ActiveIndex()+1, tm.TabCount())
+	header := fmt.Sprintf("RT %d/%d", tm.ActiveIndex()+1, tm.TabCount())
 	r.drawText(10, r.cellHeight, header, r.theme.TabActive, proj)
 
 	// Draw tabs
@@ -361,11 +701,17 @@ func (r *Renderer) renderTabBar(tm *tab.TabManager, width, height int, proj [16]
 	}
 }
 
-// renderGrid renders the terminal grid
+// renderGrid renders the terminal grid (backward compatible wrapper)
 func (r *Renderer) renderGrid(g *grid.Grid, width, height int, proj [16]float32, cursorVisible bool) {
 	offsetX := r.tabBarWidth + 5
 	offsetY := r.paddingTop
+	availableWidth := float32(width) - r.tabBarWidth - 10
+	availableHeight := float32(height) - r.paddingTop - r.paddingBottom
+	r.renderGridAt(g, offsetX, offsetY, availableWidth, availableHeight, proj, cursorVisible)
+}
 
+// renderGridAt renders the terminal grid at a specific position
+func (r *Renderer) renderGridAt(g *grid.Grid, offsetX, offsetY, paneWidth, paneHeight float32, proj [16]float32, cursorVisible bool) {
 	cols := g.Cols
 	rows := g.Rows
 
@@ -375,6 +721,11 @@ func (r *Renderer) renderGrid(g *grid.Grid, width, height int, proj [16]float32,
 			cell := g.DisplayCell(col, row)
 			x := offsetX + float32(col)*r.cellWidth
 			y := offsetY + float32(row)*r.cellHeight
+
+			// Skip if outside pane bounds
+			if x+r.cellWidth > offsetX+paneWidth || y+r.cellHeight > offsetY+paneHeight {
+				continue
+			}
 
 			// Draw background if not default
 			bgColor := r.colorToRGBA(cell.Bg, true)
@@ -401,12 +752,16 @@ func (r *Renderer) renderGrid(g *grid.Grid, width, height int, proj [16]float32,
 		cursorCol, cursorRow := g.GetCursor()
 		cursorX := offsetX + float32(cursorCol)*r.cellWidth
 		cursorY := offsetY + float32(cursorRow)*r.cellHeight
-		r.drawRect(cursorX, cursorY, r.cellWidth, r.cellHeight, r.theme.Cursor, proj)
 
-		// Redraw character under cursor in inverse
-		cell := g.DisplayCell(cursorCol, cursorRow)
-		if cell.Char != ' ' && cell.Char != 0 {
-			r.drawChar(cursorX, cursorY+r.cellHeight, cell.Char, r.theme.Background, proj)
+		// Only draw cursor if within pane bounds
+		if cursorX+r.cellWidth <= offsetX+paneWidth && cursorY+r.cellHeight <= offsetY+paneHeight {
+			r.drawRect(cursorX, cursorY, r.cellWidth, r.cellHeight, r.theme.Cursor, proj)
+
+			// Redraw character under cursor in inverse
+			cell := g.DisplayCell(cursorCol, cursorRow)
+			if cell.Char != ' ' && cell.Char != 0 {
+				r.drawChar(cursorX, cursorY+r.cellHeight, cell.Char, r.theme.Background, proj)
+			}
 		}
 	}
 }

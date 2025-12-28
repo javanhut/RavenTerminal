@@ -6,6 +6,7 @@
 |------------|--------|
 | Ctrl+Q | Exit terminal |
 | Shift+Enter | Toggle fullscreen mode |
+| Ctrl+Shift+K | Show/hide keybindings help panel |
 
 ## Tab Management
 
@@ -15,6 +16,17 @@
 | Ctrl+Shift+X | Close current tab |
 | Ctrl+Tab | Next tab |
 | Ctrl+Shift+Tab | Previous tab |
+
+## Split Panes
+
+| Keybinding | Action |
+|------------|--------|
+| Ctrl+Shift+V | Split pane vertically (side by side) |
+| Ctrl+Shift+H | Split pane horizontally (stacked) |
+| Ctrl+Shift+W | Close current pane |
+| Shift+Tab | Cycle to next pane |
+| Ctrl+Shift+] | Focus next pane |
+| Ctrl+Shift+[ | Focus previous pane |
 
 ## Scrolling
 

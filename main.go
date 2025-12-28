@@ -77,6 +77,7 @@ func main() {
 	lastBlink := time.Now()
 	blinkInterval := 500 * time.Millisecond
 	lineBuf := &lineBuffer{}
+	showHelp := false
 
 	win.GLFW().SetKeyCallback(func(w *glfw.Window, key glfw.Key, scancode int, action glfw.Action, mods glfw.ModifierKey) {
 		if action == glfw.Release {
@@ -89,6 +90,35 @@ func main() {
 			return
 		}
 
+		// Handle help panel scrolling with arrow keys when help is open
+		if showHelp {
+			switch key {
+			case glfw.KeyUp:
+				renderer.ScrollHelpUp()
+				return
+			case glfw.KeyDown:
+				renderer.ScrollHelpDown()
+				return
+			case glfw.KeyPageUp:
+				for i := 0; i < 5; i++ {
+					renderer.ScrollHelpUp()
+				}
+				return
+			case glfw.KeyPageDown:
+				for i := 0; i < 5; i++ {
+					renderer.ScrollHelpDown()
+				}
+				return
+			case glfw.KeyHome:
+				renderer.ResetHelpScroll()
+				return
+			case glfw.KeyEscape:
+				showHelp = false
+				renderer.ResetHelpScroll()
+				return
+			}
+		}
+
 		appCursor := activeTab.Terminal.AppCursorKeys()
 		result := keybindings.TranslateKey(key, mods, appCursor)
 
@@ -96,6 +126,10 @@ func main() {
 		case keybindings.ActionExit:
 			win.SetShouldClose(true)
 		case keybindings.ActionInput:
+			// Don't process input when help is shown (except for closing it)
+			if showHelp {
+				return
+			}
 			// Check for Enter key (carriage return)
 			if len(result.Data) == 1 && result.Data[0] == '\r' {
 				line := lineBuf.getLine()
@@ -142,10 +176,35 @@ func main() {
 		case keybindings.ActionPrevTab:
 			lineBuf.clear()
 			tabManager.PrevTab()
+		case keybindings.ActionSplitVertical:
+			lineBuf.clear()
+			activeTab.SplitVertical()
+		case keybindings.ActionSplitHorizontal:
+			lineBuf.clear()
+			activeTab.SplitHorizontal()
+		case keybindings.ActionClosePane:
+			lineBuf.clear()
+			activeTab.ClosePane()
+		case keybindings.ActionNextPane:
+			lineBuf.clear()
+			activeTab.NextPane()
+		case keybindings.ActionPrevPane:
+			lineBuf.clear()
+			activeTab.PrevPane()
+		case keybindings.ActionShowHelp:
+			showHelp = !showHelp
+			if !showHelp {
+				renderer.ResetHelpScroll()
+			}
 		}
 	})
 
 	win.GLFW().SetCharCallback(func(w *glfw.Window, char rune) {
+		// Don't process char input when help is shown
+		if showHelp {
+			return
+		}
+
 		activeTab := tabManager.ActiveTab()
 		if activeTab == nil {
 			return
@@ -195,7 +254,7 @@ func main() {
 		// Render
 		width, height := win.GetFramebufferSize()
 		win.SetViewport(width, height)
-		renderer.Render(tabManager, width, height, cursorVisible)
+		renderer.RenderWithHelp(tabManager, width, height, cursorVisible, showHelp)
 
 		// Swap buffers and poll events
 		win.SwapBuffers()
