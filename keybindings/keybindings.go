@@ -32,6 +32,8 @@ const (
 	ActionZoomOut
 	ActionZoomReset
 	ActionOpenMenu
+	ActionCopy
+	ActionPaste
 )
 
 // KeyResult contains the result of processing a key
@@ -49,6 +51,12 @@ func TranslateKey(key glfw.Key, mods glfw.ModifierKey, appCursorMode bool) KeyRe
 	// Special key combinations
 	if ctrl && key == glfw.KeyQ {
 		return KeyResult{Action: ActionExit}
+	}
+	if ctrl && !shift && key == glfw.KeyC {
+		return KeyResult{Action: ActionCopy}
+	}
+	if ctrl && !shift && key == glfw.KeyP {
+		return KeyResult{Action: ActionPaste}
 	}
 
 	if ctrl && shift && key == glfw.KeyT {

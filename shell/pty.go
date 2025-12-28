@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -111,6 +112,8 @@ func NewPtySession(cols, rows uint16) (*PtySession, error) {
 		"HOME=" + currentUser.HomeDir,
 		"USER=" + currentUser.Username,
 		"SHELL=" + shell,
+		"COLUMNS=" + strconv.Itoa(int(cols)),
+		"LINES=" + strconv.Itoa(int(rows)),
 		"LANG=en_US.UTF-8",
 		"LC_ALL=en_US.UTF-8",
 		"XDG_RUNTIME_DIR=" + xdgRuntimeDir,

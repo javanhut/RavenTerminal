@@ -114,8 +114,7 @@ The scripts section allows you to customize how Raven Terminal detects project i
 [scripts]
 # Runs once when shell starts
 init = '''
-alias ls='ls --color=auto -p'
-alias ll='ls -la'
+export PATH="$HOME/.local/bin:$PATH"
 '''
 
 # Runs before each prompt (optional)
@@ -168,6 +167,7 @@ description = "Clean package cache"
 
 ```toml
 [aliases]
+ls = "ls --color=auto -p -C"
 ll = "ls -la"
 gs = "git status"
 gp = "git push"
@@ -193,7 +193,6 @@ show_vcs = true
 
 [scripts]
 init = '''
-alias ls='ls --color=auto -p'
 export PATH="$HOME/.local/bin:$PATH"
 '''
 

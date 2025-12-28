@@ -5,6 +5,8 @@
 | Keybinding | Action |
 |------------|--------|
 | Ctrl+Q | Exit terminal |
+| Ctrl+C | Copy visible screen |
+| Ctrl+P | Paste clipboard |
 | Shift+Enter | Toggle fullscreen mode |
 | Ctrl+Shift+K | Show/hide keybindings help panel |
 | Ctrl+Shift+P | Open settings menu |
@@ -67,6 +69,6 @@ F1-F12 are passed through to the running application.
 
 ## Modifier Keys
 
-- **Ctrl+letter**: Sends control character (Ctrl+C for interrupt, etc.)
+- **Ctrl+letter**: Sends control character (Ctrl+D for EOF, Ctrl+L for clear, etc.)
 - **Alt+letter**: Sends ESC prefix followed by the letter
 - **Shift+Tab**: Sends reverse tab sequence

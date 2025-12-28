@@ -74,9 +74,7 @@ func DefaultConfig() *Config {
 			ShowVCS:      true,
 		},
 		Scripts: ScriptsConfig{
-			Init: `# Raven Terminal init script
-alias ls='ls --color=auto -p'
-`,
+			Init:      "",
 			PrePrompt: "",
 			LanguageDetect: `# Detect project language
 [ -f go.mod ] && echo "Go" && return 0
@@ -107,7 +105,9 @@ echo "$_vcs"
 `,
 		},
 		Commands: []CustomCommand{},
-		Aliases:  map[string]string{},
+		Aliases: map[string]string{
+			"ls": "ls --color=auto -p -C",
+		},
 	}
 }
 

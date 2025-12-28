@@ -93,6 +93,8 @@ After installation, launch from:
 | Keybinding     | Action                  |
 |----------------|-------------------------|
 | Ctrl+Q         | Exit terminal           |
+| Ctrl+C         | Copy visible screen     |
+| Ctrl+P         | Paste clipboard         |
 | Shift+Enter    | Toggle fullscreen mode  |
 | Ctrl+Shift+K   | Show/hide help panel    |
 | Ctrl+Shift+P   | Open settings menu      |

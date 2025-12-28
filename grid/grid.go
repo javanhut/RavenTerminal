@@ -1,6 +1,9 @@
 package grid
 
-import "sync"
+import (
+	"strings"
+	"sync"
+)
 
 const (
 	MaxScrollback = 10000
@@ -365,7 +368,10 @@ func (g *Grid) GetScrollOffset() int {
 func (g *Grid) DisplayCell(col, row int) Cell {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
+	return g.displayCellLocked(col, row)
+}
 
+func (g *Grid) displayCellLocked(col, row int) Cell {
 	if g.scrollOffset == 0 {
 		if col < 0 || col >= g.Cols || row < 0 || row >= g.Rows {
 			return NewCell()
@@ -390,6 +396,29 @@ func (g *Grid) DisplayCell(col, row int) Cell {
 		return NewCell()
 	}
 	return g.cells[g.index(col, gridRow)]
+}
+
+// VisibleText returns the visible grid as plain text.
+func (g *Grid) VisibleText() string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	lines := make([]string, g.Rows)
+	for row := 0; row < g.Rows; row++ {
+		var b strings.Builder
+		b.Grow(g.Cols)
+		for col := 0; col < g.Cols; col++ {
+			cell := g.displayCellLocked(col, row)
+			ch := cell.Char
+			if ch == 0 {
+				ch = ' '
+			}
+			b.WriteRune(ch)
+		}
+		lines[row] = strings.TrimRight(b.String(), " ")
+	}
+
+	return strings.TrimRight(strings.Join(lines, "\n"), "\n")
 }
 
 // ClearAll clears the entire grid

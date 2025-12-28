@@ -217,6 +217,19 @@ func main() {
 			activeTab.Terminal.Grid.ScrollViewDown(1)
 		case keybindings.ActionToggleFullscreen:
 			win.ToggleFullscreen()
+		case keybindings.ActionCopy:
+			text := activeTab.Terminal.Grid.VisibleText()
+			if text != "" {
+				glfw.SetClipboardString(text)
+			}
+		case keybindings.ActionPaste:
+			clip := glfw.GetClipboardString()
+			if clip != "" {
+				clip = strings.ReplaceAll(clip, "\r\n", "\n")
+				clip = strings.ReplaceAll(clip, "\n", "\r")
+				activeTab.Write([]byte(clip))
+				activeTab.Terminal.Grid.ResetScrollOffset()
+			}
 		case keybindings.ActionNewTab:
 			lineBuf.clear()
 			tabManager.NewTab()

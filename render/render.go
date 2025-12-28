@@ -368,6 +368,8 @@ func (r *Renderer) getHelpSections() []struct {
 			title: "General",
 			bindings: [][2]string{
 				{"Ctrl+Q", "Exit terminal"},
+				{"Ctrl+C", "Copy visible screen"},
+				{"Ctrl+P", "Paste clipboard"},
 				{"Shift+Enter", "Toggle fullscreen"},
 				{"Ctrl+Shift+K", "Show/hide help"},
 				{"Ctrl+Shift+P", "Open settings"},
@@ -422,7 +424,6 @@ func (r *Renderer) getHelpSections() []struct {
 			bindings: [][2]string{
 				{"Ctrl+letter", "Control character"},
 				{"Alt+letter", "ESC + letter"},
-				{"Ctrl+C", "Interrupt"},
 				{"Ctrl+D", "End of input"},
 				{"Ctrl+Z", "Suspend process"},
 				{"Ctrl+L", "Clear screen"},
