@@ -29,9 +29,9 @@ const (
 
 // Color represents a terminal color
 type Color struct {
-	Type  ColorType
-	Index uint8     // For indexed colors (0-255)
-	R, G, B uint8   // For RGB colors
+	Type    ColorType
+	Index   uint8 // For indexed colors (0-255)
+	R, G, B uint8 // For RGB colors
 }
 
 // DefaultFg returns the default foreground color
@@ -86,6 +86,16 @@ type Grid struct {
 	// Saved cursor state
 	savedCursorCol int
 	savedCursorRow int
+
+	// Scroll region (1-based, inclusive)
+	scrollTop    int
+	scrollBottom int
+
+	// Last written character for REP sequence
+	lastChar  rune
+	lastFg    Color
+	lastBg    Color
+	lastFlags CellFlags
 }
 
 // NewGrid creates a new grid with the given dimensions
@@ -102,6 +112,9 @@ func NewGrid(cols, rows int) *Grid {
 		CursorRow:    0,
 		scrollback:   make([][]Cell, 0, MaxScrollback),
 		scrollOffset: 0,
+		scrollTop:    1,
+		scrollBottom: rows,
+		lastChar:     ' ',
 	}
 }
 
@@ -147,15 +160,48 @@ func (g *Grid) WriteChar(c rune, fg, bg Color, flags CellFlags) {
 		Flags: flags,
 	}
 	g.CursorCol++
+
+	// Save for REP sequence
+	g.lastChar = c
+	g.lastFg = fg
+	g.lastBg = bg
+	g.lastFlags = flags
 }
 
 // cursorNewline moves cursor to next line (internal, no lock)
 func (g *Grid) cursorNewline() {
 	g.CursorCol = 0
 	g.CursorRow++
-	if g.CursorRow >= g.Rows {
+	// Check if we're at the bottom of the scroll region
+	if g.CursorRow >= g.scrollBottom {
+		g.scrollUpRegion()
+		g.CursorRow = g.scrollBottom - 1
+	} else if g.CursorRow >= g.Rows {
 		g.scrollUpInternal()
 		g.CursorRow = g.Rows - 1
+	}
+}
+
+// scrollUpRegion scrolls only within the scroll region
+func (g *Grid) scrollUpRegion() {
+	if g.scrollTop == 1 && g.scrollBottom == g.Rows {
+		g.scrollUpInternal()
+		return
+	}
+
+	top := g.scrollTop - 1 // Convert to 0-based
+	bottom := g.scrollBottom - 1
+
+	// Shift rows up within region
+	for row := top; row < bottom; row++ {
+		for col := 0; col < g.Cols; col++ {
+			g.cells[g.index(col, row)] = g.cells[g.index(col, row+1)]
+		}
+	}
+
+	// Clear bottom row of region
+	for col := 0; col < g.Cols; col++ {
+		g.cells[g.index(col, bottom)] = NewCell()
 	}
 }
 
@@ -507,6 +553,10 @@ func (g *Grid) Resize(cols, rows int) {
 	g.Cols = cols
 	g.Rows = rows
 
+	// Reset scroll region to full screen
+	g.scrollTop = 1
+	g.scrollBottom = rows
+
 	// Clamp cursor
 	if g.CursorCol >= cols {
 		g.CursorCol = cols - 1
@@ -528,4 +578,58 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// EraseChars erases n characters at cursor without moving cursor
+func (g *Grid) EraseChars(n int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for i := 0; i < n && g.CursorCol+i < g.Cols; i++ {
+		g.cells[g.index(g.CursorCol+i, g.CursorRow)] = NewCell()
+	}
+}
+
+// RepeatChar repeats the last written character n times
+func (g *Grid) RepeatChar(n int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for i := 0; i < n; i++ {
+		if g.CursorCol >= g.Cols {
+			g.cursorNewline()
+		}
+		idx := g.index(g.CursorCol, g.CursorRow)
+		g.cells[idx] = Cell{
+			Char:  g.lastChar,
+			Fg:    g.lastFg,
+			Bg:    g.lastBg,
+			Flags: g.lastFlags,
+		}
+		g.CursorCol++
+	}
+}
+
+// SetScrollRegion sets the scrolling region (1-based, inclusive)
+func (g *Grid) SetScrollRegion(top, bottom int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if top < 1 {
+		top = 1
+	}
+	if bottom > g.Rows {
+		bottom = g.Rows
+	}
+	if top < bottom {
+		g.scrollTop = top
+		g.scrollBottom = bottom
+	}
+	// Move cursor to home position
+	g.CursorCol = 0
+	g.CursorRow = 0
+}
+
+// GetScrollRegion returns the current scroll region
+func (g *Grid) GetScrollRegion() (top, bottom int) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.scrollTop, g.scrollBottom
 }

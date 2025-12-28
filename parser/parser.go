@@ -15,6 +15,8 @@ const (
 	StateEscape
 	StateCSI
 	StateOSC
+	StateCharset
+	StateHash
 )
 
 // Terminal handles ANSI escape sequence parsing and state
@@ -31,6 +33,9 @@ type Terminal struct {
 	alternateScreen bool
 	savedMainGrid   *grid.Grid
 	mu              sync.Mutex
+	// UTF-8 decoding state
+	utf8Buf       []byte
+	utf8Remaining int
 }
 
 // NewTerminal creates a new terminal parser
@@ -66,11 +71,37 @@ func (t *Terminal) processByte(b byte) {
 		t.processCSI(b)
 	case StateOSC:
 		t.processOSC(b)
+	case StateCharset:
+		// Character set designation - consume the designator byte and ignore
+		t.state = StateGround
+	case StateHash:
+		// DEC special sequences like ESC # 8 (DECALN)
+		t.state = StateGround
 	}
 }
 
 // processGround handles bytes in ground state
 func (t *Terminal) processGround(b byte) {
+	// If we're in the middle of a UTF-8 sequence, continue it
+	if t.utf8Remaining > 0 {
+		if b&0xC0 == 0x80 { // Valid continuation byte
+			t.utf8Buf = append(t.utf8Buf, b)
+			t.utf8Remaining--
+			if t.utf8Remaining == 0 {
+				// Complete UTF-8 sequence - decode and write
+				r := decodeUTF8(t.utf8Buf)
+				t.Grid.WriteChar(r, t.currentFg, t.currentBg, t.currentFlags)
+				t.utf8Buf = nil
+			}
+		} else {
+			// Invalid continuation - discard and process this byte normally
+			t.utf8Buf = nil
+			t.utf8Remaining = 0
+			t.processGround(b)
+		}
+		return
+	}
+
 	switch b {
 	case 0x1b: // ESC
 		t.state = StateEscape
@@ -87,12 +118,49 @@ func (t *Terminal) processGround(b byte) {
 		t.Grid.CarriageReturn()
 	default:
 		if b >= 0x20 && b < 0x7f {
+			// ASCII printable character
 			t.Grid.WriteChar(rune(b), t.currentFg, t.currentBg, t.currentFlags)
-		} else if b >= 0x80 {
-			// UTF-8 handling - for now just write as-is
-			t.Grid.WriteChar(rune(b), t.currentFg, t.currentBg, t.currentFlags)
+		} else if b >= 0xC0 && b < 0xE0 {
+			// Start of 2-byte UTF-8 sequence
+			t.utf8Buf = []byte{b}
+			t.utf8Remaining = 1
+		} else if b >= 0xE0 && b < 0xF0 {
+			// Start of 3-byte UTF-8 sequence
+			t.utf8Buf = []byte{b}
+			t.utf8Remaining = 2
+		} else if b >= 0xF0 && b < 0xF8 {
+			// Start of 4-byte UTF-8 sequence
+			t.utf8Buf = []byte{b}
+			t.utf8Remaining = 3
+		}
+		// Ignore other bytes (control characters, invalid UTF-8 start bytes)
+	}
+}
+
+// decodeUTF8 decodes a UTF-8 byte sequence to a rune
+func decodeUTF8(buf []byte) rune {
+	if len(buf) == 0 {
+		return 0xFFFD // Replacement character
+	}
+
+	switch len(buf) {
+	case 1:
+		return rune(buf[0])
+	case 2:
+		if buf[0]&0xE0 == 0xC0 {
+			return rune(buf[0]&0x1F)<<6 | rune(buf[1]&0x3F)
+		}
+	case 3:
+		if buf[0]&0xF0 == 0xE0 {
+			return rune(buf[0]&0x0F)<<12 | rune(buf[1]&0x3F)<<6 | rune(buf[2]&0x3F)
+		}
+	case 4:
+		if buf[0]&0xF8 == 0xF0 {
+			return rune(buf[0]&0x07)<<18 | rune(buf[1]&0x3F)<<12 | rune(buf[2]&0x3F)<<6 | rune(buf[3]&0x3F)
 		}
 	}
+
+	return 0xFFFD // Replacement character for invalid sequences
 }
 
 // processEscape handles bytes in escape state
@@ -129,8 +197,14 @@ func (t *Terminal) processEscape(b byte) {
 		t.Grid.CarriageReturn()
 		t.Grid.Newline()
 		t.state = StateGround
-	case '(', ')', '*', '+': // Character set designation - ignore
+	case '(', ')', '*', '+': // Character set designation - need to consume next byte
+		t.state = StateCharset
+	case '=': // DECKPAM - Application keypad mode
 		t.state = StateGround
+	case '>': // DECKPNM - Normal keypad mode
+		t.state = StateGround
+	case '#': // DEC line drawing - need to consume next byte
+		t.state = StateHash
 	default:
 		t.state = StateGround
 	}
@@ -224,23 +298,34 @@ func (t *Terminal) executeCSI(final byte) {
 	case 'T': // SD - Scroll down
 		n := t.getParam(params, 0, 1)
 		t.Grid.ScrollDown(n)
+	case 'X': // ECH - Erase character (erase n chars at cursor without moving)
+		n := t.getParam(params, 0, 1)
+		t.Grid.EraseChars(n)
 	case 'd': // VPA - Vertical position absolute
 		n := t.getParam(params, 0, 1)
 		col, _ := t.Grid.GetCursor()
 		t.Grid.SetCursorPos(col+1, n)
+	case 'b': // REP - Repeat preceding character
+		n := t.getParam(params, 0, 1)
+		t.Grid.RepeatChar(n)
 	case 'm': // SGR - Select graphic rendition
 		t.executeSGR(params)
 	case 'h': // SM - Set mode
 		t.setMode(params, true)
 	case 'l': // RM - Reset mode
 		t.setMode(params, false)
-	case 'r': // DECSTBM - Set scrolling region (simplified - just ignore)
+	case 'r': // DECSTBM - Set scrolling region
+		top := t.getParam(params, 0, 1)
+		bottom := t.getParam(params, 1, t.Grid.Rows)
+		t.Grid.SetScrollRegion(top, bottom)
 	case 's': // SCP - Save cursor position
 		t.Grid.SaveCursor()
 	case 'u': // RCP - Restore cursor position
 		t.Grid.RestoreCursor()
 	case 'n': // DSR - Device status report (ignore for now)
 	case 'c': // DA - Device attributes (ignore for now)
+	case 't': // Window manipulation (ignore)
+	case 'q': // DECSCUSR - Set cursor style (ignore for now)
 	}
 }
 
