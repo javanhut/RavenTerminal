@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -332,10 +333,19 @@ func main() {
 			if settingsMenu.InputMode() {
 				return
 			}
-			if yoff > 0 {
-				settingsMenu.MoveUp()
-			} else if yoff < 0 {
-				settingsMenu.MoveDown()
+			if debugMenu {
+				log.Printf("menu: scroll yoff=%.2f input=%v title=%s", yoff, settingsMenu.InputMode(), settingsMenu.GetTitle())
+			}
+			steps := int(math.Abs(yoff))
+			if steps == 0 {
+				steps = 1
+			}
+			for i := 0; i < steps; i++ {
+				if yoff > 0 {
+					settingsMenu.MoveUp()
+				} else if yoff < 0 {
+					settingsMenu.MoveDown()
+				}
 			}
 			return
 		}

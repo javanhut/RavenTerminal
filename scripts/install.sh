@@ -61,6 +61,21 @@ print_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
 }
 
+warn_path_conflict() {
+    local expected_path="$1"
+    local found_path=""
+
+    if command -v "$APP_NAME" &> /dev/null; then
+        found_path="$(command -v "$APP_NAME")"
+    fi
+
+    if [ -n "$found_path" ] && [ "$found_path" != "$expected_path" ]; then
+        print_warning "PATH resolves $APP_NAME to $found_path"
+        print_warning "Expected: $expected_path"
+        echo "Run uninstall for the other install or adjust PATH."
+    fi
+}
+
 usage() {
     cat << EOF
 Usage: $(basename "$0") [OPTIONS]
@@ -395,9 +410,11 @@ main() {
     case $INSTALL_MODE in
         user)
             install_user
+            warn_path_conflict "$USER_BIN_DIR/$APP_NAME"
             ;;
         global)
             install_global
+            warn_path_conflict "$GLOBAL_BIN_DIR/$APP_NAME"
             ;;
     esac
     

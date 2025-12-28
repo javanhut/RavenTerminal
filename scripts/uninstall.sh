@@ -26,11 +26,14 @@ APP_NAME="raven-terminal"
 USER_BIN_DIR="$HOME/.local/bin"
 USER_APP_DIR="$HOME/.local/share/applications"
 USER_ICON_DIR="$HOME/.local/share/icons/hicolor/scalable/apps"
+USER_PIXMAP_DIR="$HOME/.local/share/pixmaps"
 USER_CONFIG_DIR="$HOME/.config/raven-terminal"
 
 GLOBAL_BIN_DIR="/usr/local/bin"
 GLOBAL_APP_DIR="/usr/share/applications"
 GLOBAL_ICON_DIR="/usr/share/icons/hicolor/scalable/apps"
+GLOBAL_PIXMAP_DIR="/usr/share/pixmaps"
+LEGACY_GLOBAL_BIN_DIR="/usr/bin"
 
 print_header() {
     echo -e "${BLUE}"
@@ -147,6 +150,7 @@ detect_installations() {
     
     # Check global installation
     if [ -f "$GLOBAL_BIN_DIR/$APP_NAME" ] || \
+       [ -f "$LEGACY_GLOBAL_BIN_DIR/$APP_NAME" ] || \
        [ -f "$GLOBAL_APP_DIR/$APP_NAME.desktop" ] || \
        [ -f "$GLOBAL_ICON_DIR/$APP_NAME.svg" ]; then
         found_global=true
@@ -260,6 +264,11 @@ uninstall_user() {
         ((removed++))
     fi
     
+    # Remove pixmap icon
+    if remove_file "$USER_PIXMAP_DIR/$APP_NAME.svg" false; then
+        ((removed++))
+    fi
+
     # Remove log directory
     if remove_dir "$HOME/.local/share/raven-terminal" false; then
         ((removed++))
@@ -302,6 +311,14 @@ uninstall_global() {
     if remove_file "$GLOBAL_BIN_DIR/raven-terminal-launcher" true; then
         ((removed++))
     fi
+
+    # Remove legacy binary locations
+    if remove_file "$LEGACY_GLOBAL_BIN_DIR/$APP_NAME" true; then
+        ((removed++))
+    fi
+    if remove_file "$LEGACY_GLOBAL_BIN_DIR/raven-terminal-launcher" true; then
+        ((removed++))
+    fi
     
     # Remove desktop file
     if remove_file "$GLOBAL_APP_DIR/$APP_NAME.desktop" true; then
@@ -310,6 +327,11 @@ uninstall_global() {
     
     # Remove icon
     if remove_file "$GLOBAL_ICON_DIR/$APP_NAME.svg" true; then
+        ((removed++))
+    fi
+
+    # Remove pixmap icon
+    if remove_file "$GLOBAL_PIXMAP_DIR/$APP_NAME.svg" true; then
         ((removed++))
     fi
     

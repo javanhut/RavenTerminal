@@ -33,9 +33,14 @@ fi
     echo "PATH=$PATH"
 } >> "$LOG_FILE"
 
-# Find the binary - check multiple locations
+# Find the binary - prefer the one next to this wrapper, then fall back.
+WRAPPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BINARY=""
-for loc in "$HOME/.local/bin/raven-terminal" "/usr/local/bin/raven-terminal" "/usr/bin/raven-terminal"; do
+for loc in \
+    "$WRAPPER_DIR/raven-terminal" \
+    "$HOME/.local/bin/raven-terminal" \
+    "/usr/local/bin/raven-terminal" \
+    "/usr/bin/raven-terminal"; do
     if [ -x "$loc" ]; then
         BINARY="$loc"
         break
