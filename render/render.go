@@ -743,67 +743,57 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 	r.drawText(contentX, footerY, footerText, [4]float32{0.5, 0.5, 0.5, 1.0}, proj)
 }
 
-// renderPanes renders all panes in a tab
+// renderPanes renders all panes in a tab using the nested layout system
 func (r *Renderer) renderPanes(t *tab.Tab, width, height int, proj [16]float32, cursorVisible bool) {
-	panes := t.GetPanes()
-	if len(panes) == 0 {
+	layouts := t.GetPaneLayouts()
+	if len(layouts) == 0 {
 		return
 	}
 
 	// Calculate available area (after tab bar)
+	baseX := r.tabBarWidth + 5
+	baseY := r.paddingTop
 	availableWidth := float32(width) - r.tabBarWidth - 5
 	availableHeight := float32(height) - r.paddingTop - r.paddingBottom
 
-	splitDir := t.GetSplitDirection()
-	activePaneIdx := t.ActivePaneIndex()
+	// Get active pane for highlighting
+	activePane := t.GetActivePane()
 	separatorWidth := float32(2)
 
-	for i, pane := range panes {
-		var offsetX, offsetY, paneWidth, paneHeight float32
+	// First pass: draw separators between panes
+	if len(layouts) > 1 {
+		r.drawPaneSeparators(layouts, baseX, baseY, availableWidth, availableHeight, separatorWidth, proj)
+	}
 
-		if len(panes) == 1 {
-			// Single pane - full size
-			offsetX = r.tabBarWidth + 5
-			offsetY = r.paddingTop
-			paneWidth = availableWidth
-			paneHeight = availableHeight
-		} else {
-			switch splitDir {
-			case tab.SplitVertical:
-				// Side by side
-				paneWidth = (availableWidth - separatorWidth*float32(len(panes)-1)) / float32(len(panes))
-				paneHeight = availableHeight
-				offsetX = r.tabBarWidth + 5 + float32(i)*(paneWidth+separatorWidth)
-				offsetY = r.paddingTop
+	// Second pass: render each pane
+	for _, layout := range layouts {
+		// Convert normalized coordinates to screen coordinates
+		offsetX := baseX + layout.X*availableWidth
+		offsetY := baseY + layout.Y*availableHeight
+		paneWidth := layout.Width * availableWidth
+		paneHeight := layout.Height * availableHeight
 
-				// Draw separator between panes
-				if i > 0 {
-					sepX := offsetX - separatorWidth
-					r.drawRect(sepX, offsetY, separatorWidth, paneHeight, r.theme.Foreground, proj)
-				}
-			case tab.SplitHorizontal:
-				// Stacked vertically
-				paneWidth = availableWidth
-				paneHeight = (availableHeight - separatorWidth*float32(len(panes)-1)) / float32(len(panes))
-				offsetX = r.tabBarWidth + 5
-				offsetY = r.paddingTop + float32(i)*(paneHeight+separatorWidth)
-
-				// Draw separator between panes
-				if i > 0 {
-					sepY := offsetY - separatorWidth
-					r.drawRect(offsetX, sepY, paneWidth, separatorWidth, r.theme.Foreground, proj)
-				}
-			default:
-				// Fallback to single pane behavior
-				offsetX = r.tabBarWidth + 5
-				offsetY = r.paddingTop
-				paneWidth = availableWidth
-				paneHeight = availableHeight
+		// Adjust for separators (small inset to avoid overlap)
+		if len(layouts) > 1 {
+			if layout.X > 0 {
+				offsetX += separatorWidth / 2
+				paneWidth -= separatorWidth / 2
+			}
+			if layout.X+layout.Width < 1.0 {
+				paneWidth -= separatorWidth / 2
+			}
+			if layout.Y > 0 {
+				offsetY += separatorWidth / 2
+				paneHeight -= separatorWidth / 2
+			}
+			if layout.Y+layout.Height < 1.0 {
+				paneHeight -= separatorWidth / 2
 			}
 		}
 
 		// Draw active pane indicator (subtle border)
-		if i == activePaneIdx && len(panes) > 1 {
+		isActive := layout.Pane == activePane
+		if isActive && len(layouts) > 1 {
 			borderColor := r.theme.TabActive
 			borderWidth := float32(2)
 			// Top border
@@ -817,9 +807,101 @@ func (r *Renderer) renderPanes(t *tab.Tab, width, height int, proj [16]float32, 
 		}
 
 		// Render the pane's grid
-		showCursor := cursorVisible && i == activePaneIdx
-		r.renderGridAt(pane.Terminal.Grid, offsetX, offsetY, paneWidth, paneHeight, proj, showCursor)
+		showCursor := cursorVisible && isActive
+		r.renderGridAt(layout.Pane.Terminal.Grid, offsetX, offsetY, paneWidth, paneHeight, proj, showCursor)
 	}
+}
+
+// drawPaneSeparators draws separator lines between panes
+func (r *Renderer) drawPaneSeparators(layouts []tab.PaneLayout, baseX, baseY, availableWidth, availableHeight, separatorWidth float32, proj [16]float32) {
+	// Track edges where separators should be drawn
+	type edge struct {
+		x1, y1, x2, y2 float32
+		vertical       bool
+	}
+	var edges []edge
+
+	// Find edges between panes
+	for i, layout1 := range layouts {
+		for j, layout2 := range layouts {
+			if i >= j {
+				continue
+			}
+
+			// Check for vertical separator (layout1 to the left of layout2)
+			if almostEqual(layout1.X+layout1.Width, layout2.X) {
+				// They share a vertical edge
+				overlapY1 := max32(layout1.Y, layout2.Y)
+				overlapY2 := min32(layout1.Y+layout1.Height, layout2.Y+layout2.Height)
+				if overlapY1 < overlapY2 {
+					edges = append(edges, edge{
+						x1:       layout1.X + layout1.Width,
+						y1:       overlapY1,
+						x2:       layout1.X + layout1.Width,
+						y2:       overlapY2,
+						vertical: true,
+					})
+				}
+			}
+
+			// Check for horizontal separator (layout1 above layout2)
+			if almostEqual(layout1.Y+layout1.Height, layout2.Y) {
+				// They share a horizontal edge
+				overlapX1 := max32(layout1.X, layout2.X)
+				overlapX2 := min32(layout1.X+layout1.Width, layout2.X+layout2.Width)
+				if overlapX1 < overlapX2 {
+					edges = append(edges, edge{
+						x1:       overlapX1,
+						y1:       layout1.Y + layout1.Height,
+						x2:       overlapX2,
+						y2:       layout1.Y + layout1.Height,
+						vertical: false,
+					})
+				}
+			}
+		}
+	}
+
+	// Draw the separator lines
+	for _, e := range edges {
+		if e.vertical {
+			x := baseX + e.x1*availableWidth - separatorWidth/2
+			y := baseY + e.y1*availableHeight
+			h := (e.y2 - e.y1) * availableHeight
+			r.drawRect(x, y, separatorWidth, h, r.theme.Foreground, proj)
+		} else {
+			x := baseX + e.x1*availableWidth
+			y := baseY + e.y1*availableHeight - separatorWidth/2
+			w := (e.x2 - e.x1) * availableWidth
+			r.drawRect(x, y, w, separatorWidth, r.theme.Foreground, proj)
+		}
+	}
+}
+
+// almostEqual checks if two floats are nearly equal
+func almostEqual(a, b float32) bool {
+	const epsilon = 0.001
+	diff := a - b
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff < epsilon
+}
+
+// max32 returns the larger of two float32 values
+func max32(a, b float32) float32 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// min32 returns the smaller of two float32 values
+func min32(a, b float32) float32 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // renderTabBar renders the left tab bar
