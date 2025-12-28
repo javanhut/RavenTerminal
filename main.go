@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"os"
 	"strings"
 	"time"
 
@@ -72,6 +73,8 @@ func main() {
 		log.Fatalf("Failed to create tab manager: %v", err)
 	}
 
+	debugMenu := os.Getenv("RAVEN_DEBUG_MENU") == "1"
+
 	// Set up input callbacks
 	var currentMods glfw.ModifierKey
 	cursorVisible := true
@@ -102,6 +105,15 @@ func main() {
 				settingsMenu.MoveDown()
 				return
 			case glfw.KeyEnter, glfw.KeyKPEnter:
+				if action == glfw.Repeat {
+					if debugMenu {
+						log.Printf("menu: key repeat ignored key=%v input=%v title=%s", key, settingsMenu.InputMode(), settingsMenu.GetTitle())
+					}
+					return
+				}
+				if debugMenu {
+					log.Printf("menu: key enter key=%v input=%v title=%s", key, settingsMenu.InputMode(), settingsMenu.GetTitle())
+				}
 				if settingsMenu.InputMode() {
 					settingsMenu.HandleEnter()
 				} else {
@@ -109,6 +121,9 @@ func main() {
 				}
 				return
 			case glfw.KeyEscape:
+				if debugMenu {
+					log.Printf("menu: key escape input=%v title=%s", settingsMenu.InputMode(), settingsMenu.GetTitle())
+				}
 				settingsMenu.HandleEscape()
 				return
 			case glfw.KeyBackspace:

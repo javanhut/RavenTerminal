@@ -1,8 +1,13 @@
 package menu
 
 import (
+	"log"
+	"os"
+
 	"github.com/javanhut/RavenTerminal/config"
 )
+
+var debugMenu = os.Getenv("RAVEN_DEBUG_MENU") == "1"
 
 // MenuState represents the current menu state
 type MenuState int
@@ -16,6 +21,8 @@ const (
 	MenuScripts
 	MenuCommands
 	MenuAliases
+	MenuConfirmCommand
+	MenuConfirmAlias
 )
 
 // InputState tracks what we're currently inputting
@@ -59,8 +66,10 @@ type Menu struct {
 	InputLabel  string
 
 	// Pending values for multi-step input
-	PendingName string
-	PendingCmd  string
+	PendingName     string
+	PendingCmd      string
+	PendingDesc     string
+	PendingAliasCmd string
 
 	// Edit tracking
 	EditingIndex int    // -1 for new, >= 0 for existing
@@ -92,6 +101,7 @@ func (m *Menu) Open() {
 	m.InputState = InputNone
 	m.StatusMessage = ""
 	m.buildMainMenu()
+	m.debugf("open state=%s", m.stateName())
 }
 
 // Close closes the menu
@@ -100,6 +110,7 @@ func (m *Menu) Close() {
 	m.InputActive = false
 	m.InputState = InputNone
 	m.StatusMessage = ""
+	m.debugf("close")
 }
 
 // IsOpen returns true if the menu is open
@@ -242,17 +253,50 @@ func (m *Menu) buildAliasesMenu() {
 	m.Items = append(m.Items, MenuItem{Label: "Back"})
 }
 
+// buildCommandConfirmMenu builds the command confirmation menu
+func (m *Menu) buildCommandConfirmMenu() {
+	label := "Save Command"
+	if m.EditingIndex >= 0 {
+		label = "Save Changes"
+	}
+	m.Items = []MenuItem{
+		{Label: label, Value: "save"},
+		{Label: "Cancel", Value: "cancel"},
+		{Label: ""},
+		{Label: "Name: " + m.PendingName, Disabled: true},
+		{Label: "Command: " + m.PendingCmd, Disabled: true},
+	}
+	if m.PendingDesc != "" {
+		m.Items = append(m.Items, MenuItem{Label: "Description: " + m.PendingDesc, Disabled: true})
+	}
+}
+
+// buildAliasConfirmMenu builds the alias confirmation menu
+func (m *Menu) buildAliasConfirmMenu() {
+	label := "Save Alias"
+	if m.EditingName != "" {
+		label = "Save Changes"
+	}
+	m.Items = []MenuItem{
+		{Label: label, Value: "save"},
+		{Label: "Cancel", Value: "cancel"},
+		{Label: ""},
+		{Label: "Alias: " + m.PendingName, Disabled: true},
+		{Label: "Command: " + m.PendingAliasCmd, Disabled: true},
+	}
+}
+
 // MoveUp moves selection up
 func (m *Menu) MoveUp() {
 	if m.InputActive {
 		return
 	}
-	for {
+	for i := 0; i < len(m.Items); i++ {
 		m.SelectedIndex--
 		if m.SelectedIndex < 0 {
 			m.SelectedIndex = len(m.Items) - 1
 		}
-		if m.Items[m.SelectedIndex].Label != "" {
+		if m.isNavigable(m.SelectedIndex) {
 			break
 		}
 	}
@@ -264,12 +308,12 @@ func (m *Menu) MoveDown() {
 	if m.InputActive {
 		return
 	}
-	for {
+	for i := 0; i < len(m.Items); i++ {
 		m.SelectedIndex++
 		if m.SelectedIndex >= len(m.Items) {
 			m.SelectedIndex = 0
 		}
-		if m.Items[m.SelectedIndex].Label != "" {
+		if m.isNavigable(m.SelectedIndex) {
 			break
 		}
 	}
@@ -292,10 +336,11 @@ func (m *Menu) Select() {
 		return
 	}
 
-	item := m.Items[m.SelectedIndex]
-	if item.Label == "" {
+	if !m.isSelectable(m.SelectedIndex) {
 		return
 	}
+	item := m.Items[m.SelectedIndex]
+	m.debugf("select state=%s index=%d label=%q value=%q", m.stateName(), m.SelectedIndex, item.Label, item.Value)
 
 	switch m.State {
 	case MenuMain:
@@ -312,6 +357,10 @@ func (m *Menu) Select() {
 		m.handleCommandsSelect(item)
 	case MenuAliases:
 		m.handleAliasesSelect(item)
+	case MenuConfirmCommand:
+		m.handleCommandConfirmSelect()
+	case MenuConfirmAlias:
+		m.handleAliasConfirmSelect()
 	}
 }
 
@@ -346,9 +395,7 @@ func (m *Menu) handleMainSelect() {
 		m.SelectedIndex = 0
 		m.buildAliasesMenu()
 	case 8: // Save and Close
-		if err := m.Config.Save(); err != nil {
-			m.StatusMessage = "Error: " + err.Error()
-		} else {
+		if m.saveConfig() {
 			m.Close()
 		}
 	case 9: // Cancel
@@ -494,10 +541,12 @@ func (m *Menu) HandleEnter() bool {
 
 	value := m.InputBuffer
 	m.InputActive = false
+	m.debugf("input enter state=%s input_state=%s value=%q", m.stateName(), m.inputStateName(), value)
 
 	switch m.InputState {
 	case InputCommandName:
 		if value == "" {
+			m.InputState = InputNone
 			m.buildCommandsMenu()
 			return false
 		}
@@ -510,6 +559,7 @@ func (m *Menu) HandleEnter() bool {
 
 	case InputCommandValue:
 		if value == "" {
+			m.InputState = InputNone
 			m.buildCommandsMenu()
 			return false
 		}
@@ -521,24 +571,17 @@ func (m *Menu) HandleEnter() bool {
 		m.startInputWithValue(InputCommandDesc, "Description (optional):", initialDesc)
 
 	case InputCommandDesc:
-		if m.EditingIndex >= 0 {
-			// Update existing
-			m.Config.Commands[m.EditingIndex].Name = m.PendingName
-			m.Config.Commands[m.EditingIndex].Command = m.PendingCmd
-			m.Config.Commands[m.EditingIndex].Description = value
-			m.StatusMessage = "Command updated"
-		} else {
-			// Add new
-			m.Config.AddCustomCommand(m.PendingName, m.PendingCmd, value)
-			m.StatusMessage = "Command added"
-		}
-		m.PendingName = ""
-		m.PendingCmd = ""
-		m.EditingIndex = -1
-		m.buildCommandsMenu()
+		m.PendingDesc = value
+		m.State = MenuConfirmCommand
+		m.SelectedIndex = 0
+		m.ScrollOffset = 0
+		m.buildCommandConfirmMenu()
+		m.SelectedIndex = m.firstSelectableIndex()
+		m.debugf("confirm command name=%q cmd=%q desc=%q", m.PendingName, m.PendingCmd, m.PendingDesc)
 
 	case InputAliasName:
 		if value == "" {
+			m.InputState = InputNone
 			m.buildAliasesMenu()
 			return false
 		}
@@ -551,19 +594,17 @@ func (m *Menu) HandleEnter() bool {
 
 	case InputAliasValue:
 		if value == "" {
+			m.InputState = InputNone
 			m.buildAliasesMenu()
 			return false
 		}
-		// If editing, remove old alias first
-		if m.EditingName != "" && m.EditingName != m.PendingName {
-			delete(m.Config.Aliases, m.EditingName)
-		}
-		m.Config.SetAlias(m.PendingName, value)
-		m.StatusMessage = "Alias saved"
-		m.PendingName = ""
-		m.EditingName = ""
-		m.EditingIndex = -1
-		m.buildAliasesMenu()
+		m.PendingAliasCmd = value
+		m.State = MenuConfirmAlias
+		m.SelectedIndex = 0
+		m.ScrollOffset = 0
+		m.buildAliasConfirmMenu()
+		m.SelectedIndex = m.firstSelectableIndex()
+		m.debugf("confirm alias name=%q cmd=%q", m.PendingName, m.PendingAliasCmd)
 
 	case InputScriptInit:
 		m.Config.Scripts.Init = unescapeNewlines(value)
@@ -586,7 +627,9 @@ func (m *Menu) HandleEnter() bool {
 		m.buildScriptsMenu()
 	}
 
-	m.InputState = InputNone
+	if !m.InputActive {
+		m.InputState = InputNone
+	}
 	return false
 }
 
@@ -596,6 +639,7 @@ func (m *Menu) HandleEscape() {
 		m.InputActive = false
 		m.InputState = InputNone
 		m.InputBuffer = ""
+		m.debugf("escape input state=%s", m.stateName())
 		// Rebuild current menu
 		switch m.State {
 		case MenuCommands:
@@ -607,6 +651,7 @@ func (m *Menu) HandleEscape() {
 		}
 		return
 	}
+	m.debugf("escape state=%s", m.stateName())
 	m.goBack()
 }
 
@@ -621,7 +666,9 @@ func (m *Menu) HandleDelete() {
 		if m.SelectedIndex > 0 && m.SelectedIndex <= len(m.Config.Commands) {
 			idx := m.SelectedIndex - 1 // Offset for "Add New" item
 			m.Config.RemoveCustomCommand(idx)
-			m.StatusMessage = "Command deleted"
+			if m.saveConfig() {
+				m.StatusMessage = "Command deleted"
+			}
 			m.buildCommandsMenu()
 			if m.SelectedIndex >= len(m.Items) {
 				m.SelectedIndex = len(m.Items) - 1
@@ -632,7 +679,9 @@ func (m *Menu) HandleDelete() {
 			item := m.Items[m.SelectedIndex]
 			if item.Value != "" {
 				m.Config.RemoveAlias(item.Value)
-				m.StatusMessage = "Alias deleted"
+				if m.saveConfig() {
+					m.StatusMessage = "Alias deleted"
+				}
 				m.buildAliasesMenu()
 				if m.SelectedIndex >= len(m.Items) {
 					m.SelectedIndex = len(m.Items) - 1
@@ -650,6 +699,21 @@ func (m *Menu) goBack() {
 		m.SelectedIndex = 0
 		m.ScrollOffset = 0
 		m.buildMainMenu()
+		m.debugf("go back to main")
+	case MenuConfirmCommand:
+		m.clearPendingCommand()
+		m.State = MenuCommands
+		m.SelectedIndex = 0
+		m.ScrollOffset = 0
+		m.buildCommandsMenu()
+		m.debugf("go back to commands")
+	case MenuConfirmAlias:
+		m.clearPendingAlias()
+		m.State = MenuAliases
+		m.SelectedIndex = 0
+		m.ScrollOffset = 0
+		m.buildAliasesMenu()
+		m.debugf("go back to aliases")
 	default:
 		m.Close()
 	}
@@ -672,12 +736,184 @@ func (m *Menu) GetTitle() string {
 		return "Commands"
 	case MenuAliases:
 		return "Aliases"
+	case MenuConfirmCommand:
+		return "Confirm Command"
+	case MenuConfirmAlias:
+		return "Confirm Alias"
 	default:
 		return "Settings"
 	}
 }
 
+func (m *Menu) handleCommandConfirmSelect() {
+	item := m.Items[m.SelectedIndex]
+	m.debugf("confirm command select value=%q", item.Value)
+	switch item.Value {
+	case "save":
+		if m.EditingIndex >= 0 {
+			m.Config.Commands[m.EditingIndex].Name = m.PendingName
+			m.Config.Commands[m.EditingIndex].Command = m.PendingCmd
+			m.Config.Commands[m.EditingIndex].Description = m.PendingDesc
+			if m.saveConfig() {
+				m.StatusMessage = "Command updated"
+			}
+		} else {
+			m.Config.AddCustomCommand(m.PendingName, m.PendingCmd, m.PendingDesc)
+			if m.saveConfig() {
+				m.StatusMessage = "Command added"
+			}
+		}
+		m.clearPendingCommand()
+		m.State = MenuCommands
+		m.SelectedIndex = 0
+		m.ScrollOffset = 0
+		m.buildCommandsMenu()
+	case "cancel":
+		m.clearPendingCommand()
+		m.State = MenuCommands
+		m.SelectedIndex = 0
+		m.ScrollOffset = 0
+		m.buildCommandsMenu()
+	}
+}
+
+func (m *Menu) handleAliasConfirmSelect() {
+	item := m.Items[m.SelectedIndex]
+	m.debugf("confirm alias select value=%q", item.Value)
+	switch item.Value {
+	case "save":
+		if m.EditingName != "" && m.EditingName != m.PendingName {
+			delete(m.Config.Aliases, m.EditingName)
+		}
+		m.Config.SetAlias(m.PendingName, m.PendingAliasCmd)
+		if m.saveConfig() {
+			m.StatusMessage = "Alias saved"
+		}
+		m.clearPendingAlias()
+		m.State = MenuAliases
+		m.SelectedIndex = 0
+		m.ScrollOffset = 0
+		m.buildAliasesMenu()
+	case "cancel":
+		m.clearPendingAlias()
+		m.State = MenuAliases
+		m.SelectedIndex = 0
+		m.ScrollOffset = 0
+		m.buildAliasesMenu()
+	}
+}
+
+func (m *Menu) clearPendingCommand() {
+	m.PendingName = ""
+	m.PendingCmd = ""
+	m.PendingDesc = ""
+	m.EditingIndex = -1
+}
+
+func (m *Menu) clearPendingAlias() {
+	m.PendingName = ""
+	m.PendingAliasCmd = ""
+	m.EditingName = ""
+	m.EditingIndex = -1
+}
+
+func (m *Menu) saveConfig() bool {
+	if err := m.Config.Save(); err != nil {
+		m.StatusMessage = "Error: " + err.Error()
+		m.debugf("save error: %v", err)
+		return false
+	}
+	m.debugf("save ok")
+	return true
+}
+
 // Helper functions
+
+func (m *Menu) isSelectable(index int) bool {
+	if index < 0 || index >= len(m.Items) {
+		return false
+	}
+	item := m.Items[index]
+	return item.Label != "" && !item.Disabled
+}
+
+func (m *Menu) isNavigable(index int) bool {
+	if index < 0 || index >= len(m.Items) {
+		return false
+	}
+	item := m.Items[index]
+	return item.Label != ""
+}
+
+func (m *Menu) firstSelectableIndex() int {
+	for i := range m.Items {
+		if m.isSelectable(i) {
+			return i
+		}
+	}
+	return 0
+}
+
+func (m *Menu) debugf(format string, args ...interface{}) {
+	if !debugMenu {
+		return
+	}
+	log.Printf("menu: "+format, args...)
+}
+
+func (m *Menu) stateName() string {
+	switch m.State {
+	case MenuClosed:
+		return "closed"
+	case MenuMain:
+		return "main"
+	case MenuShellSelect:
+		return "shell"
+	case MenuPromptSettings:
+		return "prompt_settings"
+	case MenuPromptStyle:
+		return "prompt_style"
+	case MenuScripts:
+		return "scripts"
+	case MenuCommands:
+		return "commands"
+	case MenuAliases:
+		return "aliases"
+	case MenuConfirmCommand:
+		return "confirm_command"
+	case MenuConfirmAlias:
+		return "confirm_alias"
+	default:
+		return "unknown"
+	}
+}
+
+func (m *Menu) inputStateName() string {
+	switch m.InputState {
+	case InputNone:
+		return "none"
+	case InputCommandName:
+		return "command_name"
+	case InputCommandValue:
+		return "command_value"
+	case InputCommandDesc:
+		return "command_desc"
+	case InputAliasName:
+		return "alias_name"
+	case InputAliasValue:
+		return "alias_value"
+	case InputScriptInit:
+		return "script_init"
+	case InputScriptPrePrompt:
+		return "script_pre_prompt"
+	case InputScriptLangDetect:
+		return "script_lang_detect"
+	case InputScriptVCSDetect:
+		return "script_vcs_detect"
+	default:
+		return "unknown"
+	}
+}
 
 func itoa(i int) string {
 	if i == 0 {
