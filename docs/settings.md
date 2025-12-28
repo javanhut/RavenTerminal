@@ -9,80 +9,191 @@ Press `Ctrl+Shift+P` to open the settings menu.
 | Key | Action |
 |-----|--------|
 | Up/Down Arrow | Navigate menu items |
-| Enter | Select item / Confirm input |
+| Enter | Select item / Confirm input / Toggle option |
 | Escape | Go back / Cancel input / Close menu |
 | Delete | Delete selected command or alias |
 
+## Configuration File
+
+Settings are stored in TOML format at `~/.config/raven-terminal/config.toml`.
+
+On first run, a default configuration is created automatically.
+
 ## Configuration Options
 
-### Shell Selection
+### Shell Settings
 
-Select your preferred shell from the list of available shells detected on your system. The shell selection takes effect when you open a new tab.
+```toml
+[shell]
+path = ""           # Shell path (empty = system default)
+source_rc = true    # Whether to source .bashrc/.zshrc etc.
 
-Available shells are detected from common locations:
-- `/bin/bash`, `/usr/bin/bash`
-- `/bin/zsh`, `/usr/bin/zsh`
-- `/bin/fish`, `/usr/bin/fish`
-- `/bin/sh`, `/usr/bin/sh`
-- `/bin/dash`, `/usr/bin/dash`
-- `/bin/tcsh`, `/usr/bin/tcsh`
-- `/bin/ksh`, `/usr/bin/ksh`
+[shell.env]         # Additional environment variables
+# MY_VAR = "value"
+```
+
+- **path**: Specify a shell path like `/usr/bin/zsh` or leave empty for system default
+- **source_rc**: When `true`, sources your shell's rc files (.bashrc, .zshrc, etc.)
+
+### Prompt Settings
+
+```toml
+[prompt]
+style = "full"          # "minimal", "simple", "full", or "custom"
+show_path = true        # Show current directory
+show_username = true    # Show username
+show_hostname = true    # Show hostname
+show_language = true    # Show detected programming language
+show_vcs = true         # Show VCS info (Git/Ivaldi)
+custom_script = ""      # Custom prompt script (for style = "custom")
+```
+
+#### Prompt Styles
+
+| Style | Description |
+|-------|-------------|
+| minimal | Just `>` |
+| simple | Path and `>` |
+| full | Path, language, VCS, username, hostname |
+| custom | Uses your custom_script |
+
+### Scripts Configuration
+
+The scripts section allows you to customize how Raven Terminal detects project information:
+
+```toml
+[scripts]
+# Runs once when shell starts
+init = '''
+alias ls='ls --color=auto -p'
+alias ll='ls -la'
+'''
+
+# Runs before each prompt (optional)
+pre_prompt = ""
+
+# Language detection script (should echo the result)
+language_detect = '''
+[ -f go.mod ] && echo "Go" && return 0
+[ -f Cargo.toml ] && echo "Rust" && return 0
+[ -f package.json ] && echo "JavaScript" && return 0
+[ -f pyproject.toml ] && echo "Python" && return 0
+[ -f requirements.txt ] && echo "Python" && return 0
+[ -f Gemfile ] && echo "Ruby" && return 0
+[ -f pom.xml ] && echo "Java" && return 0
+[ -f CMakeLists.txt ] && echo "C/C++" && return 0
+ls *.crl >/dev/null 2>&1 && echo "Carrion" && return 0
+echo "None"
+'''
+
+# VCS detection script (should echo the result)
+vcs_detect = '''
+_vcs=""
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    _branch=$(git branch --show-current 2>/dev/null || echo "?")
+    _vcs="Git($_branch)"
+fi
+if [ -d .ivaldi ] || [ -f .ivaldi ]; then
+    [ -n "$_vcs" ] && _vcs="$_vcs+Ivaldi" || _vcs="Ivaldi"
+fi
+[ -z "$_vcs" ] && _vcs="None"
+echo "$_vcs"
+'''
+```
 
 ### Custom Commands
 
-Add frequently used commands with a name and optional description. Custom commands can be quickly accessed and executed.
+```toml
+[[commands]]
+name = "update"
+command = "sudo pacman -Syu"
+description = "Update system packages"
 
-To add a command:
-1. Select "Custom Commands" from the main menu
-2. Select "+ Add New Command"
-3. Enter a name for the command
-4. Enter the command to execute
-5. Optionally enter a description
-
-To edit or delete a command:
-1. Select the command from the list
-2. Choose to edit name, command, description, or delete
+[[commands]]
+name = "clean"
+command = "sudo pacman -Sc"
+description = "Clean package cache"
+```
 
 ### Aliases
 
-Create shell aliases for shorter command invocations.
-
-To add an alias:
-1. Select "Aliases" from the main menu
-2. Select "+ Add New Alias"
-3. Enter the alias name
-4. Enter the command it expands to
-
-To edit or delete an alias:
-1. Select the alias from the list
-2. Choose to edit the command or delete the alias
-
-## Configuration File
-
-Settings are stored in `~/.config/raven-terminal/config.json`.
-
-Example configuration:
-```json
-{
-  "shell": "/usr/bin/zsh",
-  "custom_commands": [
-    {
-      "name": "update",
-      "command": "sudo apt update && sudo apt upgrade -y",
-      "description": "Update system packages"
-    }
-  ],
-  "aliases": {
-    "ll": "ls -la",
-    "gs": "git status"
-  }
-}
+```toml
+[aliases]
+ll = "ls -la"
+gs = "git status"
+gp = "git push"
 ```
 
-## Saving Changes
+## Example Configuration
 
-- Select "Save and Close" to save your changes and close the menu
-- Select "Cancel" to discard changes and close the menu
-- Press Escape to go back to the previous menu level
+```toml
+[shell]
+path = "/usr/bin/zsh"
+source_rc = true
 
-Changes to shell selection require opening a new tab to take effect.
+[shell.env]
+EDITOR = "nvim"
+
+[prompt]
+style = "full"
+show_path = true
+show_username = true
+show_hostname = true
+show_language = true
+show_vcs = true
+
+[scripts]
+init = '''
+alias ls='ls --color=auto -p'
+export PATH="$HOME/.local/bin:$PATH"
+'''
+
+language_detect = '''
+[ -f go.mod ] && echo "Go" && return 0
+[ -f Cargo.toml ] && echo "Rust" && return 0
+[ -f package.json ] && echo "JavaScript" && return 0
+echo "None"
+'''
+
+vcs_detect = '''
+_vcs=""
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 && _vcs="Git($(git branch --show-current 2>/dev/null))"
+[ -d .ivaldi ] && { [ -n "$_vcs" ] && _vcs="$_vcs+Ivaldi" || _vcs="Ivaldi"; }
+[ -z "$_vcs" ] && _vcs="None"
+echo "$_vcs"
+'''
+
+[[commands]]
+name = "dev"
+command = "cd ~/Development"
+description = "Go to dev folder"
+
+[aliases]
+ll = "ls -la"
+gs = "git status"
+```
+
+## Generated Scripts
+
+Raven Terminal generates an init script at `~/.config/raven-terminal/scripts/init.sh` based on your configuration. This script is automatically sourced when you open a new terminal tab.
+
+The generated script includes:
+- Your custom init script
+- Language detection function (`__raven_detect_lang`)
+- VCS detection function (`__raven_detect_vcs`)
+- Prompt function (`__raven_prompt`)
+- Your aliases
+
+## Applying Changes
+
+Most settings require opening a new tab to take effect. The status message will indicate when this is needed.
+
+To apply changes immediately to the init script:
+1. Save your changes in the menu
+2. Open a new tab
+
+## Migrating from Other Terminals
+
+Since `source_rc = true` by default, your existing `.bashrc` or `.zshrc` will be sourced automatically. Raven Terminal adds its own prompt on top of your existing configuration.
+
+To use only Raven Terminal's prompt, set `source_rc = false` and configure everything in the TOML file.

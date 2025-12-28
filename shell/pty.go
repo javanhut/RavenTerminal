@@ -13,22 +13,6 @@ import (
 	"github.com/javanhut/RavenTerminal/config"
 )
 
-// getDistroName reads the distribution name from /etc/os-release
-func getDistroName() string {
-	data, err := os.ReadFile("/etc/os-release")
-	if err != nil {
-		return "linux"
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, "ID=") {
-			id := strings.TrimPrefix(line, "ID=")
-			id = strings.Trim(id, "\"")
-			return id
-		}
-	}
-	return "linux"
-}
-
 // PtySession manages a pseudo-terminal connection to a shell
 type PtySession struct {
 	cmd      *exec.Cmd
@@ -40,55 +24,126 @@ type PtySession struct {
 
 // NewPtySession creates a new PTY session with a login shell
 func NewPtySession(cols, rows uint16) (*PtySession, error) {
-	shell := findShellFromConfig()
+	// Load config
+	cfg, err := config.Load()
+	if err != nil {
+		cfg = config.DefaultConfig()
+	}
 
-	// Get user info from system, not environment
+	// Get shell path
+	shell := findShell(cfg)
+
+	// Get user info
 	currentUser, err := user.Current()
 	if err != nil {
 		return nil, err
 	}
 
-	// Run without user profiles/rc so our PS1 and clean env stay in effect
-	cmd := exec.Command(shell, "--noprofile", "--norc")
+	// Determine shell type
+	shellBase := shell
+	if idx := strings.LastIndex(shell, "/"); idx >= 0 {
+		shellBase = shell[idx+1:]
+	}
 
-	// Create new session - critical for independence from parent terminal
+	// Write the init script
+	initScriptPath, err := cfg.WriteInitScript()
+	if err != nil {
+		// Non-fatal, continue without init script
+		initScriptPath = ""
+	}
+
+	// Build shell command based on config
+	var cmd *exec.Cmd
+	if cfg.Shell.SourceRC {
+		// Source user's rc files - run as interactive login shell
+		switch shellBase {
+		case "bash":
+			if initScriptPath != "" {
+				// Use --rcfile to source our init script (which can source .bashrc)
+				cmd = exec.Command(shell, "--rcfile", initScriptPath)
+			} else {
+				// Fall back to interactive shell
+				cmd = exec.Command(shell, "-i")
+			}
+		case "zsh":
+			// Zsh will source .zshrc automatically
+			cmd = exec.Command(shell, "-i")
+		case "fish":
+			cmd = exec.Command(shell, "-i")
+		default:
+			cmd = exec.Command(shell, "-i")
+		}
+	} else {
+		// Don't source rc files
+		switch shellBase {
+		case "bash":
+			if initScriptPath != "" {
+				cmd = exec.Command(shell, "--noprofile", "--rcfile", initScriptPath)
+			} else {
+				cmd = exec.Command(shell, "--noprofile", "--norc", "-i")
+			}
+		case "zsh":
+			cmd = exec.Command(shell, "--no-rcs", "-i")
+		case "fish":
+			cmd = exec.Command(shell, "--no-config", "-i")
+		default:
+			cmd = exec.Command(shell, "-i")
+		}
+	}
+
+	// Create new session
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setsid: true,
 	}
 
-	// Get distro name for prompt
-	distro := getDistroName()
-
-	// Custom PS1: friendly two-line prompt with basic system info and ASCII-only symbols.
-	// The path is trimmed to avoid wrapping: show ~, and if longer than 50 chars, keep the tail with an ellipsis.
-	ps1 := "\\[\\e[0;36m\\]$(p=$PWD; home=$HOME; case \"$p\" in \"$home\"*) p=\"~${p#$home}\";; esac; max=50; if [ ${#p} -gt $max ]; then p=\"...${p: -$max}\"; fi; printf %s \"$p\")/\\[\\e[0m\\] PackageManager: \\[\\e[0;33m\\]$(if [ -f go.mod ]; then echo \"Go $(go version 2>/dev/null | awk '{print $3}')\"; elif [ -f Cargo.toml ]; then echo \"Cargo $(cargo --version 2>/dev/null | awk '{print $2}')\"; elif [ -f package.json ]; then echo \"Node $(node --version 2>/dev/null)\"; elif [ -f pyproject.toml ] || [ -f requirements.txt ] || [ -f Pipfile ]; then echo \"Python $(python3 --version 2>/dev/null | awk '{print $2}')\"; elif compgen -G \"*.cpp\" >/dev/null || compgen -G \"*.cc\" >/dev/null || compgen -G \"*.cxx\" >/dev/null; then echo \"C++ $(c++ --version 2>/dev/null | head -n1 | awk '{print $NF}')\"; elif compgen -G \"*.crl\" >/dev/null; then echo \"Carrion\"; else echo \"None\"; fi)\\[\\e[0m\\]   VCS: \\[\\e[0;32m\\]$(if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then echo \"Git\"; elif [ -e .ivaldi ]; then echo \"Ivaldi\"; else echo \"None\"; fi)\\[\\e[0m\\]\n[\\u@" + distro + "] > "
-
-	// XDG runtime directory (required for Wayland apps like vem)
+	// XDG runtime directory
 	xdgRuntimeDir := os.Getenv("XDG_RUNTIME_DIR")
 	if xdgRuntimeDir == "" {
 		xdgRuntimeDir = "/run/user/" + currentUser.Uid
 	}
 
-	// Clean environment - don't inherit from parent terminal
-	cmd.Env = []string{
-		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+	// Build environment
+	env := []string{
+		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:" + os.Getenv("PATH"),
 		"TERM=xterm-256color",
 		"COLORTERM=truecolor",
 		"RAVEN_TERMINAL=1",
-		"PROMPT_COMMAND=if [ -z \"$__RAVEN_LS_DEFINED\" ]; then __RAVEN_LS_DEFINED=1; alias ls='ls --color=auto -p'; fi",
-		"LS_COLORS=di=01;34:fi=0:ln=01;36:ex=01;32:*.crl=01;35",
 		"HOME=" + currentUser.HomeDir,
 		"USER=" + currentUser.Username,
 		"SHELL=" + shell,
 		"LANG=en_US.UTF-8",
 		"LC_ALL=en_US.UTF-8",
-		"PS1=" + ps1,
 		"XDG_RUNTIME_DIR=" + xdgRuntimeDir,
-		"XDG_SESSION_TYPE=wayland",
-		"WAYLAND_DISPLAY=" + os.Getenv("WAYLAND_DISPLAY"),
+		"LS_COLORS=di=01;34:fi=0:ln=01;36:ex=01;32:*.crl=01;35",
 	}
 
-	// Start in home directory
+	// Add display variables if present
+	if display := os.Getenv("DISPLAY"); display != "" {
+		env = append(env, "DISPLAY="+display)
+	}
+	if waylandDisplay := os.Getenv("WAYLAND_DISPLAY"); waylandDisplay != "" {
+		env = append(env, "WAYLAND_DISPLAY="+waylandDisplay)
+		env = append(env, "XDG_SESSION_TYPE=wayland")
+	}
+
+	// Add additional env from config
+	for k, v := range cfg.Shell.AdditionalEnv {
+		env = append(env, k+"="+v)
+	}
+
+	// For zsh, set up custom init by prepending to .zshrc
+	if shellBase == "zsh" && initScriptPath != "" {
+		// Create a custom ZDOTDIR to source our init script
+		env = append(env, "RAVEN_INIT_SCRIPT="+initScriptPath)
+		// Zsh will source the script via .zshenv or we use precmd
+	}
+
+	// For bash without sourcing rc, we need to run the init script
+	if shellBase == "bash" && !cfg.Shell.SourceRC && initScriptPath != "" {
+		env = append(env, "BASH_ENV="+initScriptPath)
+	}
+
+	cmd.Env = env
 	cmd.Dir = currentUser.HomeDir
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
@@ -116,22 +171,16 @@ func NewPtySession(cols, rows uint16) (*PtySession, error) {
 	return session, nil
 }
 
-// findShellFromConfig finds the shell from config or falls back to system default
-func findShellFromConfig() string {
+// findShell finds the shell to use based on config
+func findShell(cfg *config.Config) string {
 	// Check config for user-selected shell
-	cfg, err := config.Load()
-	if err == nil && cfg.Shell != "" {
-		if _, err := os.Stat(cfg.Shell); err == nil {
-			return cfg.Shell
+	if cfg.Shell.Path != "" {
+		if _, err := os.Stat(cfg.Shell.Path); err == nil {
+			return cfg.Shell.Path
 		}
 	}
-	// Fall back to system default
-	return findShell()
-}
 
-// findShell finds the default shell from system user database
-func findShell() string {
-	// Get shell from /etc/passwd, not environment variable
+	// Get shell from /etc/passwd
 	currentUser, err := user.Current()
 	if err == nil {
 		shell := getUserShell(currentUser.Username)

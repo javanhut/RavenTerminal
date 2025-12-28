@@ -225,32 +225,47 @@ install_user() {
     mkdir -p "$USER_BIN_DIR"
     mkdir -p "$USER_APP_DIR"
     mkdir -p "$USER_ICON_DIR"
+    mkdir -p "$HOME/.local/share/raven-terminal"
     
     # Install binary
     cp "$REPO_DIR/$APP_NAME" "$USER_BIN_DIR/"
     chmod +x "$USER_BIN_DIR/$APP_NAME"
     print_success "Binary installed to $USER_BIN_DIR/$APP_NAME"
     
+    # Install launcher wrapper
+    cp "$SCRIPT_DIR/raven-terminal-wrapper.sh" "$USER_BIN_DIR/raven-terminal-launcher"
+    chmod +x "$USER_BIN_DIR/raven-terminal-launcher"
+    print_success "Launcher wrapper installed"
+    
     # Install icon
     if [ -f "$REPO_DIR/assets/raven_terminal_icon.svg" ]; then
         cp "$REPO_DIR/assets/raven_terminal_icon.svg" "$USER_ICON_DIR/$APP_NAME.svg"
         print_success "Icon installed to $USER_ICON_DIR/$APP_NAME.svg"
+        
+        # Also install to pixmaps for better compatibility
+        mkdir -p "$HOME/.local/share/pixmaps"
+        cp "$REPO_DIR/assets/raven_terminal_icon.svg" "$HOME/.local/share/pixmaps/$APP_NAME.svg"
     else
         print_warning "Icon file not found, using default terminal icon"
     fi
     
-    # Create desktop file
+    # Create desktop file (use launcher wrapper for better environment handling)
     local icon_name="$APP_NAME"
     if [ ! -f "$USER_ICON_DIR/$APP_NAME.svg" ]; then
         icon_name="utilities-terminal"
     fi
     
-    create_desktop_file "$USER_BIN_DIR/$APP_NAME" "$USER_APP_DIR/$APP_NAME.desktop" "$icon_name"
+    create_desktop_file "$USER_BIN_DIR/raven-terminal-launcher" "$USER_APP_DIR/$APP_NAME.desktop" "$icon_name"
     print_success "Desktop entry created at $USER_APP_DIR/$APP_NAME.desktop"
     
     # Update icon cache if gtk-update-icon-cache is available
     if command -v gtk-update-icon-cache &> /dev/null; then
         gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+    fi
+    
+    # Also try gtk4 icon cache update
+    if command -v gtk4-update-icon-cache &> /dev/null; then
+        gtk4-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
     fi
     
     # Update desktop database if available
@@ -282,29 +297,43 @@ install_global() {
     sudo chmod +x "$GLOBAL_BIN_DIR/$APP_NAME"
     print_success "Binary installed to $GLOBAL_BIN_DIR/$APP_NAME"
     
+    # Install launcher wrapper
+    sudo cp "$SCRIPT_DIR/raven-terminal-wrapper.sh" "$GLOBAL_BIN_DIR/raven-terminal-launcher"
+    sudo chmod +x "$GLOBAL_BIN_DIR/raven-terminal-launcher"
+    print_success "Launcher wrapper installed"
+    
     # Install icon
     if [ -f "$REPO_DIR/assets/raven_terminal_icon.svg" ]; then
         sudo mkdir -p "$GLOBAL_ICON_DIR"
         sudo cp "$REPO_DIR/assets/raven_terminal_icon.svg" "$GLOBAL_ICON_DIR/$APP_NAME.svg"
         print_success "Icon installed to $GLOBAL_ICON_DIR/$APP_NAME.svg"
+        
+        # Also install to pixmaps for better compatibility
+        sudo mkdir -p /usr/share/pixmaps
+        sudo cp "$REPO_DIR/assets/raven_terminal_icon.svg" "/usr/share/pixmaps/$APP_NAME.svg"
     else
         print_warning "Icon file not found, using default terminal icon"
     fi
     
-    # Create desktop file
+    # Create desktop file (use launcher wrapper for better environment handling)
     local icon_name="$APP_NAME"
     if [ ! -f "$GLOBAL_ICON_DIR/$APP_NAME.svg" ]; then
         icon_name="utilities-terminal"
     fi
     
     local tmp_desktop=$(mktemp)
-    create_desktop_file "$GLOBAL_BIN_DIR/$APP_NAME" "$tmp_desktop" "$icon_name"
+    create_desktop_file "$GLOBAL_BIN_DIR/raven-terminal-launcher" "$tmp_desktop" "$icon_name"
     sudo mv "$tmp_desktop" "$GLOBAL_APP_DIR/$APP_NAME.desktop"
     print_success "Desktop entry created at $GLOBAL_APP_DIR/$APP_NAME.desktop"
     
     # Update icon cache
     if command -v gtk-update-icon-cache &> /dev/null; then
         sudo gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
+    fi
+    
+    # Also try gtk4 icon cache update
+    if command -v gtk4-update-icon-cache &> /dev/null; then
+        sudo gtk4-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
     fi
     
     # Update desktop database

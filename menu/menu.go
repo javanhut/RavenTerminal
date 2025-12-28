@@ -11,6 +11,9 @@ const (
 	MenuClosed MenuState = iota
 	MenuMain
 	MenuShellSelect
+	MenuPromptSettings
+	MenuPromptStyle
+	MenuScripts
 	MenuCommands
 	MenuCommandEdit
 	MenuAliases
@@ -31,9 +34,19 @@ type MenuAction int
 const (
 	ActionNone MenuAction = iota
 	ActionOpenShellMenu
+	ActionOpenPromptMenu
+	ActionOpenPromptStyleMenu
+	ActionOpenScriptsMenu
 	ActionOpenCommandsMenu
 	ActionOpenAliasesMenu
 	ActionSelectShell
+	ActionSelectPromptStyle
+	ActionToggleSourceRC
+	ActionTogglePath
+	ActionToggleUsername
+	ActionToggleHostname
+	ActionToggleLanguage
+	ActionToggleVCS
 	ActionAddCommand
 	ActionEditCommand
 	ActionDeleteCommand
@@ -105,14 +118,27 @@ func (m *Menu) IsOpen() bool {
 
 // buildMainMenu builds the main menu items
 func (m *Menu) buildMainMenu() {
-	currentShell := m.Config.Shell
+	currentShell := m.Config.Shell.Path
 	if currentShell == "" {
 		currentShell = "(system default)"
 	}
 
+	promptStyle := m.Config.Prompt.Style
+	if promptStyle == "" {
+		promptStyle = "full"
+	}
+
+	sourceRC := "OFF"
+	if m.Config.Shell.SourceRC {
+		sourceRC = "ON"
+	}
+
 	m.Items = []MenuItem{
 		{Label: "Shell: " + currentShell, Action: ActionOpenShellMenu},
-		{Label: "Custom Commands (" + itoa(len(m.Config.CustomCommands)) + ")", Action: ActionOpenCommandsMenu},
+		{Label: "Source RC Files: " + sourceRC, Action: ActionToggleSourceRC},
+		{Label: "Prompt Settings (Style: " + promptStyle + ")", Action: ActionOpenPromptMenu},
+		{Label: "Scripts", Action: ActionOpenScriptsMenu},
+		{Label: "Commands (" + itoa(len(m.Config.Commands)) + ")", Action: ActionOpenCommandsMenu},
 		{Label: "Aliases (" + itoa(len(m.Config.Aliases)) + ")", Action: ActionOpenAliasesMenu},
 		{Label: "", Action: ActionNone, Disabled: true},
 		{Label: "Save and Close", Action: ActionSaveAndClose},
@@ -137,13 +163,89 @@ func (m *Menu) buildShellMenu() {
 	m.Items = append(m.Items, MenuItem{Label: "Back", Action: ActionBack})
 }
 
+// boolToStatus returns a status string for a boolean
+func boolToStatus(b bool) string {
+	if b {
+		return "[ON]"
+	}
+	return "[OFF]"
+}
+
+// buildPromptMenu builds the prompt settings menu
+func (m *Menu) buildPromptMenu() {
+	p := m.Config.Prompt
+	style := p.Style
+	if style == "" {
+		style = "full"
+	}
+
+	m.Items = []MenuItem{
+		{Label: "Prompt Style: " + style, Action: ActionOpenPromptStyleMenu},
+		{Label: "", Action: ActionNone, Disabled: true},
+		{Label: "Show Path " + boolToStatus(p.ShowPath), Action: ActionTogglePath},
+		{Label: "Show Username " + boolToStatus(p.ShowUsername), Action: ActionToggleUsername},
+		{Label: "Show Hostname " + boolToStatus(p.ShowHostname), Action: ActionToggleHostname},
+		{Label: "Show Programming Language " + boolToStatus(p.ShowLanguage), Action: ActionToggleLanguage},
+		{Label: "Show VCS (Git/Ivaldi) " + boolToStatus(p.ShowVCS), Action: ActionToggleVCS},
+		{Label: "", Action: ActionNone, Disabled: true},
+		{Label: "Back", Action: ActionBack},
+	}
+}
+
+// buildPromptStyleMenu builds the prompt style selection menu
+func (m *Menu) buildPromptStyleMenu() {
+	styles := []struct {
+		name string
+		desc string
+	}{
+		{"minimal", "Just the prompt symbol"},
+		{"simple", "Path and prompt"},
+		{"full", "Path, language, VCS, user info"},
+		{"custom", "Use custom script"},
+	}
+
+	m.Items = []MenuItem{}
+	for _, style := range styles {
+		prefix := "  "
+		if m.Config.Prompt.Style == style.name {
+			prefix = "> "
+		}
+		m.Items = append(m.Items, MenuItem{
+			Label:  prefix + style.name + " - " + style.desc,
+			Value:  style.name,
+			Action: ActionSelectPromptStyle,
+		})
+	}
+	m.Items = append(m.Items, MenuItem{Label: "", Action: ActionNone, Disabled: true})
+	m.Items = append(m.Items, MenuItem{Label: "Back", Action: ActionBack})
+}
+
+// buildScriptsMenu builds the scripts info menu
+func (m *Menu) buildScriptsMenu() {
+	configDir := config.GetConfigDir()
+	m.Items = []MenuItem{
+		{Label: "Scripts are configured in config.toml", Action: ActionNone, Disabled: true},
+		{Label: "", Action: ActionNone, Disabled: true},
+		{Label: "Config location:", Action: ActionNone, Disabled: true},
+		{Label: "  " + configDir + "/config.toml", Action: ActionNone, Disabled: true},
+		{Label: "", Action: ActionNone, Disabled: true},
+		{Label: "Available script sections:", Action: ActionNone, Disabled: true},
+		{Label: "  [scripts.init] - Runs on shell start", Action: ActionNone, Disabled: true},
+		{Label: "  [scripts.pre_prompt] - Runs before prompt", Action: ActionNone, Disabled: true},
+		{Label: "  [scripts.language_detect] - Language detection", Action: ActionNone, Disabled: true},
+		{Label: "  [scripts.vcs_detect] - VCS detection", Action: ActionNone, Disabled: true},
+		{Label: "", Action: ActionNone, Disabled: true},
+		{Label: "Back", Action: ActionBack},
+	}
+}
+
 // buildCommandsMenu builds the commands menu
 func (m *Menu) buildCommandsMenu() {
 	m.Items = []MenuItem{
 		{Label: "+ Add New Command", Action: ActionAddCommand},
 		{Label: "", Action: ActionNone, Disabled: true},
 	}
-	for i, cmd := range m.Config.CustomCommands {
+	for i, cmd := range m.Config.Commands {
 		m.Items = append(m.Items, MenuItem{
 			Label:  cmd.Name + " - " + truncate(cmd.Command, 30),
 			Value:  itoa(i),
@@ -160,14 +262,12 @@ func (m *Menu) buildAliasesMenu() {
 		{Label: "+ Add New Alias", Action: ActionAddAlias},
 		{Label: "", Action: ActionNone, Disabled: true},
 	}
-	i := 0
 	for name, cmd := range m.Config.Aliases {
 		m.Items = append(m.Items, MenuItem{
 			Label:  name + " = " + truncate(cmd, 30),
 			Value:  name,
 			Action: ActionEditAlias,
 		})
-		i++
 	}
 	m.Items = append(m.Items, MenuItem{Label: "", Action: ActionNone, Disabled: true})
 	m.Items = append(m.Items, MenuItem{Label: "Back", Action: ActionBack})
@@ -238,6 +338,61 @@ func (m *Menu) Select() {
 		m.ScrollOffset = 0
 		m.buildShellMenu()
 
+	case ActionToggleSourceRC:
+		m.Config.Shell.SourceRC = !m.Config.Shell.SourceRC
+		m.buildMainMenu()
+		m.StatusMessage = "Setting updated (restart tab to apply)"
+
+	case ActionOpenPromptMenu:
+		m.State = MenuPromptSettings
+		m.SelectedIndex = 0
+		m.ScrollOffset = 0
+		m.buildPromptMenu()
+
+	case ActionOpenPromptStyleMenu:
+		m.State = MenuPromptStyle
+		m.SelectedIndex = 0
+		m.ScrollOffset = 0
+		m.buildPromptStyleMenu()
+
+	case ActionOpenScriptsMenu:
+		m.State = MenuScripts
+		m.SelectedIndex = 0
+		m.ScrollOffset = 0
+		m.buildScriptsMenu()
+
+	case ActionSelectPromptStyle:
+		m.Config.Prompt.Style = item.Value
+		m.State = MenuPromptSettings
+		m.SelectedIndex = 0
+		m.buildPromptMenu()
+		m.StatusMessage = "Prompt style updated (restart tab to apply)"
+
+	case ActionTogglePath:
+		m.Config.Prompt.ShowPath = !m.Config.Prompt.ShowPath
+		m.buildPromptMenu()
+		m.StatusMessage = "Setting updated (restart tab to apply)"
+
+	case ActionToggleUsername:
+		m.Config.Prompt.ShowUsername = !m.Config.Prompt.ShowUsername
+		m.buildPromptMenu()
+		m.StatusMessage = "Setting updated (restart tab to apply)"
+
+	case ActionToggleHostname:
+		m.Config.Prompt.ShowHostname = !m.Config.Prompt.ShowHostname
+		m.buildPromptMenu()
+		m.StatusMessage = "Setting updated (restart tab to apply)"
+
+	case ActionToggleLanguage:
+		m.Config.Prompt.ShowLanguage = !m.Config.Prompt.ShowLanguage
+		m.buildPromptMenu()
+		m.StatusMessage = "Setting updated (restart tab to apply)"
+
+	case ActionToggleVCS:
+		m.Config.Prompt.ShowVCS = !m.Config.Prompt.ShowVCS
+		m.buildPromptMenu()
+		m.StatusMessage = "Setting updated (restart tab to apply)"
+
 	case ActionOpenCommandsMenu:
 		m.State = MenuCommands
 		m.SelectedIndex = 0
@@ -251,7 +406,7 @@ func (m *Menu) Select() {
 		m.buildAliasesMenu()
 
 	case ActionSelectShell:
-		m.Config.Shell = item.Value
+		m.Config.Shell.Path = item.Value
 		m.State = MenuMain
 		m.SelectedIndex = 0
 		m.buildMainMenu()
@@ -311,10 +466,10 @@ func (m *Menu) Select() {
 
 // showCommandOptions shows options for editing/deleting a command
 func (m *Menu) showCommandOptions(idx int) {
-	if idx < 0 || idx >= len(m.Config.CustomCommands) {
+	if idx < 0 || idx >= len(m.Config.Commands) {
 		return
 	}
-	cmd := m.Config.CustomCommands[idx]
+	cmd := m.Config.Commands[idx]
 	m.Items = []MenuItem{
 		{Label: "Edit Name: " + cmd.Name, Value: itoa(idx) + ":name", Action: ActionEditCommand},
 		{Label: "Edit Command: " + truncate(cmd.Command, 25), Value: itoa(idx) + ":cmd", Action: ActionEditCommand},
@@ -345,11 +500,16 @@ func (m *Menu) showAliasOptions(name string) {
 // goBack goes back to previous menu
 func (m *Menu) goBack() {
 	switch m.State {
-	case MenuShellSelect, MenuCommands, MenuAliases:
+	case MenuShellSelect, MenuCommands, MenuAliases, MenuPromptSettings, MenuScripts:
 		m.State = MenuMain
 		m.SelectedIndex = 0
 		m.ScrollOffset = 0
 		m.buildMainMenu()
+	case MenuPromptStyle:
+		m.State = MenuPromptSettings
+		m.SelectedIndex = 0
+		m.ScrollOffset = 0
+		m.buildPromptMenu()
 	case MenuCommandEdit:
 		m.State = MenuCommands
 		m.SelectedIndex = 0
@@ -451,6 +611,12 @@ func (m *Menu) GetTitle() string {
 		return "Raven Terminal Settings"
 	case MenuShellSelect:
 		return "Select Shell"
+	case MenuPromptSettings:
+		return "Prompt Settings"
+	case MenuPromptStyle:
+		return "Select Prompt Style"
+	case MenuScripts:
+		return "Scripts Configuration"
 	case MenuCommands:
 		return "Custom Commands"
 	case MenuCommandEdit:

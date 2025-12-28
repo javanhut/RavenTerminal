@@ -245,6 +245,11 @@ uninstall_user() {
         ((removed++))
     fi
     
+    # Remove launcher wrapper
+    if remove_file "$USER_BIN_DIR/raven-terminal-launcher" false; then
+        ((removed++))
+    fi
+    
     # Remove desktop file
     if remove_file "$USER_APP_DIR/$APP_NAME.desktop" false; then
         ((removed++))
@@ -252,6 +257,11 @@ uninstall_user() {
     
     # Remove icon
     if remove_file "$USER_ICON_DIR/$APP_NAME.svg" false; then
+        ((removed++))
+    fi
+    
+    # Remove log directory
+    if remove_dir "$HOME/.local/share/raven-terminal" false; then
         ((removed++))
     fi
     
@@ -285,6 +295,11 @@ uninstall_global() {
     
     # Remove binary
     if remove_file "$GLOBAL_BIN_DIR/$APP_NAME" true; then
+        ((removed++))
+    fi
+    
+    # Remove launcher wrapper
+    if remove_file "$GLOBAL_BIN_DIR/raven-terminal-launcher" true; then
         ((removed++))
     fi
     
