@@ -40,26 +40,70 @@ sudo pacman -S mesa libx11 libxcursor libxrandr libxinerama libxi libxxf86vm
 
 ## Installation
 
+### Quick Install (User)
+
 ```bash
 git clone https://github.com/javanhut/RavenTerminal.git
 cd RavenTerminal
-go build -o raven-terminal
+./scripts/install.sh
+```
+
+This builds and installs Raven Terminal to `~/.local/bin/` with desktop integration.
+
+### System-wide Install
+
+```bash
+./scripts/install.sh --global
+```
+
+Installs to `/usr/local/bin/` (requires sudo).
+
+### Build Only
+
+```bash
+go build -o raven-terminal .
+./raven-terminal
+```
+
+See [Installation Guide](docs/installation.md) for detailed instructions.
+
+## Uninstallation
+
+```bash
+# Remove user installation
+./scripts/uninstall.sh --user
+
+# Remove global installation
+./scripts/uninstall.sh --global
+
+# Remove everything including config
+./scripts/uninstall.sh --all --config
 ```
 
 ## Usage
 
-```bash
-./raven-terminal
-```
+After installation, launch from:
+- **Application Menu**: Search for "Raven Terminal"
+- **Command Line**: `raven-terminal`
 
 ## Keybindings
 
 ### General
 
-| Keybinding   | Action                  |
-|--------------|-------------------------|
-| Ctrl+Q       | Exit terminal           |
-| Shift+Enter  | Toggle fullscreen mode  |
+| Keybinding     | Action                  |
+|----------------|-------------------------|
+| Ctrl+Q         | Exit terminal           |
+| Shift+Enter    | Toggle fullscreen mode  |
+| Ctrl+Shift+K   | Show/hide help panel    |
+| Ctrl+Shift+P   | Open settings menu      |
+
+### Zoom
+
+| Keybinding     | Action              |
+|----------------|---------------------|
+| Ctrl+Shift++   | Zoom in             |
+| Ctrl+Shift+-   | Zoom out            |
+| Ctrl+Shift+0   | Reset zoom          |
 
 ### Tab Management
 
@@ -69,6 +113,15 @@ go build -o raven-terminal
 | Ctrl+Shift+X     | Close current tab   |
 | Ctrl+Tab         | Next tab            |
 | Ctrl+Shift+Tab   | Previous tab        |
+
+### Split Panes
+
+| Keybinding       | Action                    |
+|------------------|---------------------------|
+| Ctrl+Shift+V     | Split vertical            |
+| Ctrl+Shift+H     | Split horizontal          |
+| Ctrl+Shift+W     | Close current pane        |
+| Shift+Tab        | Cycle panes               |
 
 ### Scrolling
 
@@ -124,7 +177,10 @@ RavenTerminal/
 
 Additional documentation is available in the [docs/](docs/) directory:
 
+- [Installation](docs/installation.md) - Installation and uninstallation guide
 - [Keybindings](docs/keybindings.md) - Complete keybinding reference
+- [Split Panes](docs/splits.md) - Split pane usage
+- [Settings](docs/settings.md) - Settings menu and configuration
 - [Icon](docs/icon.md) - Application icon customization
 
 ## License
