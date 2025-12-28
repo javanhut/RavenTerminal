@@ -1,0 +1,687 @@
+package render
+
+import (
+	"fmt"
+	"github.com/javanhut/RavenTerminal/fonts"
+	"github.com/javanhut/RavenTerminal/grid"
+	"github.com/javanhut/RavenTerminal/tab"
+	"image"
+	"image/color"
+	"image/draw"
+	"strings"
+
+	"github.com/go-gl/gl/v4.1-core/gl"
+	"golang.org/x/image/font"
+	"golang.org/x/image/font/opentype"
+	"golang.org/x/image/math/fixed"
+)
+
+// Theme colors
+type Theme struct {
+	Background [4]float32
+	Foreground [4]float32
+	Cursor     [4]float32
+	TabBar     [4]float32
+	TabActive  [4]float32
+}
+
+// DefaultTheme returns the default color theme
+func DefaultTheme() Theme {
+	return Theme{
+		Background: [4]float32{0.051, 0.063, 0.102, 1.0}, // #0d101a
+		Foreground: [4]float32{0.910, 0.929, 0.969, 1.0}, // #e8edf7
+		Cursor:     [4]float32{0.635, 0.878, 0.780, 1.0}, // #a2e0c7
+		TabBar:     [4]float32{0.039, 0.047, 0.078, 1.0}, // #0a0c14
+		TabActive:  [4]float32{0.455, 0.714, 1.0, 1.0},   // #74b6ff
+	}
+}
+
+// Glyph contains information about a rendered glyph
+type Glyph struct {
+	X, Y          float32 // Position in atlas (normalized 0-1)
+	Width, Height float32 // Size in atlas (normalized 0-1)
+	PixelWidth    int     // Actual pixel width
+	PixelHeight   int     // Actual pixel height
+}
+
+// Renderer handles OpenGL rendering with smooth fonts
+type Renderer struct {
+	theme         Theme
+	cellWidth     float32
+	cellHeight    float32
+	fontSize      float32
+	paddingTop    float32
+	paddingBottom float32
+	tabBarWidth   float32
+	currentFont   string
+
+	// Font data
+	glyphs    map[rune]Glyph
+	fontAtlas uint32
+	atlasSize int
+
+	// OpenGL resources
+	quadVAO     uint32
+	quadVBO     uint32
+	program     uint32
+	fontProgram uint32
+	fontVAO     uint32
+	fontVBO     uint32
+
+	// Uniforms
+	colorLoc    int32
+	projLoc     int32
+	texColorLoc int32
+	texProjLoc  int32
+	texLoc      int32
+}
+
+// NewRenderer creates a new renderer with smooth font rendering
+func NewRenderer() (*Renderer, error) {
+	r := &Renderer{
+		theme:         DefaultTheme(),
+		fontSize:      16.0,
+		paddingTop:    12.0,
+		paddingBottom: 12.0,
+		tabBarWidth:   135.0,
+		currentFont:   fonts.DefaultFontName(),
+		glyphs:        make(map[rune]Glyph),
+		atlasSize:     512, // Larger atlas for Nerd Font icons
+	}
+
+	if err := r.initGL(); err != nil {
+		return nil, err
+	}
+
+	if err := r.loadFont(); err != nil {
+		return nil, err
+	}
+
+	return r, nil
+}
+
+// loadFont loads the current embedded font and creates a glyph atlas
+func (r *Renderer) loadFont() error {
+	return r.loadFontData(fonts.DefaultFont())
+}
+
+// loadFontData loads font from byte data and creates a glyph atlas
+func (r *Renderer) loadFontData(fontData []byte) error {
+	parsedFont, err := opentype.Parse(fontData)
+	if err != nil {
+		return fmt.Errorf("failed to parse font: %w", err)
+	}
+
+	// Create font face with desired size
+	face, err := opentype.NewFace(parsedFont, &opentype.FaceOptions{
+		Size:    float64(r.fontSize),
+		DPI:     96,
+		Hinting: font.HintingFull,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create font face: %w", err)
+	}
+	defer face.Close()
+
+	// Get font metrics
+	metrics := face.Metrics()
+	r.cellHeight = float32((metrics.Ascent + metrics.Descent).Ceil())
+
+	// Calculate cell width from 'M' character
+	advance, _ := face.GlyphAdvance('M')
+	r.cellWidth = float32(advance.Ceil())
+
+	// Create atlas image (RGBA for anti-aliasing)
+	atlas := image.NewRGBA(image.Rect(0, 0, r.atlasSize, r.atlasSize))
+	// Fill with transparent
+	draw.Draw(atlas, atlas.Bounds(), image.Transparent, image.Point{}, draw.Src)
+
+	// Drawer for rendering text
+	drawer := &font.Drawer{
+		Dst:  atlas,
+		Src:  image.White,
+		Face: face,
+	}
+
+	// Character ranges to render (ASCII + Extended + Nerd Font icons)
+	charRanges := []struct{ start, end rune }{
+		{32, 126},        // Printable ASCII
+		{160, 255},       // Extended Latin-1
+		{0x2500, 0x257F}, // Box Drawing
+		{0x2580, 0x259F}, // Block Elements
+		{0x25A0, 0x25FF}, // Geometric Shapes
+		{0x2600, 0x26FF}, // Miscellaneous Symbols
+		{0x2700, 0x27BF}, // Dingbats
+		{0xE0A0, 0xE0D4}, // Powerline symbols
+		{0xE200, 0xE2A9}, // Pomicons
+		{0xE5FA, 0xE6B5}, // Seti-UI + Custom
+		{0xE700, 0xE7C5}, // Devicons
+		{0xEA60, 0xEC1E}, // Codicons
+		{0xED00, 0xEFC1}, // Font Logos
+		{0xF000, 0xF2E0}, // Font Awesome
+		{0xF300, 0xF372}, // Font Awesome Extension
+		{0xF400, 0xF533}, // Octicons
+		{0xF500, 0xFD46}, // Material Design Icons
+	}
+
+	x, y := 0, metrics.Ascent.Ceil()
+	charHeight := int(r.cellHeight) + 4
+	charWidth := int(r.cellWidth) + 4
+
+	for _, cr := range charRanges {
+		for c := cr.start; c <= cr.end; c++ {
+			// Check if we need to wrap to next row
+			if x+charWidth > r.atlasSize {
+				x = 0
+				y += charHeight
+			}
+			if y+charHeight > r.atlasSize {
+				break // Atlas full
+			}
+
+			// Check if glyph exists in font
+			_, hasGlyph := face.GlyphAdvance(c)
+			if !hasGlyph {
+				continue
+			}
+
+			// Render glyph
+			drawer.Dot = fixed.P(x+2, y)
+			drawer.DrawString(string(c))
+
+			// Store glyph info (normalized coordinates)
+			r.glyphs[c] = Glyph{
+				X:           float32(x) / float32(r.atlasSize),
+				Y:           float32(y-metrics.Ascent.Ceil()) / float32(r.atlasSize),
+				Width:       float32(charWidth) / float32(r.atlasSize),
+				Height:      float32(charHeight) / float32(r.atlasSize),
+				PixelWidth:  charWidth,
+				PixelHeight: charHeight,
+			}
+
+			x += charWidth
+		}
+	}
+
+	// Convert RGBA to single-channel alpha for OpenGL
+	alphaAtlas := make([]byte, r.atlasSize*r.atlasSize)
+	for i := 0; i < r.atlasSize*r.atlasSize; i++ {
+		// Use the alpha channel for anti-aliased edges
+		alphaAtlas[i] = atlas.Pix[i*4+3]
+	}
+
+	// Create OpenGL texture
+	gl.GenTextures(1, &r.fontAtlas)
+	gl.BindTexture(gl.TEXTURE_2D, r.fontAtlas)
+	gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RED, int32(r.atlasSize), int32(r.atlasSize), 0,
+		gl.RED, gl.UNSIGNED_BYTE, gl.Ptr(alphaAtlas))
+
+	// Use LINEAR filtering for smooth scaling (anti-aliasing)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+
+	gl.BindTexture(gl.TEXTURE_2D, 0)
+
+	return nil
+}
+
+// initGL initializes OpenGL resources
+func (r *Renderer) initGL() error {
+	// Create quad shader program for colored rectangles
+	vertShader := `
+		#version 410 core
+		layout (location = 0) in vec2 aPos;
+		uniform mat4 projection;
+		void main() {
+			gl_Position = projection * vec4(aPos, 0.0, 1.0);
+		}
+	` + "\x00"
+
+	fragShader := `
+		#version 410 core
+		out vec4 FragColor;
+		uniform vec4 color;
+		void main() {
+			FragColor = color;
+		}
+	` + "\x00"
+
+	var err error
+	r.program, err = createProgram(vertShader, fragShader)
+	if err != nil {
+		return fmt.Errorf("failed to create quad shader: %w", err)
+	}
+
+	r.colorLoc = gl.GetUniformLocation(r.program, gl.Str("color\x00"))
+	r.projLoc = gl.GetUniformLocation(r.program, gl.Str("projection\x00"))
+
+	// Create text shader program with smooth alpha blending
+	textVertShader := `
+		#version 410 core
+		layout (location = 0) in vec4 vertex; // <vec2 pos, vec2 tex>
+		out vec2 TexCoords;
+		uniform mat4 projection;
+		void main() {
+			gl_Position = projection * vec4(vertex.xy, 0.0, 1.0);
+			TexCoords = vertex.zw;
+		}
+	` + "\x00"
+
+	textFragShader := `
+		#version 410 core
+		in vec2 TexCoords;
+		out vec4 FragColor;
+		uniform sampler2D text;
+		uniform vec4 textColor;
+		void main() {
+			float alpha = texture(text, TexCoords).r;
+			FragColor = vec4(textColor.rgb, textColor.a * alpha);
+		}
+	` + "\x00"
+
+	r.fontProgram, err = createProgram(textVertShader, textFragShader)
+	if err != nil {
+		return fmt.Errorf("failed to create text shader: %w", err)
+	}
+
+	r.texColorLoc = gl.GetUniformLocation(r.fontProgram, gl.Str("textColor\x00"))
+	r.texProjLoc = gl.GetUniformLocation(r.fontProgram, gl.Str("projection\x00"))
+	r.texLoc = gl.GetUniformLocation(r.fontProgram, gl.Str("text\x00"))
+
+	// Create quad VAO/VBO
+	gl.GenVertexArrays(1, &r.quadVAO)
+	gl.GenBuffers(1, &r.quadVBO)
+	gl.BindVertexArray(r.quadVAO)
+	gl.BindBuffer(gl.ARRAY_BUFFER, r.quadVBO)
+	gl.BufferData(gl.ARRAY_BUFFER, 6*2*4, nil, gl.DYNAMIC_DRAW)
+	gl.EnableVertexAttribArray(0)
+	gl.VertexAttribPointerWithOffset(0, 2, gl.FLOAT, false, 2*4, 0)
+	gl.BindBuffer(gl.ARRAY_BUFFER, 0)
+	gl.BindVertexArray(0)
+
+	// Create font VAO/VBO
+	gl.GenVertexArrays(1, &r.fontVAO)
+	gl.GenBuffers(1, &r.fontVBO)
+	gl.BindVertexArray(r.fontVAO)
+	gl.BindBuffer(gl.ARRAY_BUFFER, r.fontVBO)
+	gl.BufferData(gl.ARRAY_BUFFER, 6*4*4, nil, gl.DYNAMIC_DRAW)
+	gl.EnableVertexAttribArray(0)
+	gl.VertexAttribPointerWithOffset(0, 4, gl.FLOAT, false, 4*4, 0)
+	gl.BindBuffer(gl.ARRAY_BUFFER, 0)
+	gl.BindVertexArray(0)
+
+	return nil
+}
+
+// Render renders the terminal
+func (r *Renderer) Render(tm *tab.TabManager, width, height int, cursorVisible bool) {
+	proj := orthoMatrix(0, float32(width), float32(height), 0, -1, 1)
+
+	// Clear background
+	gl.ClearColor(r.theme.Background[0], r.theme.Background[1], r.theme.Background[2], r.theme.Background[3])
+	gl.Clear(gl.COLOR_BUFFER_BIT)
+
+	// Render tab bar
+	r.renderTabBar(tm, width, height, proj)
+
+	// Render terminal content
+	activeTab := tm.ActiveTab()
+	if activeTab != nil {
+		r.renderGrid(activeTab.Terminal.Grid, width, height, proj, cursorVisible)
+	}
+}
+
+// renderTabBar renders the left tab bar
+func (r *Renderer) renderTabBar(tm *tab.TabManager, width, height int, proj [16]float32) {
+	// Draw tab bar background
+	r.drawRect(0, 0, r.tabBarWidth, float32(height), r.theme.TabBar, proj)
+
+	// Draw separator line
+	r.drawRect(r.tabBarWidth-2, 0, 2, float32(height), r.theme.Foreground, proj)
+
+	// Draw header
+	header := fmt.Sprintf("Raven %d/%d", tm.ActiveIndex()+1, tm.TabCount())
+	r.drawText(10, r.cellHeight, header, r.theme.TabActive, proj)
+
+	// Draw tabs
+	tabs := tm.GetTabs()
+	activeIdx := tm.ActiveIndex()
+	for i, t := range tabs {
+		y := r.cellHeight*2 + float32(i)*r.cellHeight*1.2
+		prefix := "  "
+		clr := r.theme.Foreground
+		if i == activeIdx {
+			prefix = "> "
+			clr = r.theme.TabActive
+		}
+		text := fmt.Sprintf("%sTab %d", prefix, t.ID())
+		r.drawText(10, y, text, clr, proj)
+	}
+}
+
+// renderGrid renders the terminal grid
+func (r *Renderer) renderGrid(g *grid.Grid, width, height int, proj [16]float32, cursorVisible bool) {
+	offsetX := r.tabBarWidth + 5
+	offsetY := r.paddingTop
+
+	cols := g.Cols
+	rows := g.Rows
+
+	// Render cells
+	for row := 0; row < rows; row++ {
+		for col := 0; col < cols; col++ {
+			cell := g.DisplayCell(col, row)
+			x := offsetX + float32(col)*r.cellWidth
+			y := offsetY + float32(row)*r.cellHeight
+
+			// Draw background if not default
+			bgColor := r.colorToRGBA(cell.Bg, true)
+			if cell.Flags&grid.FlagInverse != 0 {
+				bgColor, _ = r.colorToRGBA(cell.Fg, false), r.colorToRGBA(cell.Bg, true)
+			}
+			if bgColor != r.theme.Background {
+				r.drawRect(x, y, r.cellWidth, r.cellHeight, bgColor, proj)
+			}
+
+			// Draw character
+			if cell.Char != ' ' && cell.Char != 0 {
+				fgColor := r.colorToRGBA(cell.Fg, false)
+				if cell.Flags&grid.FlagInverse != 0 {
+					fgColor = r.colorToRGBA(cell.Bg, true)
+				}
+				r.drawChar(x, y+r.cellHeight, cell.Char, fgColor, proj)
+			}
+		}
+	}
+
+	// Draw cursor
+	if cursorVisible && g.GetScrollOffset() == 0 {
+		cursorCol, cursorRow := g.GetCursor()
+		cursorX := offsetX + float32(cursorCol)*r.cellWidth
+		cursorY := offsetY + float32(cursorRow)*r.cellHeight
+		r.drawRect(cursorX, cursorY, r.cellWidth, r.cellHeight, r.theme.Cursor, proj)
+
+		// Redraw character under cursor in inverse
+		cell := g.DisplayCell(cursorCol, cursorRow)
+		if cell.Char != ' ' && cell.Char != 0 {
+			r.drawChar(cursorX, cursorY+r.cellHeight, cell.Char, r.theme.Background, proj)
+		}
+	}
+}
+
+// drawRect draws a colored rectangle
+func (r *Renderer) drawRect(x, y, w, h float32, clr [4]float32, proj [16]float32) {
+	vertices := []float32{
+		x, y,
+		x + w, y,
+		x + w, y + h,
+		x, y,
+		x + w, y + h,
+		x, y + h,
+	}
+
+	gl.UseProgram(r.program)
+	gl.UniformMatrix4fv(r.projLoc, 1, false, &proj[0])
+	gl.Uniform4fv(r.colorLoc, 1, &clr[0])
+
+	gl.BindVertexArray(r.quadVAO)
+	gl.BindBuffer(gl.ARRAY_BUFFER, r.quadVBO)
+	gl.BufferSubData(gl.ARRAY_BUFFER, 0, len(vertices)*4, gl.Ptr(vertices))
+	gl.DrawArrays(gl.TRIANGLES, 0, 6)
+	gl.BindVertexArray(0)
+}
+
+// drawChar draws a single character using the font atlas
+func (r *Renderer) drawChar(x, y float32, char rune, clr [4]float32, proj [16]float32) {
+	glyph, ok := r.glyphs[char]
+	if !ok {
+		// Fallback to '?' for unknown characters
+		glyph, ok = r.glyphs['?']
+		if !ok {
+			return
+		}
+	}
+
+	// Calculate screen coordinates
+	w := float32(glyph.PixelWidth)
+	h := float32(glyph.PixelHeight)
+
+	// Texture coordinates
+	tx := glyph.X
+	ty := glyph.Y
+	tw := glyph.Width
+	th := glyph.Height
+
+	vertices := []float32{
+		x, y - h, tx, ty,
+		x + w, y - h, tx + tw, ty,
+		x + w, y, tx + tw, ty + th,
+		x, y - h, tx, ty,
+		x + w, y, tx + tw, ty + th,
+		x, y, tx, ty + th,
+	}
+
+	gl.UseProgram(r.fontProgram)
+	gl.UniformMatrix4fv(r.texProjLoc, 1, false, &proj[0])
+	gl.Uniform4fv(r.texColorLoc, 1, &clr[0])
+	gl.Uniform1i(r.texLoc, 0)
+
+	gl.ActiveTexture(gl.TEXTURE0)
+	gl.BindTexture(gl.TEXTURE_2D, r.fontAtlas)
+
+	gl.BindVertexArray(r.fontVAO)
+	gl.BindBuffer(gl.ARRAY_BUFFER, r.fontVBO)
+	gl.BufferSubData(gl.ARRAY_BUFFER, 0, len(vertices)*4, gl.Ptr(vertices))
+	gl.DrawArrays(gl.TRIANGLES, 0, 6)
+	gl.BindVertexArray(0)
+}
+
+// drawText draws a string of text
+func (r *Renderer) drawText(x, y float32, text string, clr [4]float32, proj [16]float32) {
+	for _, char := range text {
+		r.drawChar(x, y, char, clr, proj)
+		x += r.cellWidth
+	}
+}
+
+// colorToRGBA converts a grid.Color to RGBA
+func (r *Renderer) colorToRGBA(c grid.Color, isBackground bool) [4]float32 {
+	switch c.Type {
+	case grid.ColorDefault:
+		if isBackground {
+			return r.theme.Background
+		}
+		return r.theme.Foreground
+	case grid.ColorIndexed:
+		return indexedColor(c.Index)
+	case grid.ColorRGB:
+		return [4]float32{float32(c.R) / 255, float32(c.G) / 255, float32(c.B) / 255, 1.0}
+	}
+	return r.theme.Foreground
+}
+
+// indexedColor returns the RGB color for an indexed color (0-255)
+func indexedColor(index uint8) [4]float32 {
+	// Standard 16 colors
+	standard := [][4]float32{
+		{0.0, 0.0, 0.0, 1.0},    // 0: Black
+		{0.8, 0.0, 0.0, 1.0},    // 1: Red
+		{0.0, 0.8, 0.0, 1.0},    // 2: Green
+		{0.8, 0.8, 0.0, 1.0},    // 3: Yellow
+		{0.0, 0.0, 0.8, 1.0},    // 4: Blue
+		{0.8, 0.0, 0.8, 1.0},    // 5: Magenta
+		{0.0, 0.8, 0.8, 1.0},    // 6: Cyan
+		{0.75, 0.75, 0.75, 1.0}, // 7: White
+		{0.5, 0.5, 0.5, 1.0},    // 8: Bright Black
+		{1.0, 0.0, 0.0, 1.0},    // 9: Bright Red
+		{0.0, 1.0, 0.0, 1.0},    // 10: Bright Green
+		{1.0, 1.0, 0.0, 1.0},    // 11: Bright Yellow
+		{0.0, 0.0, 1.0, 1.0},    // 12: Bright Blue
+		{1.0, 0.0, 1.0, 1.0},    // 13: Bright Magenta
+		{0.0, 1.0, 1.0, 1.0},    // 14: Bright Cyan
+		{1.0, 1.0, 1.0, 1.0},    // 15: Bright White
+	}
+
+	if index < 16 {
+		return standard[index]
+	}
+
+	// 216 color cube (indices 16-231)
+	if index < 232 {
+		idx := index - 16
+		red := (idx / 36) % 6
+		green := (idx / 6) % 6
+		blue := idx % 6
+		return [4]float32{
+			float32(red) * 51 / 255,
+			float32(green) * 51 / 255,
+			float32(blue) * 51 / 255,
+			1.0,
+		}
+	}
+
+	// Grayscale (indices 232-255)
+	gray := float32(index-232) * 10 / 255
+	return [4]float32{gray, gray, gray, 1.0}
+}
+
+// CellDimensions returns the cell width and height
+func (r *Renderer) CellDimensions() (float32, float32) {
+	return r.cellWidth, r.cellHeight
+}
+
+// TabBarWidth returns the tab bar width
+func (r *Renderer) TabBarWidth() float32 {
+	return r.tabBarWidth
+}
+
+// CalculateGridSize calculates the number of columns and rows that fit
+func (r *Renderer) CalculateGridSize(width, height int) (cols, rows int) {
+	availableWidth := float32(width) - r.tabBarWidth - 10
+	availableHeight := float32(height) - r.paddingTop - r.paddingBottom
+	cols = int(availableWidth / r.cellWidth)
+	rows = int(availableHeight / r.cellHeight)
+	if cols < 1 {
+		cols = 1
+	}
+	if rows < 1 {
+		rows = 1
+	}
+	return
+}
+
+// ChangeFont changes the current font by name
+func (r *Renderer) ChangeFont(name string) error {
+	fontData, ok := fonts.GetFont(name)
+	if !ok {
+		return fmt.Errorf("font '%s' not found", name)
+	}
+
+	// Delete old texture
+	if r.fontAtlas != 0 {
+		gl.DeleteTextures(1, &r.fontAtlas)
+	}
+
+	// Clear old glyphs
+	r.glyphs = make(map[rune]Glyph)
+
+	// Load new font
+	if err := r.loadFontData(fontData); err != nil {
+		return err
+	}
+
+	r.currentFont = name
+	return nil
+}
+
+// CurrentFont returns the current font name
+func (r *Renderer) CurrentFont() string {
+	return r.currentFont
+}
+
+// GetAvailableFonts returns all available font names
+func (r *Renderer) GetAvailableFonts() []fonts.FontInfo {
+	return fonts.AvailableFonts()
+}
+
+// Destroy cleans up renderer resources
+func (r *Renderer) Destroy() {
+	gl.DeleteVertexArrays(1, &r.quadVAO)
+	gl.DeleteBuffers(1, &r.quadVBO)
+	gl.DeleteVertexArrays(1, &r.fontVAO)
+	gl.DeleteBuffers(1, &r.fontVBO)
+	gl.DeleteProgram(r.program)
+	gl.DeleteProgram(r.fontProgram)
+	gl.DeleteTextures(1, &r.fontAtlas)
+}
+
+// orthoMatrix creates an orthographic projection matrix
+func orthoMatrix(left, right, bottom, top, near, far float32) [16]float32 {
+	return [16]float32{
+		2 / (right - left), 0, 0, 0,
+		0, 2 / (top - bottom), 0, 0,
+		0, 0, -2 / (far - near), 0,
+		-(right + left) / (right - left), -(top + bottom) / (top - bottom), -(far + near) / (far - near), 1,
+	}
+}
+
+// createProgram creates a shader program from vertex and fragment shader sources
+func createProgram(vertexSource, fragmentSource string) (uint32, error) {
+	vertexShader, err := compileShader(vertexSource, gl.VERTEX_SHADER)
+	if err != nil {
+		return 0, err
+	}
+
+	fragmentShader, err := compileShader(fragmentSource, gl.FRAGMENT_SHADER)
+	if err != nil {
+		return 0, err
+	}
+
+	program := gl.CreateProgram()
+	gl.AttachShader(program, vertexShader)
+	gl.AttachShader(program, fragmentShader)
+	gl.LinkProgram(program)
+
+	var status int32
+	gl.GetProgramiv(program, gl.LINK_STATUS, &status)
+	if status == gl.FALSE {
+		var logLength int32
+		gl.GetProgramiv(program, gl.INFO_LOG_LENGTH, &logLength)
+		log := strings.Repeat("\x00", int(logLength+1))
+		gl.GetProgramInfoLog(program, logLength, nil, gl.Str(log))
+		return 0, fmt.Errorf("failed to link program: %v", log)
+	}
+
+	gl.DeleteShader(vertexShader)
+	gl.DeleteShader(fragmentShader)
+
+	return program, nil
+}
+
+// compileShader compiles a shader from source
+func compileShader(source string, shaderType uint32) (uint32, error) {
+	shader := gl.CreateShader(shaderType)
+
+	csources, free := gl.Strs(source)
+	gl.ShaderSource(shader, 1, csources, nil)
+	free()
+	gl.CompileShader(shader)
+
+	var status int32
+	gl.GetShaderiv(shader, gl.COMPILE_STATUS, &status)
+	if status == gl.FALSE {
+		var logLength int32
+		gl.GetShaderiv(shader, gl.INFO_LOG_LENGTH, &logLength)
+		log := strings.Repeat("\x00", int(logLength+1))
+		gl.GetShaderInfoLog(shader, logLength, nil, gl.Str(log))
+		return 0, fmt.Errorf("failed to compile shader: %v", log)
+	}
+
+	return shader, nil
+}
+
+// Ensure imports are used
+var _ = color.White
+var _ = draw.Draw
