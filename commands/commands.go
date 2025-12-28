@@ -59,17 +59,20 @@ Raven Terminal - Keybindings
 
 General:
   Ctrl+Q          Exit terminal
-  Ctrl+Shift+Q    Force exit
+  Shift+Enter     Toggle fullscreen mode
 
 Tabs:
   Ctrl+Shift+T    New tab
-  Ctrl+Shift+W    Close current tab
+  Ctrl+Shift+X    Close current tab
   Ctrl+Tab        Next tab
   Ctrl+Shift+Tab  Previous tab
 
 Scrolling:
-  Shift+PageUp    Scroll up
-  Shift+PageDown  Scroll down
+  Mouse wheel     Scroll up/down (3 lines)
+  Shift+Up        Scroll up 1 line
+  Shift+Down      Scroll down 1 line
+  Shift+PageUp    Scroll up 5 lines
+  Shift+PageDown  Scroll down 5 lines
 
 Terminal Commands:
   keybindings     Show this help

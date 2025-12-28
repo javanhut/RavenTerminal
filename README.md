@@ -91,6 +91,10 @@ Raven Terminal includes several built-in commands:
 | `list-fonts`         | List available fonts       |
 | `change-font <name>` | Change to specified font   |
 
+Command aliases:
+- `raven-keybindings` - Alias for `keybindings`
+- `fonts` - Alias for `list-fonts`
+
 ### Available Fonts
 
 - `firacode` - FiraCode Nerd Font
