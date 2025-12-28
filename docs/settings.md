@@ -13,6 +13,57 @@ Press `Ctrl+Shift+P` to open the settings menu.
 | Escape | Go back / Cancel input / Close menu |
 | Delete | Delete selected command or alias |
 
+## Menu Structure
+
+The settings menu is organized into the following sections:
+
+### Main Menu
+- **Shell**: Select which shell to use (bash, zsh, fish, etc.)
+- **Source RC Files**: Toggle whether to source your shell's rc files (ON/OFF)
+- **Prompt Style**: Select prompt style (minimal, simple, full, custom)
+- **Prompt Options**: Toggle individual prompt elements
+- **Scripts**: Edit initialization and detection scripts
+- **Commands**: Add/edit/delete custom commands
+- **Aliases**: Add/edit/delete shell aliases
+- **Save and Close**: Save all changes to config.toml
+- **Cancel**: Discard changes and close menu
+
+### Adding Commands
+
+1. Navigate to Commands
+2. Select "+ Add New Command"
+3. Enter the command name (e.g., "update")
+4. Enter the command to run (e.g., "sudo pacman -Syu")
+5. Optionally enter a description
+
+To edit an existing command, select it from the list.
+
+### Adding Aliases
+
+1. Navigate to Aliases
+2. Select "+ Add New Alias"
+3. Enter the alias name (e.g., "ll")
+4. Enter the command (e.g., "ls -la")
+
+To edit an existing alias, select it from the list.
+
+### Deleting Commands/Aliases
+
+1. Navigate to Commands or Aliases
+2. Select the item to delete
+3. Press the Delete key
+
+### Editing Scripts
+
+Scripts can be edited directly from the menu:
+1. Navigate to Scripts
+2. Select the script to edit
+3. The current value is shown - edit it or enter a new value
+4. Use `\n` for newlines when entering multi-line scripts
+5. Press Enter to save, Escape to cancel
+
+For complex multi-line scripts, edit the config.toml file directly.
+
 ## Configuration File
 
 Settings are stored in TOML format at `~/.config/raven-terminal/config.toml`.

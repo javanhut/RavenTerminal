@@ -102,22 +102,22 @@ func main() {
 				settingsMenu.MoveDown()
 				return
 			case glfw.KeyEnter, glfw.KeyKPEnter:
-				if settingsMenu.InputMode {
-					settingsMenu.HandleInputEnter()
+				if settingsMenu.InputMode() {
+					settingsMenu.HandleEnter()
 				} else {
 					settingsMenu.Select()
 				}
 				return
 			case glfw.KeyEscape:
-				settingsMenu.HandleInputEscape()
+				settingsMenu.HandleEscape()
 				return
 			case glfw.KeyBackspace:
-				if settingsMenu.InputMode {
-					settingsMenu.HandleInputBackspace()
+				if settingsMenu.InputMode() {
+					settingsMenu.HandleBackspace()
 				}
 				return
 			case glfw.KeyDelete:
-				settingsMenu.DeleteSelected()
+				settingsMenu.HandleDelete()
 				return
 			}
 			return
@@ -261,8 +261,8 @@ func main() {
 
 	win.GLFW().SetCharCallback(func(w *glfw.Window, char rune) {
 		// Handle character input for settings menu
-		if settingsMenu.IsOpen() && settingsMenu.InputMode {
-			settingsMenu.HandleInputChar(char)
+		if settingsMenu.IsOpen() && settingsMenu.InputMode() {
+			settingsMenu.HandleChar(char)
 			return
 		}
 
