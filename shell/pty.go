@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/creack/pty"
+	"github.com/javanhut/RavenTerminal/config"
 )
 
 // getDistroName reads the distribution name from /etc/os-release
@@ -39,7 +40,7 @@ type PtySession struct {
 
 // NewPtySession creates a new PTY session with a login shell
 func NewPtySession(cols, rows uint16) (*PtySession, error) {
-	shell := findShell()
+	shell := findShellFromConfig()
 
 	// Get user info from system, not environment
 	currentUser, err := user.Current()
@@ -113,6 +114,19 @@ func NewPtySession(cols, rows uint16) (*PtySession, error) {
 	}()
 
 	return session, nil
+}
+
+// findShellFromConfig finds the shell from config or falls back to system default
+func findShellFromConfig() string {
+	// Check config for user-selected shell
+	cfg, err := config.Load()
+	if err == nil && cfg.Shell != "" {
+		if _, err := os.Stat(cfg.Shell); err == nil {
+			return cfg.Shell
+		}
+	}
+	// Fall back to system default
+	return findShell()
 }
 
 // findShell finds the default shell from system user database

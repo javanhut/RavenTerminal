@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/javanhut/RavenTerminal/fonts"
 	"github.com/javanhut/RavenTerminal/grid"
+	"github.com/javanhut/RavenTerminal/menu"
 	"github.com/javanhut/RavenTerminal/tab"
 	"image"
 	"image/color"
@@ -369,6 +370,7 @@ func (r *Renderer) getHelpSections() []struct {
 				{"Ctrl+Q", "Exit terminal"},
 				{"Shift+Enter", "Toggle fullscreen"},
 				{"Ctrl+Shift+K", "Show/hide help"},
+				{"Ctrl+Shift+P", "Open settings"},
 				{"Ctrl+Shift++", "Zoom in"},
 				{"Ctrl+Shift+-", "Zoom out"},
 				{"Ctrl+Shift+0", "Reset zoom"},
@@ -605,6 +607,140 @@ func (r *Renderer) renderHelpPanel(width, height int, proj [16]float32) {
 	// Separator line above the footer text
 	footerSepY := footerY - r.cellHeight - 8
 	r.drawRect(contentX, footerSepY, contentWidth, 1, r.theme.Foreground, proj)
+}
+
+// RenderWithMenu renders the terminal with optional menu overlay
+func (r *Renderer) RenderWithMenu(tm *tab.TabManager, width, height int, cursorVisible bool, m *menu.Menu) {
+	proj := orthoMatrix(0, float32(width), float32(height), 0, -1, 1)
+
+	// Clear background
+	gl.ClearColor(r.theme.Background[0], r.theme.Background[1], r.theme.Background[2], r.theme.Background[3])
+	gl.Clear(gl.COLOR_BUFFER_BIT)
+
+	// Render tab bar
+	r.renderTabBar(tm, width, height, proj)
+
+	// Render terminal content with split pane support
+	activeTab := tm.ActiveTab()
+	if activeTab != nil {
+		r.renderPanes(activeTab, width, height, proj, cursorVisible)
+	}
+
+	// Render menu overlay if open
+	if m != nil && m.IsOpen() {
+		r.renderMenu(m, width, height, proj)
+	}
+}
+
+// renderMenu renders the settings menu overlay
+func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32) {
+	// Panel dimensions - dynamically sized
+	panelWidth := float32(width) * 0.70
+	panelHeight := float32(height) * 0.80
+
+	// Constraints
+	if panelWidth < 400 {
+		panelWidth = 400
+	}
+	if panelWidth > 600 {
+		panelWidth = 600
+	}
+	if panelHeight < 300 {
+		panelHeight = 300
+	}
+	if panelHeight > 700 {
+		panelHeight = 700
+	}
+
+	panelX := (float32(width) - panelWidth) / 2
+	panelY := (float32(height) - panelHeight) / 2
+
+	// Draw semi-transparent overlay
+	overlayColor := [4]float32{0.0, 0.0, 0.0, 0.8}
+	r.drawRect(0, 0, float32(width), float32(height), overlayColor, proj)
+
+	// Draw panel background
+	panelBg := [4]float32{0.06, 0.07, 0.10, 1.0}
+	r.drawRect(panelX, panelY, panelWidth, panelHeight, panelBg, proj)
+
+	// Draw panel border
+	borderColor := r.theme.TabActive
+	borderWidth := float32(3)
+	r.drawRect(panelX, panelY, panelWidth, borderWidth, borderColor, proj)
+	r.drawRect(panelX, panelY+panelHeight-borderWidth, panelWidth, borderWidth, borderColor, proj)
+	r.drawRect(panelX, panelY, borderWidth, panelHeight, borderColor, proj)
+	r.drawRect(panelX+panelWidth-borderWidth, panelY, borderWidth, panelHeight, borderColor, proj)
+
+	// Content positioning
+	marginX := float32(25)
+	contentX := panelX + marginX
+	contentWidth := panelWidth - marginX*2
+
+	lineHeight := r.cellHeight * 1.6
+	headerY := panelY + 40
+
+	// Title
+	r.drawText(contentX, headerY, m.GetTitle(), r.theme.TabActive, proj)
+
+	// Separator under title
+	separatorY := headerY + lineHeight*0.6
+	r.drawRect(contentX, separatorY, contentWidth, 1, r.theme.Foreground, proj)
+
+	// Menu items
+	contentStartY := separatorY + lineHeight
+	visibleItems := int((panelHeight - 150) / lineHeight)
+
+	for i, item := range m.Items {
+		if i < m.ScrollOffset {
+			continue
+		}
+		if i >= m.ScrollOffset+visibleItems {
+			break
+		}
+
+		y := contentStartY + float32(i-m.ScrollOffset)*lineHeight
+
+		// Skip disabled/separator items
+		if item.Disabled {
+			continue
+		}
+
+		// Highlight selected item
+		if i == m.SelectedIndex {
+			highlightColor := [4]float32{0.12, 0.14, 0.20, 1.0}
+			r.drawRect(contentX-5, y-lineHeight+5, contentWidth+10, lineHeight, highlightColor, proj)
+			// Selection indicator
+			r.drawText(contentX, y, ">", r.theme.TabActive, proj)
+			r.drawText(contentX+r.cellWidth*2, y, item.Label, r.theme.TabActive, proj)
+		} else {
+			r.drawText(contentX+r.cellWidth*2, y, item.Label, r.theme.Foreground, proj)
+		}
+	}
+
+	// Status message
+	if m.StatusMessage != "" {
+		statusY := panelY + panelHeight - 70
+		r.drawText(contentX, statusY, m.StatusMessage, r.theme.Cursor, proj)
+	}
+
+	// Input mode
+	if m.InputMode {
+		inputY := panelY + panelHeight - 100
+		r.drawRect(contentX, inputY-5, contentWidth, lineHeight+10, [4]float32{0.1, 0.1, 0.15, 1.0}, proj)
+		r.drawText(contentX+5, inputY+lineHeight*0.3, m.InputPrompt, r.theme.Foreground, proj)
+
+		inputBoxY := inputY + lineHeight*0.5
+		r.drawRect(contentX+5, inputBoxY, contentWidth-10, lineHeight, [4]float32{0.05, 0.05, 0.08, 1.0}, proj)
+		r.drawText(contentX+10, inputBoxY+lineHeight*0.7, m.InputBuffer+"_", r.theme.TabActive, proj)
+	}
+
+	// Footer
+	footerY := panelY + panelHeight - 30
+	footerText := "Up/Down: navigate | Enter: select | Esc: back/close"
+	if m.InputMode {
+		footerText = "Enter: confirm | Esc: cancel"
+	}
+	r.drawText(contentX, footerY, footerText, [4]float32{0.5, 0.5, 0.5, 1.0}, proj)
 }
 
 // renderPanes renders all panes in a tab

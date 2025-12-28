@@ -7,6 +7,7 @@ import (
 
 	"github.com/javanhut/RavenTerminal/commands"
 	"github.com/javanhut/RavenTerminal/keybindings"
+	"github.com/javanhut/RavenTerminal/menu"
 	"github.com/javanhut/RavenTerminal/render"
 	"github.com/javanhut/RavenTerminal/tab"
 	"github.com/javanhut/RavenTerminal/window"
@@ -78,6 +79,7 @@ func main() {
 	blinkInterval := 500 * time.Millisecond
 	lineBuf := &lineBuffer{}
 	showHelp := false
+	settingsMenu := menu.NewMenu()
 
 	win.GLFW().SetKeyCallback(func(w *glfw.Window, key glfw.Key, scancode int, action glfw.Action, mods glfw.ModifierKey) {
 		if action == glfw.Release {
@@ -87,6 +89,37 @@ func main() {
 		currentMods = mods
 		activeTab := tabManager.ActiveTab()
 		if activeTab == nil {
+			return
+		}
+
+		// Handle settings menu input when open
+		if settingsMenu.IsOpen() {
+			switch key {
+			case glfw.KeyUp:
+				settingsMenu.MoveUp()
+				return
+			case glfw.KeyDown:
+				settingsMenu.MoveDown()
+				return
+			case glfw.KeyEnter, glfw.KeyKPEnter:
+				if settingsMenu.InputMode {
+					settingsMenu.HandleInputEnter()
+				} else {
+					settingsMenu.Select()
+				}
+				return
+			case glfw.KeyEscape:
+				settingsMenu.HandleInputEscape()
+				return
+			case glfw.KeyBackspace:
+				if settingsMenu.InputMode {
+					settingsMenu.HandleInputBackspace()
+				}
+				return
+			case glfw.KeyDelete:
+				settingsMenu.DeleteSelected()
+				return
+			}
 			return
 		}
 
@@ -217,12 +250,24 @@ func main() {
 				cols, rows := renderer.CalculateGridSize(width, height)
 				tabManager.ResizeAll(uint16(cols), uint16(rows))
 			}
+		case keybindings.ActionOpenMenu:
+			if settingsMenu.IsOpen() {
+				settingsMenu.Close()
+			} else {
+				settingsMenu.Open()
+			}
 		}
 	})
 
 	win.GLFW().SetCharCallback(func(w *glfw.Window, char rune) {
-		// Don't process char input when help is shown
-		if showHelp {
+		// Handle character input for settings menu
+		if settingsMenu.IsOpen() && settingsMenu.InputMode {
+			settingsMenu.HandleInputChar(char)
+			return
+		}
+
+		// Don't process char input when help or menu is shown
+		if showHelp || settingsMenu.IsOpen() {
 			return
 		}
 
@@ -275,7 +320,11 @@ func main() {
 		// Render
 		width, height := win.GetFramebufferSize()
 		win.SetViewport(width, height)
-		renderer.RenderWithHelp(tabManager, width, height, cursorVisible, showHelp)
+		if settingsMenu.IsOpen() {
+			renderer.RenderWithMenu(tabManager, width, height, cursorVisible, settingsMenu)
+		} else {
+			renderer.RenderWithHelp(tabManager, width, height, cursorVisible, showHelp)
+		}
 
 		// Swap buffers and poll events
 		win.SwapBuffers()

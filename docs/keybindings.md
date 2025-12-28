@@ -7,6 +7,7 @@
 | Ctrl+Q | Exit terminal |
 | Shift+Enter | Toggle fullscreen mode |
 | Ctrl+Shift+K | Show/hide keybindings help panel |
+| Ctrl+Shift+P | Open settings menu |
 
 ## Zoom
 

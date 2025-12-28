@@ -31,6 +31,7 @@ const (
 	ActionZoomIn
 	ActionZoomOut
 	ActionZoomReset
+	ActionOpenMenu
 )
 
 // KeyResult contains the result of processing a key
@@ -93,6 +94,11 @@ func TranslateKey(key glfw.Key, mods glfw.ModifierKey, appCursorMode bool) KeyRe
 
 	if ctrl && shift && key == glfw.Key0 {
 		return KeyResult{Action: ActionZoomReset}
+	}
+
+	// Ctrl+Shift+P to open settings menu (like command palette)
+	if ctrl && shift && key == glfw.KeyP {
+		return KeyResult{Action: ActionOpenMenu}
 	}
 
 	if ctrl && key == glfw.KeyTab {
