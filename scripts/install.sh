@@ -76,6 +76,83 @@ warn_path_conflict() {
     fi
 }
 
+desktop_exec_path() {
+    local desktop_file="$1"
+    if [ ! -f "$desktop_file" ]; then
+        return 1
+    fi
+
+    local exec_line
+    exec_line="$(sed -n 's/^Exec=//p' "$desktop_file" | head -n 1)"
+    if [ -z "$exec_line" ]; then
+        return 1
+    fi
+
+    echo "$exec_line" | awk '{print $1}'
+}
+
+ensure_launcher() {
+    local launcher_path="$1"
+    local launcher_dir
+
+    if [ -x "$launcher_path" ]; then
+        return 0
+    fi
+
+    launcher_dir="$(dirname "$launcher_path")"
+    mkdir -p "$launcher_dir"
+    cp "$SCRIPT_DIR/raven-terminal-wrapper.sh" "$launcher_path"
+    chmod +x "$launcher_path"
+}
+
+fix_stale_desktop_entry() {
+    local desktop_file="$1"
+    local expected_exec="$2"
+    local fallback_exec="$3"
+    local create_launcher="$4"
+    local exec_path
+
+    exec_path="$(desktop_exec_path "$desktop_file")"
+    if [ -z "$exec_path" ]; then
+        return 0
+    fi
+
+    if [ -x "$exec_path" ]; then
+        return 0
+    fi
+
+    if [ "$create_launcher" = true ] && [ "$exec_path" = "$expected_exec" ]; then
+        ensure_launcher "$expected_exec"
+        if [ -x "$expected_exec" ]; then
+            print_warning "Created missing launcher: $expected_exec"
+            return 0
+        fi
+    fi
+
+    if [ -x "$expected_exec" ]; then
+        print_warning "Fixing stale desktop entry: $desktop_file"
+        local tmp_desktop
+        tmp_desktop="$(mktemp)"
+        sed "s|^Exec=.*|Exec=$expected_exec|" "$desktop_file" > "$tmp_desktop"
+        mv "$tmp_desktop" "$desktop_file"
+        if [ "$VERBOSE" = true ]; then
+            print_success "Updated Exec to $expected_exec"
+        fi
+        return 0
+    fi
+
+    if [ -n "$fallback_exec" ] && [ -x "$fallback_exec" ]; then
+        print_warning "Fixing stale desktop entry: $desktop_file"
+        local tmp_desktop
+        tmp_desktop="$(mktemp)"
+        sed "s|^Exec=.*|Exec=$fallback_exec|" "$desktop_file" > "$tmp_desktop"
+        mv "$tmp_desktop" "$desktop_file"
+        if [ "$VERBOSE" = true ]; then
+            print_success "Updated Exec to $fallback_exec"
+        fi
+    fi
+}
+
 usage() {
     cat << EOF
 Usage: $(basename "$0") [OPTIONS]
@@ -411,10 +488,13 @@ main() {
         user)
             install_user
             warn_path_conflict "$USER_BIN_DIR/$APP_NAME"
+            fix_stale_desktop_entry "$USER_APP_DIR/$APP_NAME.desktop" "$USER_BIN_DIR/raven-terminal-launcher" "" true
             ;;
         global)
             install_global
             warn_path_conflict "$GLOBAL_BIN_DIR/$APP_NAME"
+            fix_stale_desktop_entry "$GLOBAL_APP_DIR/$APP_NAME.desktop" "$GLOBAL_BIN_DIR/raven-terminal-launcher" "" false
+            fix_stale_desktop_entry "$USER_APP_DIR/$APP_NAME.desktop" "$USER_BIN_DIR/raven-terminal-launcher" "$GLOBAL_BIN_DIR/raven-terminal-launcher" true
             ;;
     esac
     
