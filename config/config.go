@@ -55,6 +55,7 @@ type Config struct {
 	Scripts  ScriptsConfig     `toml:"scripts"`
 	Commands []CustomCommand   `toml:"commands"`
 	Aliases  map[string]string `toml:"aliases"`
+	Theme    string            `toml:"theme"`
 }
 
 // DefaultConfig returns the default configuration
@@ -108,6 +109,7 @@ echo "$_vcs"
 		Aliases: map[string]string{
 			"ls": "ls --color=auto -p -C",
 		},
+		Theme: "raven-blue",
 	}
 }
 

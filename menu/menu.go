@@ -16,6 +16,7 @@ const (
 	MenuClosed MenuState = iota
 	MenuMain
 	MenuShellSelect
+	MenuThemeSelect
 	MenuPromptSettings
 	MenuPromptStyle
 	MenuScripts
@@ -150,6 +151,7 @@ func (m *Menu) buildMainMenu() {
 		currentShell = "(system default)"
 	}
 
+	themeLabel := config.ThemeLabel(m.Config.Theme)
 	promptStyle := m.Config.Prompt.Style
 	if promptStyle == "" {
 		promptStyle = "full"
@@ -163,6 +165,7 @@ func (m *Menu) buildMainMenu() {
 	m.Items = []MenuItem{
 		{Label: "Shell: " + currentShell},
 		{Label: "Source RC Files: " + sourceRC},
+		{Label: "Theme: " + themeLabel},
 		{Label: "Prompt Style: " + promptStyle},
 		{Label: "Prompt Options..."},
 		{Label: "Scripts..."},
@@ -182,6 +185,21 @@ func (m *Menu) buildShellMenu() {
 	}
 	for _, shell := range shells {
 		m.Items = append(m.Items, MenuItem{Label: shell, Value: shell})
+	}
+	m.Items = append(m.Items, MenuItem{Label: ""})
+	m.Items = append(m.Items, MenuItem{Label: "Back"})
+}
+
+// buildThemeMenu builds the theme selection menu
+func (m *Menu) buildThemeMenu() {
+	options := config.ThemeOptions()
+	m.Items = []MenuItem{}
+	for _, opt := range options {
+		prefix := "  "
+		if m.Config.Theme == opt.Name {
+			prefix = "> "
+		}
+		m.Items = append(m.Items, MenuItem{Label: prefix + opt.Label, Value: opt.Name})
 	}
 	m.Items = append(m.Items, MenuItem{Label: ""})
 	m.Items = append(m.Items, MenuItem{Label: "Back"})
@@ -357,6 +375,8 @@ func (m *Menu) Select() {
 		m.handleMainSelect()
 	case MenuShellSelect:
 		m.handleShellSelect(item)
+	case MenuThemeSelect:
+		m.handleThemeSelect(item)
 	case MenuPromptStyle:
 		m.handlePromptStyleSelect(item)
 	case MenuPromptSettings:
@@ -384,31 +404,35 @@ func (m *Menu) handleMainSelect() {
 		m.Config.Shell.SourceRC = !m.Config.Shell.SourceRC
 		m.buildMainMenu()
 		m.StatusMessage = "Updated (restart tab to apply)"
-	case 2: // Prompt Style
+	case 2: // Theme
+		m.State = MenuThemeSelect
+		m.SelectedIndex = 0
+		m.buildThemeMenu()
+	case 3: // Prompt Style
 		m.State = MenuPromptStyle
 		m.SelectedIndex = 0
 		m.buildPromptStyleMenu()
-	case 3: // Prompt Options
+	case 4: // Prompt Options
 		m.State = MenuPromptSettings
 		m.SelectedIndex = 0
 		m.buildPromptSettingsMenu()
-	case 4: // Scripts
+	case 5: // Scripts
 		m.State = MenuScripts
 		m.SelectedIndex = 0
 		m.buildScriptsMenu()
-	case 5: // Commands
+	case 6: // Commands
 		m.State = MenuCommands
 		m.SelectedIndex = 0
 		m.buildCommandsMenu()
-	case 6: // Aliases
+	case 7: // Aliases
 		m.State = MenuAliases
 		m.SelectedIndex = 0
 		m.buildAliasesMenu()
-	case 8: // Save and Close
+	case 9: // Save and Close
 		if m.saveConfig() {
 			m.Close()
 		}
-	case 9: // Cancel
+	case 10: // Cancel
 		m.Config, _ = config.Load()
 		m.Close()
 	}
@@ -421,6 +445,18 @@ func (m *Menu) handleShellSelect(item MenuItem) {
 	}
 	m.Config.Shell.Path = item.Value
 	m.StatusMessage = "Shell updated (restart tab to apply)"
+	m.goBack()
+}
+
+func (m *Menu) handleThemeSelect(item MenuItem) {
+	if item.Label == "Back" {
+		m.goBack()
+		return
+	}
+	if item.Value != "" {
+		m.Config.Theme = item.Value
+		m.StatusMessage = "Theme updated (save to persist)"
+	}
 	m.goBack()
 }
 
@@ -704,7 +740,7 @@ func (m *Menu) HandleDelete() {
 // goBack goes back to previous menu
 func (m *Menu) goBack() {
 	switch m.State {
-	case MenuShellSelect, MenuPromptStyle, MenuPromptSettings, MenuScripts, MenuCommands, MenuAliases:
+	case MenuShellSelect, MenuThemeSelect, MenuPromptStyle, MenuPromptSettings, MenuScripts, MenuCommands, MenuAliases:
 		m.State = MenuMain
 		m.SelectedIndex = 0
 		m.ScrollOffset = 0
@@ -736,6 +772,8 @@ func (m *Menu) GetTitle() string {
 		return "Settings"
 	case MenuShellSelect:
 		return "Select Shell"
+	case MenuThemeSelect:
+		return "Select Theme"
 	case MenuPromptStyle:
 		return "Prompt Style"
 	case MenuPromptSettings:
@@ -879,6 +917,8 @@ func (m *Menu) stateName() string {
 		return "main"
 	case MenuShellSelect:
 		return "shell"
+	case MenuThemeSelect:
+		return "theme"
 	case MenuPromptSettings:
 		return "prompt_settings"
 	case MenuPromptStyle:

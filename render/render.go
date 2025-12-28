@@ -28,13 +28,52 @@ type Theme struct {
 
 // DefaultTheme returns the default color theme
 func DefaultTheme() Theme {
-	return Theme{
-		Background: [4]float32{0.051, 0.063, 0.102, 1.0}, // #0d101a
-		Foreground: [4]float32{0.910, 0.929, 0.969, 1.0}, // #e8edf7
-		Cursor:     [4]float32{0.635, 0.878, 0.780, 1.0}, // #a2e0c7
-		TabBar:     [4]float32{0.039, 0.047, 0.078, 1.0}, // #0a0c14
-		TabActive:  [4]float32{0.455, 0.714, 1.0, 1.0},   // #74b6ff
+	return ThemeByName("raven-blue")
+}
+
+// ThemeByName returns a theme for a known theme name.
+func ThemeByName(name string) Theme {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "crow-black":
+		return Theme{
+			Background: [4]float32{0.020, 0.020, 0.020, 1.0}, // #050505
+			Foreground: [4]float32{0.902, 0.902, 0.902, 1.0}, // #e6e6e6
+			Cursor:     [4]float32{0.965, 0.965, 0.965, 1.0}, // #f6f6f6
+			TabBar:     [4]float32{0.000, 0.000, 0.000, 1.0}, // #000000
+			TabActive:  [4]float32{0.702, 0.702, 0.702, 1.0}, // #b3b3b3
+		}
+	case "magpie-black-white-grey", "magpie-black-and-white-grey":
+		return Theme{
+			Background: [4]float32{0.067, 0.067, 0.067, 1.0}, // #111111
+			Foreground: [4]float32{0.961, 0.961, 0.961, 1.0}, // #f5f5f5
+			Cursor:     [4]float32{1.000, 1.000, 1.000, 1.0}, // #ffffff
+			TabBar:     [4]float32{0.039, 0.039, 0.039, 1.0}, // #0a0a0a
+			TabActive:  [4]float32{0.816, 0.816, 0.816, 1.0}, // #d0d0d0
+		}
+	case "catppuccin-mocha", "catppuccin", "catpuccin":
+		return Theme{
+			Background: [4]float32{0.118, 0.118, 0.180, 1.0}, // #1e1e2e
+			Foreground: [4]float32{0.804, 0.839, 0.957, 1.0}, // #cdd6f4
+			Cursor:     [4]float32{0.961, 0.761, 0.906, 1.0}, // #f5c2e7
+			TabBar:     [4]float32{0.094, 0.094, 0.145, 1.0}, // #181825
+			TabActive:  [4]float32{0.537, 0.706, 0.980, 1.0}, // #89b4fa
+		}
+	case "raven-blue":
+		fallthrough
+	default:
+		return Theme{
+			Background: [4]float32{0.051, 0.063, 0.102, 1.0}, // #0d101a
+			Foreground: [4]float32{0.910, 0.929, 0.969, 1.0}, // #e8edf7
+			Cursor:     [4]float32{0.635, 0.878, 0.780, 1.0}, // #a2e0c7
+			TabBar:     [4]float32{0.039, 0.047, 0.078, 1.0}, // #0a0c14
+			TabActive:  [4]float32{0.455, 0.714, 1.0, 1.0},   // #74b6ff
+		}
 	}
+}
+
+// SetThemeByName applies a named theme to the renderer.
+func (r *Renderer) SetThemeByName(name string) {
+	r.theme = ThemeByName(name)
 }
 
 // Glyph contains information about a rendered glyph
@@ -682,21 +721,9 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 	contentX := panelX + marginX
 	contentWidth := panelWidth - marginX*2
 
-	// Calculate max characters that fit in content width (for truncation)
-	maxChars := int(contentWidth/r.cellWidth) - 3 // -3 for "> " prefix
-	if maxChars < 10 {
-		maxChars = 10
-	}
-
 	lineHeight := r.cellHeight * 1.5
 	headerY := panelY + 35
-
-	// Title
-	r.drawText(contentX, headerY, m.GetTitle(), r.theme.TabActive, proj)
-
-	// Separator under title
 	separatorY := headerY + lineHeight*0.5
-	r.drawRect(contentX, separatorY, contentWidth, 1, r.theme.Foreground, proj)
 
 	// Calculate footer area height
 	inputIsMultiline := m.InputMode() && m.InputIsMultiline()
@@ -720,6 +747,30 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 	if visibleItems < 1 {
 		visibleItems = 1
 	}
+
+	totalItems := len(m.Items)
+	maxScroll := totalItems - visibleItems
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+
+	scrollBarWidth := float32(8)
+	scrollBarPadding := float32(8)
+	if maxScroll > 0 {
+		contentWidth -= scrollBarWidth + scrollBarPadding
+	}
+
+	// Calculate max characters that fit in content width (for truncation)
+	maxChars := int(contentWidth/r.cellWidth) - 3 // -3 for "> " prefix
+	if maxChars < 10 {
+		maxChars = 10
+	}
+
+	// Title
+	r.drawText(contentX, headerY, m.GetTitle(), r.theme.TabActive, proj)
+
+	// Separator under title
+	r.drawRect(contentX, separatorY, contentWidth, 1, r.theme.Foreground, proj)
 
 	// Draw menu items
 	itemIndex := 0
@@ -856,6 +907,28 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 		footerText = "Up/Down | Enter | Del | Esc"
 	}
 	r.drawText(contentX, footerTextY, footerText, [4]float32{0.5, 0.5, 0.5, 1.0}, proj)
+
+	if maxScroll > 0 {
+		scrollBarX := contentX + contentWidth + scrollBarPadding
+		scrollBarHeight := contentEndY - contentStartY
+		scrollBarY := contentStartY
+
+		trackColor := [4]float32{0.12, 0.13, 0.18, 1.0}
+		r.drawRect(scrollBarX, scrollBarY, scrollBarWidth, scrollBarHeight, trackColor, proj)
+
+		scrollThumbHeight := scrollBarHeight * float32(visibleItems) / float32(totalItems)
+		if scrollThumbHeight < 24 {
+			scrollThumbHeight = 24
+		}
+		if scrollThumbHeight > scrollBarHeight {
+			scrollThumbHeight = scrollBarHeight
+		}
+		scrollThumbY := scrollBarY
+		if maxScroll > 0 {
+			scrollThumbY = scrollBarY + (scrollBarHeight-scrollThumbHeight)*float32(m.ScrollOffset)/float32(maxScroll)
+		}
+		r.drawRect(scrollBarX, scrollThumbY, scrollBarWidth, scrollThumbHeight, r.theme.TabActive, proj)
+	}
 }
 
 // renderPanes renders all panes in a tab using the nested layout system

@@ -83,6 +83,11 @@ func main() {
 	lineBuf := &lineBuffer{}
 	showHelp := false
 	settingsMenu := menu.NewMenu()
+	currentTheme := ""
+	if settingsMenu.Config != nil {
+		currentTheme = settingsMenu.Config.Theme
+		renderer.SetThemeByName(currentTheme)
+	}
 
 	win.GLFW().SetKeyCallback(func(w *glfw.Window, key glfw.Key, scancode int, action glfw.Action, mods glfw.ModifierKey) {
 		if action == glfw.Release {
@@ -323,6 +328,18 @@ func main() {
 	})
 
 	win.GLFW().SetScrollCallback(func(w *glfw.Window, xoff, yoff float64) {
+		if settingsMenu.IsOpen() {
+			if settingsMenu.InputMode() {
+				return
+			}
+			if yoff > 0 {
+				settingsMenu.MoveUp()
+			} else if yoff < 0 {
+				settingsMenu.MoveDown()
+			}
+			return
+		}
+
 		activeTab := tabManager.ActiveTab()
 		if activeTab == nil {
 			return
@@ -340,6 +357,11 @@ func main() {
 		tabManager.CleanupExited()
 		if tabManager.AllExited() {
 			break
+		}
+
+		if settingsMenu.Config != nil && settingsMenu.Config.Theme != currentTheme {
+			renderer.SetThemeByName(settingsMenu.Config.Theme)
+			currentTheme = settingsMenu.Config.Theme
 		}
 
 		// Handle cursor blinking

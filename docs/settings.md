@@ -20,6 +20,7 @@ The settings menu is organized into the following sections:
 ### Main Menu
 - **Shell**: Select which shell to use (bash, zsh, fish, etc.)
 - **Source RC Files**: Toggle whether to source your shell's rc files (ON/OFF)
+- **Theme**: Select a UI theme
 - **Prompt Style**: Select prompt style (minimal, simple, full, custom)
 - **Prompt Options**: Toggle individual prompt elements
 - **Scripts**: Edit initialization and detection scripts
@@ -69,6 +70,12 @@ Settings are stored in TOML format at `~/.config/raven-terminal/config.toml`.
 On first run, a default configuration is created automatically.
 
 ## Configuration Options
+
+### Theme
+
+```toml
+theme = "raven-blue" # "raven-blue", "crow-black", "magpie-black-white-grey", "catppuccin-mocha"
+```
 
 ### Shell Settings
 
@@ -176,6 +183,8 @@ gp = "git push"
 ## Example Configuration
 
 ```toml
+theme = "raven-blue"
+
 [shell]
 path = "/usr/bin/zsh"
 source_rc = true
