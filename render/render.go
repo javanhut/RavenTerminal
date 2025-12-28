@@ -46,14 +46,17 @@ type Glyph struct {
 
 // Renderer handles OpenGL rendering with smooth fonts
 type Renderer struct {
-	theme         Theme
-	cellWidth     float32
-	cellHeight    float32
-	fontSize      float32
-	paddingTop    float32
-	paddingBottom float32
-	tabBarWidth   float32
-	currentFont   string
+	theme          Theme
+	cellWidth      float32 // Current cell dimensions (may be zoomed)
+	cellHeight     float32
+	fontSize       float32 // Current font size
+	baseFontSize   float32 // Base font size (16.0)
+	baseCellWidth  float32 // Cell dimensions at base font size (for UI)
+	baseCellHeight float32
+	paddingTop     float32
+	paddingBottom  float32
+	tabBarWidth    float32
+	currentFont    string
 
 	// Font data
 	glyphs    map[rune]Glyph
@@ -84,6 +87,7 @@ func NewRenderer() (*Renderer, error) {
 	r := &Renderer{
 		theme:         DefaultTheme(),
 		fontSize:      16.0,
+		baseFontSize:  16.0, // Fixed UI font size
 		paddingTop:    12.0,
 		paddingBottom: 12.0,
 		tabBarWidth:   135.0,
@@ -99,6 +103,10 @@ func NewRenderer() (*Renderer, error) {
 	if err := r.loadFont(); err != nil {
 		return nil, err
 	}
+
+	// Store base cell dimensions for UI elements
+	r.baseCellWidth = r.cellWidth
+	r.baseCellHeight = r.cellHeight
 
 	return r, nil
 }
@@ -361,6 +369,9 @@ func (r *Renderer) getHelpSections() []struct {
 				{"Ctrl+Q", "Exit terminal"},
 				{"Shift+Enter", "Toggle fullscreen"},
 				{"Ctrl+Shift+K", "Show/hide help"},
+				{"Ctrl+Shift++", "Zoom in"},
+				{"Ctrl+Shift+-", "Zoom out"},
+				{"Ctrl+Shift+0", "Reset zoom"},
 			},
 		},
 		{
@@ -683,15 +694,19 @@ func (r *Renderer) renderTabBar(tm *tab.TabManager, width, height int, proj [16]
 	// Draw separator line
 	r.drawRect(r.tabBarWidth-2, 0, 2, float32(height), r.theme.Foreground, proj)
 
+	// Calculate scale to render at base size regardless of zoom
+	scale := r.baseFontSize / r.fontSize
+	cellH := r.cellHeight * scale
+
 	// Draw header
 	header := fmt.Sprintf("RT %d/%d", tm.ActiveIndex()+1, tm.TabCount())
-	r.drawText(10, r.cellHeight, header, r.theme.TabActive, proj)
+	r.drawTextScaled(10, cellH, header, r.theme.TabActive, proj, scale)
 
 	// Draw tabs
 	tabs := tm.GetTabs()
 	activeIdx := tm.ActiveIndex()
 	for i, t := range tabs {
-		y := r.cellHeight*2 + float32(i)*r.cellHeight*1.2
+		y := cellH*2 + float32(i)*cellH*1.2
 		prefix := "  "
 		clr := r.theme.Foreground
 		if i == activeIdx {
@@ -699,7 +714,7 @@ func (r *Renderer) renderTabBar(tm *tab.TabManager, width, height int, proj [16]
 			clr = r.theme.TabActive
 		}
 		text := fmt.Sprintf("%sTab %d", prefix, t.ID())
-		r.drawText(10, y, text, clr, proj)
+		r.drawTextScaled(10, y, text, clr, proj, scale)
 	}
 }
 
@@ -843,6 +858,58 @@ func (r *Renderer) drawText(x, y float32, text string, clr [4]float32, proj [16]
 	}
 }
 
+// drawTextScaled draws text at a specific scale relative to current font
+func (r *Renderer) drawTextScaled(x, y float32, text string, clr [4]float32, proj [16]float32, scale float32) {
+	for _, char := range text {
+		r.drawCharScaled(x, y, char, clr, proj, scale)
+		x += r.cellWidth * scale
+	}
+}
+
+// drawCharScaled draws a character at a specific scale
+func (r *Renderer) drawCharScaled(x, y float32, char rune, clr [4]float32, proj [16]float32, scale float32) {
+	glyph, ok := r.glyphs[char]
+	if !ok {
+		glyph, ok = r.glyphs['?']
+		if !ok {
+			return
+		}
+	}
+
+	// Calculate screen coordinates with scale
+	w := float32(glyph.PixelWidth) * scale
+	h := float32(glyph.PixelHeight) * scale
+
+	// Texture coordinates
+	tx := glyph.X
+	ty := glyph.Y
+	tw := glyph.Width
+	th := glyph.Height
+
+	vertices := []float32{
+		x, y - h, tx, ty,
+		x + w, y - h, tx + tw, ty,
+		x + w, y, tx + tw, ty + th,
+		x, y - h, tx, ty,
+		x + w, y, tx + tw, ty + th,
+		x, y, tx, ty + th,
+	}
+
+	gl.UseProgram(r.fontProgram)
+	gl.UniformMatrix4fv(r.texProjLoc, 1, false, &proj[0])
+	gl.Uniform4fv(r.texColorLoc, 1, &clr[0])
+	gl.Uniform1i(r.texLoc, 0)
+
+	gl.ActiveTexture(gl.TEXTURE0)
+	gl.BindTexture(gl.TEXTURE_2D, r.fontAtlas)
+
+	gl.BindVertexArray(r.fontVAO)
+	gl.BindBuffer(gl.ARRAY_BUFFER, r.fontVBO)
+	gl.BufferSubData(gl.ARRAY_BUFFER, 0, len(vertices)*4, gl.Ptr(vertices))
+	gl.DrawArrays(gl.TRIANGLES, 0, 6)
+	gl.BindVertexArray(0)
+}
+
 // colorToRGBA converts a grid.Color to RGBA
 func (r *Renderer) colorToRGBA(c grid.Color, isBackground bool) [4]float32 {
 	switch c.Type {
@@ -961,6 +1028,65 @@ func (r *Renderer) CurrentFont() string {
 // GetAvailableFonts returns all available font names
 func (r *Renderer) GetAvailableFonts() []fonts.FontInfo {
 	return fonts.AvailableFonts()
+}
+
+// Default font size for reset
+const defaultFontSize = 16.0
+const minFontSize = 8.0
+const maxFontSize = 32.0
+const zoomStep = 2.0
+
+// ZoomIn increases the font size
+func (r *Renderer) ZoomIn() error {
+	newSize := r.fontSize + zoomStep
+	if newSize > maxFontSize {
+		newSize = maxFontSize
+	}
+	return r.setFontSize(newSize)
+}
+
+// ZoomOut decreases the font size
+func (r *Renderer) ZoomOut() error {
+	newSize := r.fontSize - zoomStep
+	if newSize < minFontSize {
+		newSize = minFontSize
+	}
+	return r.setFontSize(newSize)
+}
+
+// ZoomReset resets the font size to default
+func (r *Renderer) ZoomReset() error {
+	return r.setFontSize(defaultFontSize)
+}
+
+// setFontSize changes the font size and reloads the font
+func (r *Renderer) setFontSize(size float32) error {
+	if size == r.fontSize {
+		return nil
+	}
+
+	r.fontSize = size
+
+	// Delete old texture
+	if r.fontAtlas != 0 {
+		gl.DeleteTextures(1, &r.fontAtlas)
+	}
+
+	// Clear old glyphs
+	r.glyphs = make(map[rune]Glyph)
+
+	// Reload font with new size
+	fontData, ok := fonts.GetFont(r.currentFont)
+	if !ok {
+		fontData = fonts.DefaultFont()
+	}
+
+	return r.loadFontData(fontData)
+}
+
+// GetFontSize returns the current font size
+func (r *Renderer) GetFontSize() float32 {
+	return r.fontSize
 }
 
 // Destroy cleans up renderer resources

@@ -28,6 +28,9 @@ const (
 	ActionShowHelp
 	ActionHelpScrollUp
 	ActionHelpScrollDown
+	ActionZoomIn
+	ActionZoomOut
+	ActionZoomReset
 )
 
 // KeyResult contains the result of processing a key
@@ -77,6 +80,19 @@ func TranslateKey(key glfw.Key, mods glfw.ModifierKey, appCursorMode bool) KeyRe
 
 	if ctrl && shift && key == glfw.KeyLeftBracket {
 		return KeyResult{Action: ActionPrevPane}
+	}
+
+	// Zoom controls: Ctrl+Shift++ (Equal key with shift), Ctrl+Shift+-, Ctrl+Shift+0
+	if ctrl && shift && key == glfw.KeyEqual {
+		return KeyResult{Action: ActionZoomIn}
+	}
+
+	if ctrl && shift && key == glfw.KeyMinus {
+		return KeyResult{Action: ActionZoomOut}
+	}
+
+	if ctrl && shift && key == glfw.Key0 {
+		return KeyResult{Action: ActionZoomReset}
 	}
 
 	if ctrl && key == glfw.KeyTab {

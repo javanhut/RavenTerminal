@@ -196,6 +196,27 @@ func main() {
 			if !showHelp {
 				renderer.ResetHelpScroll()
 			}
+		case keybindings.ActionZoomIn:
+			if err := renderer.ZoomIn(); err == nil {
+				// Recalculate grid size after zoom
+				width, height := win.GetFramebufferSize()
+				cols, rows := renderer.CalculateGridSize(width, height)
+				tabManager.ResizeAll(uint16(cols), uint16(rows))
+			}
+		case keybindings.ActionZoomOut:
+			if err := renderer.ZoomOut(); err == nil {
+				// Recalculate grid size after zoom
+				width, height := win.GetFramebufferSize()
+				cols, rows := renderer.CalculateGridSize(width, height)
+				tabManager.ResizeAll(uint16(cols), uint16(rows))
+			}
+		case keybindings.ActionZoomReset:
+			if err := renderer.ZoomReset(); err == nil {
+				// Recalculate grid size after zoom
+				width, height := win.GetFramebufferSize()
+				cols, rows := renderer.CalculateGridSize(width, height)
+				tabManager.ResizeAll(uint16(cols), uint16(rows))
+			}
 		}
 	})
 

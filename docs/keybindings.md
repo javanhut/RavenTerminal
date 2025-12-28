@@ -8,6 +8,14 @@
 | Shift+Enter | Toggle fullscreen mode |
 | Ctrl+Shift+K | Show/hide keybindings help panel |
 
+## Zoom
+
+| Keybinding | Action |
+|------------|--------|
+| Ctrl+Shift++ | Zoom in (increase font size) |
+| Ctrl+Shift+- | Zoom out (decrease font size) |
+| Ctrl+Shift+0 | Reset zoom to default |
+
 ## Tab Management
 
 | Keybinding | Action |
