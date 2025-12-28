@@ -111,6 +111,10 @@ func main() {
 					}
 					return
 				}
+				if settingsMenu.InputMode() && settingsMenu.InputIsMultiline() && mods&glfw.ModControl == 0 {
+					settingsMenu.HandleChar('\n')
+					return
+				}
 				if debugMenu {
 					log.Printf("menu: key enter key=%v input=%v title=%s", key, settingsMenu.InputMode(), settingsMenu.GetTitle())
 				}

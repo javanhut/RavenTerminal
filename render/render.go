@@ -698,9 +698,14 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 	r.drawRect(contentX, separatorY, contentWidth, 1, r.theme.Foreground, proj)
 
 	// Calculate footer area height
+	inputIsMultiline := m.InputMode() && m.InputIsMultiline()
+	inputLines := 1
+	if inputIsMultiline {
+		inputLines = 6
+	}
 	footerHeight := float32(60)
 	if m.InputMode() {
-		footerHeight = 110
+		footerHeight = lineHeight*float32(inputLines+2) + 40
 	}
 	if m.StatusMessage != "" {
 		footerHeight += lineHeight
@@ -757,28 +762,71 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 
 	// Input mode - draw input box
 	if m.InputMode() {
-		inputAreaY := footerSepY - lineHeight*2
-
-		// Input prompt
+		inputText := m.GetInputBuffer()
 		prompt := m.GetInputPrompt()
 		if len(prompt) > maxChars {
 			prompt = prompt[:maxChars-3] + "..."
 		}
-		r.drawText(contentX+5, inputAreaY, prompt, r.theme.Foreground, proj)
 
-		// Input box background
-		inputBoxY := inputAreaY + lineHeight*0.3
-		r.drawRect(contentX, inputBoxY, contentWidth, lineHeight, [4]float32{0.03, 0.03, 0.05, 1.0}, proj)
+		if inputIsMultiline {
+			textAreaHeight := lineHeight * float32(inputLines)
+			inputAreaY := footerSepY - textAreaHeight - lineHeight*0.8
 
-		// Input text with cursor - truncate from left if too long
-		inputText := m.GetInputBuffer()
-		maxInputChars := maxChars - 2
-		if len(inputText) > maxInputChars {
-			inputText = "..." + inputText[len(inputText)-maxInputChars+3:]
+			// Input prompt
+			r.drawText(contentX+5, inputAreaY, prompt, r.theme.Foreground, proj)
+
+			// Text area background
+			textBoxY := inputAreaY + lineHeight*0.3
+			r.drawRect(contentX, textBoxY, contentWidth, textAreaHeight, [4]float32{0.03, 0.03, 0.05, 1.0}, proj)
+
+			lines := strings.Split(inputText, "\n")
+			if len(lines) == 0 {
+				lines = []string{""}
+			}
+			start := 0
+			if len(lines) > inputLines {
+				start = len(lines) - inputLines
+			}
+			visibleLines := lines[start:]
+
+			lineY := textBoxY + lineHeight*0.75
+			for i, line := range visibleLines {
+				cursor := ""
+				if i == len(visibleLines)-1 {
+					cursor = "_"
+				}
+				maxInputChars := maxChars - 2
+				availableChars := maxInputChars - len(cursor)
+				displayLine := line
+				if availableChars <= 0 {
+					displayLine = ""
+				} else if len(displayLine) > availableChars {
+					if availableChars > 3 {
+						displayLine = "..." + displayLine[len(displayLine)-(availableChars-3):]
+					} else {
+						displayLine = displayLine[len(displayLine)-availableChars:]
+					}
+				}
+				r.drawText(contentX+8, lineY, displayLine+cursor, r.theme.TabActive, proj)
+				lineY += lineHeight
+			}
+		} else {
+			inputAreaY := footerSepY - lineHeight*2
+
+			// Input prompt
+			r.drawText(contentX+5, inputAreaY, prompt, r.theme.Foreground, proj)
+
+			// Input box background
+			inputBoxY := inputAreaY + lineHeight*0.3
+			r.drawRect(contentX, inputBoxY, contentWidth, lineHeight, [4]float32{0.03, 0.03, 0.05, 1.0}, proj)
+
+			// Input text with cursor - truncate from left if too long
+			maxInputChars := maxChars - 2
+			if len(inputText) > maxInputChars {
+				inputText = "..." + inputText[len(inputText)-maxInputChars+3:]
+			}
+			r.drawText(contentX+8, inputBoxY+lineHeight*0.75, inputText+"_", r.theme.TabActive, proj)
 		}
-		r.drawText(contentX+8, inputBoxY+lineHeight*0.75, inputText+"_", r.theme.TabActive, proj)
-
-		footerSepY = inputAreaY - lineHeight*0.5
 	}
 
 	// Status message
@@ -798,7 +846,11 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 	// Footer help text - truncate if needed
 	var footerText string
 	if m.InputMode() {
-		footerText = "Enter: confirm | Esc: cancel"
+		if inputIsMultiline {
+			footerText = "Enter: newline | Ctrl+Enter: confirm | Esc: cancel"
+		} else {
+			footerText = "Enter: confirm | Esc: cancel"
+		}
 	} else {
 		footerText = "Up/Down | Enter | Del | Esc"
 	}

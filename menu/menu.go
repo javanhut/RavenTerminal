@@ -123,6 +123,16 @@ func (m *Menu) InputMode() bool {
 	return m.InputActive
 }
 
+// InputIsMultiline returns true when the active input supports newlines.
+func (m *Menu) InputIsMultiline() bool {
+	switch m.InputState {
+	case InputScriptInit, InputScriptPrePrompt, InputScriptLangDetect, InputScriptVCSDetect:
+		return true
+	default:
+		return false
+	}
+}
+
 // GetInputPrompt returns the current input prompt
 func (m *Menu) GetInputPrompt() string {
 	return m.InputLabel
@@ -449,13 +459,13 @@ func (m *Menu) handlePromptSettingsSelect() {
 func (m *Menu) handleScriptsSelect() {
 	switch m.SelectedIndex {
 	case 0: // Init
-		m.startInputWithValue(InputScriptInit, "Init script (\\n for newlines):", escapeNewlines(m.Config.Scripts.Init))
+		m.startInputWithValue(InputScriptInit, "Init script (Ctrl+Enter to save):", m.Config.Scripts.Init)
 	case 1: // Pre-Prompt
-		m.startInputWithValue(InputScriptPrePrompt, "Pre-prompt script:", escapeNewlines(m.Config.Scripts.PrePrompt))
+		m.startInputWithValue(InputScriptPrePrompt, "Pre-prompt script (Ctrl+Enter to save):", m.Config.Scripts.PrePrompt)
 	case 2: // Language Detect
-		m.startInputWithValue(InputScriptLangDetect, "Language detect script:", escapeNewlines(m.Config.Scripts.LanguageDetect))
+		m.startInputWithValue(InputScriptLangDetect, "Language detect script (Ctrl+Enter to save):", m.Config.Scripts.LanguageDetect)
 	case 3: // VCS Detect
-		m.startInputWithValue(InputScriptVCSDetect, "VCS detect script:", escapeNewlines(m.Config.Scripts.VCSDetect))
+		m.startInputWithValue(InputScriptVCSDetect, "VCS detect script (Ctrl+Enter to save):", m.Config.Scripts.VCSDetect)
 	case 5:
 		m.goBack()
 	}
@@ -607,22 +617,22 @@ func (m *Menu) HandleEnter() bool {
 		m.debugf("confirm alias name=%q cmd=%q", m.PendingName, m.PendingAliasCmd)
 
 	case InputScriptInit:
-		m.Config.Scripts.Init = unescapeNewlines(value)
+		m.Config.Scripts.Init = value
 		m.StatusMessage = "Script updated"
 		m.buildScriptsMenu()
 
 	case InputScriptPrePrompt:
-		m.Config.Scripts.PrePrompt = unescapeNewlines(value)
+		m.Config.Scripts.PrePrompt = value
 		m.StatusMessage = "Script updated"
 		m.buildScriptsMenu()
 
 	case InputScriptLangDetect:
-		m.Config.Scripts.LanguageDetect = unescapeNewlines(value)
+		m.Config.Scripts.LanguageDetect = value
 		m.StatusMessage = "Script updated"
 		m.buildScriptsMenu()
 
 	case InputScriptVCSDetect:
-		m.Config.Scripts.VCSDetect = unescapeNewlines(value)
+		m.Config.Scripts.VCSDetect = value
 		m.StatusMessage = "Script updated"
 		m.buildScriptsMenu()
 	}

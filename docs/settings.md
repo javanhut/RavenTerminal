@@ -58,11 +58,9 @@ To edit an existing alias, select it from the list.
 Scripts can be edited directly from the menu:
 1. Navigate to Scripts
 2. Select the script to edit
-3. The current value is shown - edit it or enter a new value
-4. Use `\n` for newlines when entering multi-line scripts
-5. Press Enter to save, Escape to cancel
-
-For complex multi-line scripts, edit the config.toml file directly.
+3. The current value is shown in a multi-line text area
+4. Press Enter to insert a new line
+5. Press Ctrl+Enter to save, Escape to cancel
 
 ## Configuration File
 
