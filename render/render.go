@@ -586,12 +586,14 @@ func (r *Renderer) renderHelpPanel(width, height int, proj [16]float32) {
 	}
 
 	// Footer separator and text (fixed, doesn't scroll)
-	footerSepY := panelY + panelHeight - footerHeight
-	r.drawRect(contentX, footerSepY, contentWidth, 1, r.theme.Foreground, proj)
-
-	footerY := panelY + panelHeight - 30
+	// Position text first, then put separator above it
+	footerY := panelY + panelHeight - 20
 	footerText := "Up/Down: scroll | Esc: close"
 	r.drawText(contentX, footerY, footerText, [4]float32{0.5, 0.5, 0.5, 1.0}, proj)
+
+	// Separator line above the footer text
+	footerSepY := footerY - r.cellHeight - 8
+	r.drawRect(contentX, footerSepY, contentWidth, 1, r.theme.Foreground, proj)
 }
 
 // renderPanes renders all panes in a tab
