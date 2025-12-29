@@ -420,11 +420,11 @@ func (r *Renderer) getHelpSections() []struct {
 			title: "General",
 			bindings: [][2]string{
 				{"Ctrl+Q", "Exit terminal"},
-				{"Ctrl+C", "Copy visible screen"},
-				{"Ctrl+P", "Paste clipboard"},
+				{"Ctrl+Shift+C", "Copy visible screen"},
+				{"Ctrl+Shift+P", "Paste clipboard"},
 				{"Shift+Enter", "Toggle fullscreen"},
 				{"Ctrl+Shift+K", "Show/hide help"},
-				{"Ctrl+Shift+P", "Open settings"},
+				{"Ctrl+Shift+S", "Open settings"},
 				{"Ctrl+Shift++", "Zoom in"},
 				{"Ctrl+Shift+-", "Zoom out"},
 				{"Ctrl+Shift+0", "Reset zoom"},
@@ -448,6 +448,8 @@ func (r *Renderer) getHelpSections() []struct {
 				{"Shift+Tab", "Cycle panes"},
 				{"Ctrl+Shift+]", "Next pane"},
 				{"Ctrl+Shift+[", "Previous pane"},
+				{"Ctrl+R", "Toggle resize mode"},
+				{"Arrow Keys", "Resize active pane"},
 			},
 		},
 		{

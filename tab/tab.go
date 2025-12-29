@@ -18,6 +18,11 @@ const (
 	SplitHorizontal                // Children arranged top to bottom
 )
 
+const (
+	minSplitRatio = 0.1
+	maxSplitRatio = 0.9
+)
+
 // SplitNode represents a node in the split tree
 // It can either be a leaf (containing a Pane) or a container (containing children)
 type SplitNode struct {
@@ -234,7 +239,7 @@ func (t *Tab) splitActivePane(dir SplitDirection) error {
 	// Convert the active node from a leaf to a container
 	t.activeNode.Pane = nil
 	t.activeNode.SplitDir = dir
-	t.activeNode.Ratio = 1.0
+	t.activeNode.Ratio = 0.5
 
 	// Create a leaf node for the existing pane
 	existingLeaf := &SplitNode{
@@ -398,6 +403,47 @@ func (t *Tab) PrevPane() {
 	t.updateTerminalRef()
 }
 
+// ResizeActivePane adjusts the split ratio for the nearest ancestor split in the given direction.
+func (t *Tab) ResizeActivePane(dir SplitDirection, delta float64) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.activeNode == nil {
+		return false
+	}
+
+	node := t.activeNode
+	for node.Parent != nil {
+		parent := node.Parent
+		if parent.SplitDir == dir && len(parent.Children) == 2 {
+			ratio := parent.Ratio
+			if ratio <= 0.0 || ratio >= 1.0 {
+				ratio = 0.5
+			}
+			if parent.Children[0] == node {
+				ratio += delta
+			} else {
+				ratio -= delta
+			}
+			if ratio < minSplitRatio {
+				ratio = minSplitRatio
+			}
+			if ratio > maxSplitRatio {
+				ratio = maxSplitRatio
+			}
+			if ratio == parent.Ratio {
+				return false
+			}
+			parent.Ratio = ratio
+			t.resizeNode(t.root, 0, 0, 1.0, 1.0)
+			return true
+		}
+		node = parent
+	}
+
+	return false
+}
+
 // updateTerminalRef updates the Terminal reference to point to active pane
 func (t *Tab) updateTerminalRef() {
 	if t.activeNode != nil && t.activeNode.IsLeaf() && t.activeNode.Pane != nil {
@@ -434,18 +480,40 @@ func (t *Tab) resizeNode(node *SplitNode, x, y, width, height float32) {
 
 	switch node.SplitDir {
 	case SplitVertical:
-		// Divide width equally
-		childWidth := width / float32(numChildren)
-		for i, child := range node.Children {
-			childX := x + float32(i)*childWidth
-			t.resizeNode(child, childX, y, childWidth, height)
+		if numChildren == 2 {
+			ratio := float32(node.Ratio)
+			if ratio <= 0.0 || ratio >= 1.0 {
+				ratio = 0.5
+			}
+			firstWidth := width * ratio
+			secondWidth := width - firstWidth
+			t.resizeNode(node.Children[0], x, y, firstWidth, height)
+			t.resizeNode(node.Children[1], x+firstWidth, y, secondWidth, height)
+		} else {
+			// Divide width equally
+			childWidth := width / float32(numChildren)
+			for i, child := range node.Children {
+				childX := x + float32(i)*childWidth
+				t.resizeNode(child, childX, y, childWidth, height)
+			}
 		}
 	case SplitHorizontal:
-		// Divide height equally
-		childHeight := height / float32(numChildren)
-		for i, child := range node.Children {
-			childY := y + float32(i)*childHeight
-			t.resizeNode(child, x, childY, width, childHeight)
+		if numChildren == 2 {
+			ratio := float32(node.Ratio)
+			if ratio <= 0.0 || ratio >= 1.0 {
+				ratio = 0.5
+			}
+			firstHeight := height * ratio
+			secondHeight := height - firstHeight
+			t.resizeNode(node.Children[0], x, y, width, firstHeight)
+			t.resizeNode(node.Children[1], x, y+firstHeight, width, secondHeight)
+		} else {
+			// Divide height equally
+			childHeight := height / float32(numChildren)
+			for i, child := range node.Children {
+				childY := y + float32(i)*childHeight
+				t.resizeNode(child, x, childY, width, childHeight)
+			}
 		}
 	}
 }
@@ -483,16 +551,38 @@ func (t *Tab) collectLayouts(node *SplitNode, x, y, width, height float32, layou
 
 	switch node.SplitDir {
 	case SplitVertical:
-		childWidth := width / float32(numChildren)
-		for i, child := range node.Children {
-			childX := x + float32(i)*childWidth
-			t.collectLayouts(child, childX, y, childWidth, height, layouts)
+		if numChildren == 2 {
+			ratio := float32(node.Ratio)
+			if ratio <= 0.0 || ratio >= 1.0 {
+				ratio = 0.5
+			}
+			firstWidth := width * ratio
+			secondWidth := width - firstWidth
+			t.collectLayouts(node.Children[0], x, y, firstWidth, height, layouts)
+			t.collectLayouts(node.Children[1], x+firstWidth, y, secondWidth, height, layouts)
+		} else {
+			childWidth := width / float32(numChildren)
+			for i, child := range node.Children {
+				childX := x + float32(i)*childWidth
+				t.collectLayouts(child, childX, y, childWidth, height, layouts)
+			}
 		}
 	case SplitHorizontal:
-		childHeight := height / float32(numChildren)
-		for i, child := range node.Children {
-			childY := y + float32(i)*childHeight
-			t.collectLayouts(child, x, childY, width, childHeight, layouts)
+		if numChildren == 2 {
+			ratio := float32(node.Ratio)
+			if ratio <= 0.0 || ratio >= 1.0 {
+				ratio = 0.5
+			}
+			firstHeight := height * ratio
+			secondHeight := height - firstHeight
+			t.collectLayouts(node.Children[0], x, y, width, firstHeight, layouts)
+			t.collectLayouts(node.Children[1], x, y+firstHeight, width, secondHeight, layouts)
+		} else {
+			childHeight := height / float32(numChildren)
+			for i, child := range node.Children {
+				childY := y + float32(i)*childHeight
+				t.collectLayouts(child, x, childY, width, childHeight, layouts)
+			}
 		}
 	}
 }

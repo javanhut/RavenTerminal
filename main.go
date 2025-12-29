@@ -90,6 +90,8 @@ func main() {
 	blinkInterval := 500 * time.Millisecond
 	lineBuf := &lineBuffer{}
 	showHelp := false
+	resizeMode := false
+	const resizeStep = 0.05
 	selection := &mouseSelection{}
 	settingsMenu := menu.NewMenu()
 	currentTheme := ""
@@ -181,6 +183,26 @@ func main() {
 			case glfw.KeyEscape:
 				showHelp = false
 				renderer.ResetHelpScroll()
+				return
+			}
+		}
+
+		if resizeMode {
+			switch key {
+			case glfw.KeyUp:
+				activeTab.ResizeActivePane(tab.SplitHorizontal, resizeStep)
+				return
+			case glfw.KeyDown:
+				activeTab.ResizeActivePane(tab.SplitHorizontal, -resizeStep)
+				return
+			case glfw.KeyLeft:
+				activeTab.ResizeActivePane(tab.SplitVertical, resizeStep)
+				return
+			case glfw.KeyRight:
+				activeTab.ResizeActivePane(tab.SplitVertical, -resizeStep)
+				return
+			case glfw.KeyEscape:
+				resizeMode = false
 				return
 			}
 		}
@@ -302,6 +324,8 @@ func main() {
 			} else {
 				settingsMenu.Open()
 			}
+		case keybindings.ActionToggleResizeMode:
+			resizeMode = !resizeMode
 		}
 	})
 
