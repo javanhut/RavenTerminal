@@ -264,6 +264,14 @@ func (c *Config) WriteInitScript() (string, error) {
 	}
 	script += "}\n\n"
 
+	// Add OSC 7 emission for cwd tracking
+	script += "# Emit OSC 7 for current working directory\n"
+	script += "__raven_emit_osc7() {\n"
+	script += "    local _host\n"
+	script += "    _host=\"${HOSTNAME:-$(hostname)}\"\n"
+	script += "    printf '\\e]7;file://%s%s\\a' \"$_host\" \"$PWD\"\n"
+	script += "}\n\n"
+
 	// Add prompt building function based on style
 	script += c.buildPromptFunction()
 
@@ -368,6 +376,7 @@ func (c *Config) buildPromptFunction() string {
 		script += `    PS1="$_line1\n$_line2"` + "\n"
 	}
 
+	script += "    __raven_emit_osc7\n"
 	script += "}\n"
 	return script
 }

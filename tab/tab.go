@@ -18,6 +18,16 @@ const (
 	SplitHorizontal                // Children arranged top to bottom
 )
 
+// ResizeDirection indicates the direction to resize relative to the active pane.
+type ResizeDirection int
+
+const (
+	ResizeLeft ResizeDirection = iota
+	ResizeRight
+	ResizeUp
+	ResizeDown
+)
+
 const (
 	minSplitRatio = 0.1
 	maxSplitRatio = 0.9
@@ -54,8 +64,8 @@ type Pane struct {
 }
 
 // NewPane creates a new terminal pane
-func NewPane(id int, cols, rows uint16) (*Pane, error) {
-	pty, err := shell.NewPtySession(cols, rows)
+func NewPane(id int, cols, rows uint16, startDir string) (*Pane, error) {
+	pty, err := shell.NewPtySession(cols, rows, startDir)
 	if err != nil {
 		return nil, err
 	}
@@ -117,6 +127,20 @@ func (p *Pane) Close() {
 	p.pty.Close()
 }
 
+// CurrentDir returns the pane working directory when available.
+func (p *Pane) CurrentDir() string {
+	if p == nil || p.pty == nil {
+		return ""
+	}
+	if dir := p.pty.CurrentDir(); dir != "" {
+		return dir
+	}
+	if p.Terminal == nil {
+		return ""
+	}
+	return p.Terminal.WorkingDir()
+}
+
 // ID returns the pane ID
 func (p *Pane) ID() int {
 	return p.id
@@ -145,9 +169,9 @@ type Tab struct {
 }
 
 // NewTab creates a new terminal tab
-func NewTab(id int, cols, rows uint16) (*Tab, error) {
+func NewTab(id int, cols, rows uint16, startDir string) (*Tab, error) {
 	// Create the first pane
-	pane, err := NewPane(1, cols, rows)
+	pane, err := NewPane(1, cols, rows, startDir)
 	if err != nil {
 		return nil, err
 	}
@@ -221,7 +245,8 @@ func (t *Tab) splitActivePane(dir SplitDirection) error {
 	}
 
 	// Create new pane
-	newPane, err := NewPane(t.nextPaneID, t.cols/2, t.rows/2)
+	startDir := t.activeNode.Pane.CurrentDir()
+	newPane, err := NewPane(t.nextPaneID, t.cols/2, t.rows/2, startDir)
 	if err != nil {
 		return err
 	}
@@ -371,7 +396,7 @@ func (t *Tab) NextPane() {
 	}
 
 	// Move to next
-	nextIdx := (currentIdx + 1) % len(leaves)
+	nextIdx := (currentIdx - 1 + len(leaves)) % len(leaves)
 	t.activeNode = leaves[nextIdx]
 	t.updateTerminalRef()
 }
@@ -398,13 +423,13 @@ func (t *Tab) PrevPane() {
 	}
 
 	// Move to previous
-	prevIdx := (currentIdx - 1 + len(leaves)) % len(leaves)
+	prevIdx := (currentIdx + 1) % len(leaves)
 	t.activeNode = leaves[prevIdx]
 	t.updateTerminalRef()
 }
 
-// ResizeActivePane adjusts the split ratio for the nearest ancestor split in the given direction.
-func (t *Tab) ResizeActivePane(dir SplitDirection, delta float64) bool {
+// ResizeActivePane expands the active pane toward the given direction when possible.
+func (t *Tab) ResizeActivePane(direction ResizeDirection, delta float64) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -412,19 +437,38 @@ func (t *Tab) ResizeActivePane(dir SplitDirection, delta float64) bool {
 		return false
 	}
 
+	if delta < 0 {
+		delta = -delta
+	}
+
+	var splitDir SplitDirection
+	ratioDelta := delta
+	switch direction {
+	case ResizeLeft:
+		splitDir = SplitVertical
+		ratioDelta = -delta
+	case ResizeRight:
+		splitDir = SplitVertical
+		ratioDelta = delta
+	case ResizeUp:
+		splitDir = SplitHorizontal
+		ratioDelta = -delta
+	case ResizeDown:
+		splitDir = SplitHorizontal
+		ratioDelta = delta
+	default:
+		return false
+	}
+
 	node := t.activeNode
 	for node.Parent != nil {
 		parent := node.Parent
-		if parent.SplitDir == dir && len(parent.Children) == 2 {
+		if parent.SplitDir == splitDir && len(parent.Children) == 2 {
 			ratio := parent.Ratio
 			if ratio <= 0.0 || ratio >= 1.0 {
 				ratio = 0.5
 			}
-			if parent.Children[0] == node {
-				ratio += delta
-			} else {
-				ratio -= delta
-			}
+			ratio += ratioDelta
 			if ratio < minSplitRatio {
 				ratio = minSplitRatio
 			}
@@ -767,6 +811,17 @@ func (t *Tab) GetSplitDirection() SplitDirection {
 	return t.root.SplitDir
 }
 
+// ActiveDir returns the active pane working directory when available.
+func (t *Tab) ActiveDir() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.activeNode == nil || t.activeNode.Pane == nil {
+		return ""
+	}
+	return t.activeNode.Pane.CurrentDir()
+}
+
 // TabManager manages multiple terminal tabs
 type TabManager struct {
 	tabs        []*Tab
@@ -805,7 +860,12 @@ func (tm *TabManager) NewTab() error {
 	// New tab ID is based on current tab count + 1
 	newID := len(tm.tabs) + 1
 
-	tab, err := NewTab(newID, tm.cols, tm.rows)
+	startDir := ""
+	if len(tm.tabs) > 0 && tm.activeIndex >= 0 && tm.activeIndex < len(tm.tabs) {
+		startDir = tm.tabs[tm.activeIndex].ActiveDir()
+	}
+
+	tab, err := NewTab(newID, tm.cols, tm.rows, startDir)
 	if err != nil {
 		return err
 	}

@@ -2,6 +2,7 @@ package parser
 
 import (
 	"github.com/javanhut/RavenTerminal/grid"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,6 +33,7 @@ type Terminal struct {
 	cursorVisible   bool
 	alternateScreen bool
 	savedMainGrid   *grid.Grid
+	lastWorkingDir  string
 	mu              sync.Mutex
 	// UTF-8 decoding state
 	utf8Buf       []byte
@@ -460,11 +462,49 @@ func (t *Terminal) exitAlternateScreen() {
 // processOSC handles OSC sequences (Operating System Command)
 func (t *Terminal) processOSC(b byte) {
 	if b == 0x07 || b == 0x1b { // BEL or ESC terminates OSC
-		// Execute OSC (for now, just ignore - used for window titles etc.)
+		t.handleOSC(t.oscParams)
+		t.oscParams = ""
 		t.state = StateGround
 	} else {
 		t.oscParams += string(b)
 	}
+}
+
+func (t *Terminal) handleOSC(params string) {
+	if strings.HasPrefix(params, "7;") {
+		path := parseOSC7Path(strings.TrimPrefix(params, "7;"))
+		if path != "" {
+			t.lastWorkingDir = path
+		}
+	}
+}
+
+func parseOSC7Path(value string) string {
+	if strings.HasPrefix(value, "file://") {
+		parsed, err := url.Parse(value)
+		if err != nil {
+			return ""
+		}
+		if parsed.Path == "" {
+			return ""
+		}
+		path, err := url.PathUnescape(parsed.Path)
+		if err != nil {
+			return ""
+		}
+		return path
+	}
+	if strings.HasPrefix(value, "/") {
+		return value
+	}
+	return ""
+}
+
+// WorkingDir returns the last known working directory from OSC 7.
+func (t *Terminal) WorkingDir() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.lastWorkingDir
 }
 
 // parseParams parses CSI parameters

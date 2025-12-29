@@ -190,16 +190,16 @@ func main() {
 		if resizeMode {
 			switch key {
 			case glfw.KeyUp:
-				activeTab.ResizeActivePane(tab.SplitHorizontal, resizeStep)
+				activeTab.ResizeActivePane(tab.ResizeUp, resizeStep)
 				return
 			case glfw.KeyDown:
-				activeTab.ResizeActivePane(tab.SplitHorizontal, -resizeStep)
+				activeTab.ResizeActivePane(tab.ResizeDown, resizeStep)
 				return
 			case glfw.KeyLeft:
-				activeTab.ResizeActivePane(tab.SplitVertical, resizeStep)
+				activeTab.ResizeActivePane(tab.ResizeLeft, resizeStep)
 				return
 			case glfw.KeyRight:
-				activeTab.ResizeActivePane(tab.SplitVertical, -resizeStep)
+				activeTab.ResizeActivePane(tab.ResizeRight, resizeStep)
 				return
 			case glfw.KeyEscape:
 				resizeMode = false
