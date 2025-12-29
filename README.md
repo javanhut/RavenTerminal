@@ -136,6 +136,13 @@ After installation, launch from:
 | Shift+PageUp     | Scroll up 5 lines   |
 | Shift+PageDown   | Scroll down 5 lines |
 
+### Mouse
+
+| Action           | Behavior                         |
+|------------------|----------------------------------|
+| Left-click drag  | Select text and copy to clipboard |
+| Right-click      | Copy selection or paste clipboard |
+
 ## Built-in Commands
 
 Raven Terminal includes several built-in commands:

@@ -52,6 +52,13 @@
 
 Scrolling is reset to the bottom when any input is typed.
 
+## Mouse
+
+| Action | Behavior |
+|--------|----------|
+| Left-click drag | Select text and copy to clipboard |
+| Right-click | Copy selection or paste clipboard |
+
 ## Text Navigation
 
 | Keybinding | Action |

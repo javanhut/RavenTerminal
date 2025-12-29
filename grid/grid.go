@@ -99,6 +99,14 @@ type Grid struct {
 	lastFg    Color
 	lastBg    Color
 	lastFlags CellFlags
+
+	// Selection state (display coordinates)
+	selectionActive       bool
+	selectionStartCol     int
+	selectionStartRow     int
+	selectionEndCol       int
+	selectionEndRow       int
+	selectionScrollOffset int
 }
 
 // NewGrid creates a new grid with the given dimensions
@@ -419,6 +427,132 @@ func (g *Grid) VisibleText() string {
 	}
 
 	return strings.TrimRight(strings.Join(lines, "\n"), "\n")
+}
+
+// SetSelection sets the selection bounds in display coordinates.
+func (g *Grid) SetSelection(startCol, startRow, endCol, endRow int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if g.Cols == 0 || g.Rows == 0 {
+		return
+	}
+
+	startCol = clampInt(startCol, 0, g.Cols-1)
+	endCol = clampInt(endCol, 0, g.Cols-1)
+	startRow = clampInt(startRow, 0, g.Rows-1)
+	endRow = clampInt(endRow, 0, g.Rows-1)
+
+	g.selectionActive = true
+	g.selectionStartCol = startCol
+	g.selectionStartRow = startRow
+	g.selectionEndCol = endCol
+	g.selectionEndRow = endRow
+	g.selectionScrollOffset = g.scrollOffset
+}
+
+// ClearSelection clears any active selection.
+func (g *Grid) ClearSelection() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.selectionActive = false
+}
+
+// HasSelection returns whether a selection is active.
+func (g *Grid) HasSelection() bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.selectionActive
+}
+
+// IsSelected returns whether a display cell is within the current selection.
+func (g *Grid) IsSelected(col, row int) bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.isSelectedLocked(col, row)
+}
+
+func (g *Grid) isSelectedLocked(col, row int) bool {
+	if !g.selectionActive || g.scrollOffset != g.selectionScrollOffset {
+		return false
+	}
+
+	startCol, startRow := g.selectionStartCol, g.selectionStartRow
+	endCol, endRow := g.selectionEndCol, g.selectionEndRow
+	if endRow < startRow || (endRow == startRow && endCol < startCol) {
+		startCol, endCol = endCol, startCol
+		startRow, endRow = endRow, startRow
+	}
+
+	if row < startRow || row > endRow {
+		return false
+	}
+	if startRow == endRow {
+		return col >= startCol && col <= endCol
+	}
+	if row == startRow {
+		return col >= startCol
+	}
+	if row == endRow {
+		return col <= endCol
+	}
+	return true
+}
+
+// SelectedText returns the text within the current selection.
+func (g *Grid) SelectedText() string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	if !g.selectionActive || g.scrollOffset != g.selectionScrollOffset {
+		return ""
+	}
+
+	startCol, startRow := g.selectionStartCol, g.selectionStartRow
+	endCol, endRow := g.selectionEndCol, g.selectionEndRow
+	if endRow < startRow || (endRow == startRow && endCol < startCol) {
+		startCol, endCol = endCol, startCol
+		startRow, endRow = endRow, startRow
+	}
+
+	var lines []string
+	for row := startRow; row <= endRow; row++ {
+		colStart := 0
+		colEnd := g.Cols - 1
+		if row == startRow {
+			colStart = startCol
+		}
+		if row == endRow {
+			colEnd = endCol
+		}
+		if colEnd < colStart {
+			continue
+		}
+
+		var b strings.Builder
+		b.Grow(colEnd - colStart + 1)
+		for col := colStart; col <= colEnd; col++ {
+			cell := g.displayCellLocked(col, row)
+			ch := cell.Char
+			if ch == 0 {
+				ch = ' '
+			}
+			b.WriteRune(ch)
+		}
+		lines = append(lines, strings.TrimRight(b.String(), " "))
+	}
+
+	return strings.TrimRight(strings.Join(lines, "\n"), "\n")
+}
+
+func clampInt(value, min, max int) int {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
 }
 
 // ClearAll clears the entire grid

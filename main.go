@@ -48,6 +48,13 @@ func (lb *lineBuffer) getLine() string {
 	return lb.buffer.String()
 }
 
+type mouseSelection struct {
+	active   bool
+	pane     *tab.Pane
+	startCol int
+	startRow int
+}
+
 func main() {
 	// Create window
 	config := window.DefaultConfig()
@@ -83,6 +90,7 @@ func main() {
 	blinkInterval := 500 * time.Millisecond
 	lineBuf := &lineBuffer{}
 	showHelp := false
+	selection := &mouseSelection{}
 	settingsMenu := menu.NewMenu()
 	currentTheme := ""
 	if settingsMenu.Config != nil {
@@ -361,6 +369,159 @@ func main() {
 		}
 	})
 
+	win.GLFW().SetMouseButtonCallback(func(w *glfw.Window, button glfw.MouseButton, action glfw.Action, mods glfw.ModifierKey) {
+		if settingsMenu.IsOpen() || showHelp {
+			return
+		}
+
+		activeTab := tabManager.ActiveTab()
+		if activeTab == nil {
+			return
+		}
+
+		width, height := win.GetFramebufferSize()
+		x, y := w.GetCursorPos()
+
+		switch button {
+		case glfw.MouseButtonLeft:
+			switch action {
+			case glfw.Press:
+				pane, col, row, ok := renderer.HitTestPane(activeTab, x, y, width, height)
+				if !ok || pane == nil {
+					if selection.pane != nil {
+						selection.pane.Terminal.Grid.ClearSelection()
+					}
+					selection.active = false
+					selection.pane = nil
+					return
+				}
+
+				if selection.pane != nil && selection.pane != pane {
+					selection.pane.Terminal.Grid.ClearSelection()
+				}
+
+				selection.active = true
+				selection.pane = pane
+				selection.startCol = col
+				selection.startRow = row
+				pane.Terminal.Grid.SetSelection(col, row, col, row)
+				activeTab.SetActivePane(pane)
+			case glfw.Release:
+				if !selection.active || selection.pane == nil {
+					return
+				}
+
+				pane := selection.pane
+				rectX, rectY, rectW, rectH, ok := renderer.PaneRectFor(activeTab, pane, width, height)
+				if !ok {
+					selection.active = false
+					return
+				}
+
+				fx := float32(x)
+				fy := float32(y)
+				if fx < rectX {
+					fx = rectX
+				} else if fx >= rectX+rectW {
+					fx = rectX + rectW - 1
+				}
+				if fy < rectY {
+					fy = rectY
+				} else if fy >= rectY+rectH {
+					fy = rectY + rectH - 1
+				}
+
+				cellW, cellH := renderer.CellSize()
+				col := int((fx - rectX) / cellW)
+				row := int((fy - rectY) / cellH)
+				g := pane.Terminal.Grid
+				col = clampInt(col, 0, g.Cols-1)
+				row = clampInt(row, 0, g.Rows-1)
+
+				if selection.startCol == col && selection.startRow == row {
+					g.ClearSelection()
+					selection.active = false
+					return
+				}
+
+				g.SetSelection(selection.startCol, selection.startRow, col, row)
+				if text := g.SelectedText(); text != "" {
+					glfw.SetClipboardString(text)
+				}
+
+				selection.active = false
+			}
+		case glfw.MouseButtonRight:
+			if action != glfw.Press {
+				return
+			}
+			pane, _, _, ok := renderer.HitTestPane(activeTab, x, y, width, height)
+			if !ok || pane == nil {
+				return
+			}
+
+			activeTab.SetActivePane(pane)
+			g := pane.Terminal.Grid
+
+			if g.HasSelection() {
+				if text := g.SelectedText(); text != "" {
+					glfw.SetClipboardString(text)
+				}
+				return
+			}
+
+			clip := glfw.GetClipboardString()
+			if clip != "" {
+				clip = strings.ReplaceAll(clip, "\r\n", "\n")
+				clip = strings.ReplaceAll(clip, "\n", "\r")
+				pane.Write([]byte(clip))
+				g.ResetScrollOffset()
+			}
+		}
+	})
+
+	win.GLFW().SetCursorPosCallback(func(w *glfw.Window, xpos, ypos float64) {
+		if !selection.active || selection.pane == nil {
+			return
+		}
+		if settingsMenu.IsOpen() || showHelp {
+			return
+		}
+
+		activeTab := tabManager.ActiveTab()
+		if activeTab == nil {
+			return
+		}
+
+		width, height := win.GetFramebufferSize()
+		rectX, rectY, rectW, rectH, ok := renderer.PaneRectFor(activeTab, selection.pane, width, height)
+		if !ok {
+			return
+		}
+
+		fx := float32(xpos)
+		fy := float32(ypos)
+		if fx < rectX {
+			fx = rectX
+		} else if fx >= rectX+rectW {
+			fx = rectX + rectW - 1
+		}
+		if fy < rectY {
+			fy = rectY
+		} else if fy >= rectY+rectH {
+			fy = rectY + rectH - 1
+		}
+
+		cellW, cellH := renderer.CellSize()
+		col := int((fx - rectX) / cellW)
+		row := int((fy - rectY) / cellH)
+		g := selection.pane.Terminal.Grid
+		col = clampInt(col, 0, g.Cols-1)
+		row = clampInt(row, 0, g.Rows-1)
+
+		g.SetSelection(selection.startCol, selection.startRow, col, row)
+	})
+
 	// Main loop
 	for !win.ShouldClose() {
 		// Check for exited tabs
@@ -397,4 +558,14 @@ func main() {
 		// Small sleep to prevent 100% CPU usage
 		time.Sleep(time.Millisecond * 16) // ~60 FPS
 	}
+}
+
+func clampInt(value, min, max int) int {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
 }

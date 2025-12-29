@@ -508,6 +508,48 @@ func (t *Tab) GetActivePane() *Pane {
 	return nil
 }
 
+// SetActivePane sets the active pane by pointer.
+func (t *Tab) SetActivePane(pane *Pane) bool {
+	if pane == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.activeNode != nil && t.activeNode.Pane == pane {
+		return true
+	}
+
+	var target *SplitNode
+	t.findNodeForPane(t.root, pane, &target)
+	if target == nil {
+		return false
+	}
+
+	t.activeNode = target
+	t.Terminal = target.Pane.Terminal
+	t.pty = target.Pane.pty
+	return true
+}
+
+func (t *Tab) findNodeForPane(node *SplitNode, pane *Pane, target **SplitNode) {
+	if node == nil || *target != nil {
+		return
+	}
+	if node.IsLeaf() {
+		if node.Pane == pane {
+			*target = node
+		}
+		return
+	}
+	for _, child := range node.Children {
+		t.findNodeForPane(child, pane, target)
+		if *target != nil {
+			return
+		}
+	}
+}
+
 // Write writes data to the PTY (writes to active pane)
 func (t *Tab) Write(data []byte) error {
 	t.mu.Lock()

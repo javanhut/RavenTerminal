@@ -74,6 +74,10 @@ Scrolling:
   Shift+PageUp    Scroll up 5 lines
   Shift+PageDown  Scroll down 5 lines
 
+Mouse:
+  Drag            Select text and copy to clipboard
+  Right-click     Copy selection or paste clipboard
+
 Terminal Commands:
   keybindings     Show this help
   change-font     List available fonts

@@ -24,6 +24,7 @@ type Theme struct {
 	Cursor     [4]float32
 	TabBar     [4]float32
 	TabActive  [4]float32
+	Selection  [4]float32
 }
 
 // DefaultTheme returns the default color theme
@@ -41,6 +42,7 @@ func ThemeByName(name string) Theme {
 			Cursor:     [4]float32{0.965, 0.965, 0.965, 1.0}, // #f6f6f6
 			TabBar:     [4]float32{0.000, 0.000, 0.000, 1.0}, // #000000
 			TabActive:  [4]float32{0.702, 0.702, 0.702, 1.0}, // #b3b3b3
+			Selection:  [4]float32{0.702, 0.702, 0.702, 0.35},
 		}
 	case "magpie-black-white-grey", "magpie-black-and-white-grey":
 		return Theme{
@@ -49,6 +51,7 @@ func ThemeByName(name string) Theme {
 			Cursor:     [4]float32{1.000, 1.000, 1.000, 1.0}, // #ffffff
 			TabBar:     [4]float32{0.039, 0.039, 0.039, 1.0}, // #0a0a0a
 			TabActive:  [4]float32{0.816, 0.816, 0.816, 1.0}, // #d0d0d0
+			Selection:  [4]float32{0.816, 0.816, 0.816, 0.35},
 		}
 	case "catppuccin-mocha", "catppuccin", "catpuccin":
 		return Theme{
@@ -57,6 +60,7 @@ func ThemeByName(name string) Theme {
 			Cursor:     [4]float32{0.961, 0.761, 0.906, 1.0}, // #f5c2e7
 			TabBar:     [4]float32{0.094, 0.094, 0.145, 1.0}, // #181825
 			TabActive:  [4]float32{0.537, 0.706, 0.980, 1.0}, // #89b4fa
+			Selection:  [4]float32{0.537, 0.706, 0.980, 0.35},
 		}
 	case "raven-blue":
 		fallthrough
@@ -67,6 +71,7 @@ func ThemeByName(name string) Theme {
 			Cursor:     [4]float32{0.635, 0.878, 0.780, 1.0}, // #a2e0c7
 			TabBar:     [4]float32{0.039, 0.047, 0.078, 1.0}, // #0a0c14
 			TabActive:  [4]float32{0.455, 0.714, 1.0, 1.0},   // #74b6ff
+			Selection:  [4]float32{0.455, 0.714, 1.0, 0.35},
 		}
 	}
 }
@@ -120,6 +125,14 @@ type Renderer struct {
 
 	// Help panel scroll state
 	helpScrollOffset int
+}
+
+type paneRect struct {
+	pane   *tab.Pane
+	x      float32
+	y      float32
+	width  float32
+	height float32
 }
 
 // NewRenderer creates a new renderer with smooth font rendering
@@ -1000,6 +1013,93 @@ func (r *Renderer) renderPanes(t *tab.Tab, width, height int, proj [16]float32, 
 	}
 }
 
+func (r *Renderer) paneRects(t *tab.Tab, width, height int) []paneRect {
+	if t == nil {
+		return nil
+	}
+	layouts := t.GetPaneLayouts()
+	if len(layouts) == 0 {
+		return nil
+	}
+
+	baseX := r.tabBarWidth + 5
+	baseY := r.paddingTop
+	availableWidth := float32(width) - r.tabBarWidth - 5
+	availableHeight := float32(height) - r.paddingTop - r.paddingBottom
+	separatorWidth := float32(2)
+
+	rects := make([]paneRect, 0, len(layouts))
+	for _, layout := range layouts {
+		offsetX := baseX + layout.X*availableWidth
+		offsetY := baseY + layout.Y*availableHeight
+		paneWidth := layout.Width * availableWidth
+		paneHeight := layout.Height * availableHeight
+
+		if len(layouts) > 1 {
+			if layout.X > 0 {
+				offsetX += separatorWidth / 2
+				paneWidth -= separatorWidth / 2
+			}
+			if layout.X+layout.Width < 1.0 {
+				paneWidth -= separatorWidth / 2
+			}
+			if layout.Y > 0 {
+				offsetY += separatorWidth / 2
+				paneHeight -= separatorWidth / 2
+			}
+			if layout.Y+layout.Height < 1.0 {
+				paneHeight -= separatorWidth / 2
+			}
+		}
+
+		rects = append(rects, paneRect{
+			pane:   layout.Pane,
+			x:      offsetX,
+			y:      offsetY,
+			width:  paneWidth,
+			height: paneHeight,
+		})
+	}
+
+	return rects
+}
+
+// HitTestPane returns the pane and cell position for a screen coordinate.
+func (r *Renderer) HitTestPane(t *tab.Tab, x, y float64, width, height int) (*tab.Pane, int, int, bool) {
+	fx := float32(x)
+	fy := float32(y)
+	for _, rect := range r.paneRects(t, width, height) {
+		if fx < rect.x || fx >= rect.x+rect.width || fy < rect.y || fy >= rect.y+rect.height {
+			continue
+		}
+		g := rect.pane.Terminal.Grid
+		col := int((fx - rect.x) / r.cellWidth)
+		row := int((fy - rect.y) / r.cellHeight)
+		col = clampInt(col, 0, g.Cols-1)
+		row = clampInt(row, 0, g.Rows-1)
+		return rect.pane, col, row, true
+	}
+	return nil, 0, 0, false
+}
+
+// PaneRectFor returns the screen rect for a specific pane.
+func (r *Renderer) PaneRectFor(t *tab.Tab, pane *tab.Pane, width, height int) (float32, float32, float32, float32, bool) {
+	if pane == nil {
+		return 0, 0, 0, 0, false
+	}
+	for _, rect := range r.paneRects(t, width, height) {
+		if rect.pane == pane {
+			return rect.x, rect.y, rect.width, rect.height, true
+		}
+	}
+	return 0, 0, 0, 0, false
+}
+
+// CellSize returns the current render cell dimensions.
+func (r *Renderer) CellSize() (float32, float32) {
+	return r.cellWidth, r.cellHeight
+}
+
 // drawPaneSeparators draws separator lines between panes
 func (r *Renderer) drawPaneSeparators(layouts []tab.PaneLayout, baseX, baseY, availableWidth, availableHeight, separatorWidth float32, proj [16]float32) {
 	// Track edges where separators should be drawn
@@ -1092,6 +1192,16 @@ func min32(a, b float32) float32 {
 	return b
 }
 
+func clampInt(value, min, max int) int {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
+}
+
 // renderTabBar renders the left tab bar
 func (r *Renderer) renderTabBar(tm *tab.TabManager, width, height int, proj [16]float32) {
 	// Draw tab bar background
@@ -1157,6 +1267,11 @@ func (r *Renderer) renderGridAt(g *grid.Grid, offsetX, offsetY, paneWidth, paneH
 			}
 			if bgColor != r.theme.Background {
 				r.drawRect(x, y, r.cellWidth, r.cellHeight, bgColor, proj)
+			}
+
+			// Draw selection highlight
+			if g.IsSelected(col, row) {
+				r.drawRect(x, y, r.cellWidth, r.cellHeight, r.theme.Selection, proj)
 			}
 
 			// Draw character
