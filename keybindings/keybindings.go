@@ -34,6 +34,7 @@ const (
 	ActionOpenMenu
 	ActionCopy
 	ActionPaste
+	ActionToggleResizeMode
 )
 
 // KeyResult contains the result of processing a key
@@ -52,10 +53,10 @@ func TranslateKey(key glfw.Key, mods glfw.ModifierKey, appCursorMode bool) KeyRe
 	if ctrl && key == glfw.KeyQ {
 		return KeyResult{Action: ActionExit}
 	}
-	if ctrl && !shift && key == glfw.KeyC {
+	if ctrl && shift && key == glfw.KeyC {
 		return KeyResult{Action: ActionCopy}
 	}
-	if ctrl && !shift && key == glfw.KeyP {
+	if ctrl && shift && key == glfw.KeyP {
 		return KeyResult{Action: ActionPaste}
 	}
 
@@ -104,9 +105,13 @@ func TranslateKey(key glfw.Key, mods glfw.ModifierKey, appCursorMode bool) KeyRe
 		return KeyResult{Action: ActionZoomReset}
 	}
 
-	// Ctrl+Shift+P to open settings menu (like command palette)
-	if ctrl && shift && key == glfw.KeyP {
+	// Ctrl+Shift+S to open settings menu (like command palette)
+	if ctrl && shift && key == glfw.KeyS {
 		return KeyResult{Action: ActionOpenMenu}
+	}
+
+	if ctrl && !shift && key == glfw.KeyR {
+		return KeyResult{Action: ActionToggleResizeMode}
 	}
 
 	if ctrl && key == glfw.KeyTab {

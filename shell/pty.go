@@ -1,6 +1,7 @@
 package shell
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -24,7 +25,7 @@ type PtySession struct {
 }
 
 // NewPtySession creates a new PTY session with a login shell
-func NewPtySession(cols, rows uint16) (*PtySession, error) {
+func NewPtySession(cols, rows uint16, startDir string) (*PtySession, error) {
 	// Load config
 	cfg, err := config.Load()
 	if err != nil {
@@ -147,7 +148,15 @@ func NewPtySession(cols, rows uint16) (*PtySession, error) {
 	}
 
 	cmd.Env = env
-	cmd.Dir = currentUser.HomeDir
+	if startDir != "" {
+		if info, err := os.Stat(startDir); err == nil && info.IsDir() {
+			cmd.Dir = startDir
+		} else {
+			cmd.Dir = currentUser.HomeDir
+		}
+	} else {
+		cmd.Dir = currentUser.HomeDir
+	}
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
 		Cols: cols,
@@ -172,6 +181,18 @@ func NewPtySession(cols, rows uint16) (*PtySession, error) {
 	}()
 
 	return session, nil
+}
+
+// CurrentDir returns the process working directory if available.
+func (p *PtySession) CurrentDir() string {
+	if p == nil || p.cmd == nil || p.cmd.Process == nil {
+		return ""
+	}
+	path, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", p.cmd.Process.Pid))
+	if err != nil {
+		return ""
+	}
+	return path
 }
 
 // findShell finds the shell to use based on config

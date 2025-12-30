@@ -18,6 +18,21 @@ const (
 	SplitHorizontal                // Children arranged top to bottom
 )
 
+// ResizeDirection indicates the direction to resize relative to the active pane.
+type ResizeDirection int
+
+const (
+	ResizeLeft ResizeDirection = iota
+	ResizeRight
+	ResizeUp
+	ResizeDown
+)
+
+const (
+	minSplitRatio = 0.1
+	maxSplitRatio = 0.9
+)
+
 // SplitNode represents a node in the split tree
 // It can either be a leaf (containing a Pane) or a container (containing children)
 type SplitNode struct {
@@ -49,8 +64,8 @@ type Pane struct {
 }
 
 // NewPane creates a new terminal pane
-func NewPane(id int, cols, rows uint16) (*Pane, error) {
-	pty, err := shell.NewPtySession(cols, rows)
+func NewPane(id int, cols, rows uint16, startDir string) (*Pane, error) {
+	pty, err := shell.NewPtySession(cols, rows, startDir)
 	if err != nil {
 		return nil, err
 	}
@@ -112,6 +127,20 @@ func (p *Pane) Close() {
 	p.pty.Close()
 }
 
+// CurrentDir returns the pane working directory when available.
+func (p *Pane) CurrentDir() string {
+	if p == nil || p.pty == nil {
+		return ""
+	}
+	if dir := p.pty.CurrentDir(); dir != "" {
+		return dir
+	}
+	if p.Terminal == nil {
+		return ""
+	}
+	return p.Terminal.WorkingDir()
+}
+
 // ID returns the pane ID
 func (p *Pane) ID() int {
 	return p.id
@@ -140,9 +169,9 @@ type Tab struct {
 }
 
 // NewTab creates a new terminal tab
-func NewTab(id int, cols, rows uint16) (*Tab, error) {
+func NewTab(id int, cols, rows uint16, startDir string) (*Tab, error) {
 	// Create the first pane
-	pane, err := NewPane(1, cols, rows)
+	pane, err := NewPane(1, cols, rows, startDir)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +245,8 @@ func (t *Tab) splitActivePane(dir SplitDirection) error {
 	}
 
 	// Create new pane
-	newPane, err := NewPane(t.nextPaneID, t.cols/2, t.rows/2)
+	startDir := t.activeNode.Pane.CurrentDir()
+	newPane, err := NewPane(t.nextPaneID, t.cols/2, t.rows/2, startDir)
 	if err != nil {
 		return err
 	}
@@ -234,7 +264,7 @@ func (t *Tab) splitActivePane(dir SplitDirection) error {
 	// Convert the active node from a leaf to a container
 	t.activeNode.Pane = nil
 	t.activeNode.SplitDir = dir
-	t.activeNode.Ratio = 1.0
+	t.activeNode.Ratio = 0.5
 
 	// Create a leaf node for the existing pane
 	existingLeaf := &SplitNode{
@@ -366,7 +396,7 @@ func (t *Tab) NextPane() {
 	}
 
 	// Move to next
-	nextIdx := (currentIdx + 1) % len(leaves)
+	nextIdx := (currentIdx - 1 + len(leaves)) % len(leaves)
 	t.activeNode = leaves[nextIdx]
 	t.updateTerminalRef()
 }
@@ -393,9 +423,69 @@ func (t *Tab) PrevPane() {
 	}
 
 	// Move to previous
-	prevIdx := (currentIdx - 1 + len(leaves)) % len(leaves)
+	prevIdx := (currentIdx + 1) % len(leaves)
 	t.activeNode = leaves[prevIdx]
 	t.updateTerminalRef()
+}
+
+// ResizeActivePane expands the active pane toward the given direction when possible.
+func (t *Tab) ResizeActivePane(direction ResizeDirection, delta float64) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.activeNode == nil {
+		return false
+	}
+
+	if delta < 0 {
+		delta = -delta
+	}
+
+	var splitDir SplitDirection
+	ratioDelta := delta
+	switch direction {
+	case ResizeLeft:
+		splitDir = SplitVertical
+		ratioDelta = -delta
+	case ResizeRight:
+		splitDir = SplitVertical
+		ratioDelta = delta
+	case ResizeUp:
+		splitDir = SplitHorizontal
+		ratioDelta = -delta
+	case ResizeDown:
+		splitDir = SplitHorizontal
+		ratioDelta = delta
+	default:
+		return false
+	}
+
+	node := t.activeNode
+	for node.Parent != nil {
+		parent := node.Parent
+		if parent.SplitDir == splitDir && len(parent.Children) == 2 {
+			ratio := parent.Ratio
+			if ratio <= 0.0 || ratio >= 1.0 {
+				ratio = 0.5
+			}
+			ratio += ratioDelta
+			if ratio < minSplitRatio {
+				ratio = minSplitRatio
+			}
+			if ratio > maxSplitRatio {
+				ratio = maxSplitRatio
+			}
+			if ratio == parent.Ratio {
+				return false
+			}
+			parent.Ratio = ratio
+			t.resizeNode(t.root, 0, 0, 1.0, 1.0)
+			return true
+		}
+		node = parent
+	}
+
+	return false
 }
 
 // updateTerminalRef updates the Terminal reference to point to active pane
@@ -434,18 +524,40 @@ func (t *Tab) resizeNode(node *SplitNode, x, y, width, height float32) {
 
 	switch node.SplitDir {
 	case SplitVertical:
-		// Divide width equally
-		childWidth := width / float32(numChildren)
-		for i, child := range node.Children {
-			childX := x + float32(i)*childWidth
-			t.resizeNode(child, childX, y, childWidth, height)
+		if numChildren == 2 {
+			ratio := float32(node.Ratio)
+			if ratio <= 0.0 || ratio >= 1.0 {
+				ratio = 0.5
+			}
+			firstWidth := width * ratio
+			secondWidth := width - firstWidth
+			t.resizeNode(node.Children[0], x, y, firstWidth, height)
+			t.resizeNode(node.Children[1], x+firstWidth, y, secondWidth, height)
+		} else {
+			// Divide width equally
+			childWidth := width / float32(numChildren)
+			for i, child := range node.Children {
+				childX := x + float32(i)*childWidth
+				t.resizeNode(child, childX, y, childWidth, height)
+			}
 		}
 	case SplitHorizontal:
-		// Divide height equally
-		childHeight := height / float32(numChildren)
-		for i, child := range node.Children {
-			childY := y + float32(i)*childHeight
-			t.resizeNode(child, x, childY, width, childHeight)
+		if numChildren == 2 {
+			ratio := float32(node.Ratio)
+			if ratio <= 0.0 || ratio >= 1.0 {
+				ratio = 0.5
+			}
+			firstHeight := height * ratio
+			secondHeight := height - firstHeight
+			t.resizeNode(node.Children[0], x, y, width, firstHeight)
+			t.resizeNode(node.Children[1], x, y+firstHeight, width, secondHeight)
+		} else {
+			// Divide height equally
+			childHeight := height / float32(numChildren)
+			for i, child := range node.Children {
+				childY := y + float32(i)*childHeight
+				t.resizeNode(child, x, childY, width, childHeight)
+			}
 		}
 	}
 }
@@ -483,16 +595,38 @@ func (t *Tab) collectLayouts(node *SplitNode, x, y, width, height float32, layou
 
 	switch node.SplitDir {
 	case SplitVertical:
-		childWidth := width / float32(numChildren)
-		for i, child := range node.Children {
-			childX := x + float32(i)*childWidth
-			t.collectLayouts(child, childX, y, childWidth, height, layouts)
+		if numChildren == 2 {
+			ratio := float32(node.Ratio)
+			if ratio <= 0.0 || ratio >= 1.0 {
+				ratio = 0.5
+			}
+			firstWidth := width * ratio
+			secondWidth := width - firstWidth
+			t.collectLayouts(node.Children[0], x, y, firstWidth, height, layouts)
+			t.collectLayouts(node.Children[1], x+firstWidth, y, secondWidth, height, layouts)
+		} else {
+			childWidth := width / float32(numChildren)
+			for i, child := range node.Children {
+				childX := x + float32(i)*childWidth
+				t.collectLayouts(child, childX, y, childWidth, height, layouts)
+			}
 		}
 	case SplitHorizontal:
-		childHeight := height / float32(numChildren)
-		for i, child := range node.Children {
-			childY := y + float32(i)*childHeight
-			t.collectLayouts(child, x, childY, width, childHeight, layouts)
+		if numChildren == 2 {
+			ratio := float32(node.Ratio)
+			if ratio <= 0.0 || ratio >= 1.0 {
+				ratio = 0.5
+			}
+			firstHeight := height * ratio
+			secondHeight := height - firstHeight
+			t.collectLayouts(node.Children[0], x, y, width, firstHeight, layouts)
+			t.collectLayouts(node.Children[1], x, y+firstHeight, width, secondHeight, layouts)
+		} else {
+			childHeight := height / float32(numChildren)
+			for i, child := range node.Children {
+				childY := y + float32(i)*childHeight
+				t.collectLayouts(child, x, childY, width, childHeight, layouts)
+			}
 		}
 	}
 }
@@ -677,6 +811,17 @@ func (t *Tab) GetSplitDirection() SplitDirection {
 	return t.root.SplitDir
 }
 
+// ActiveDir returns the active pane working directory when available.
+func (t *Tab) ActiveDir() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.activeNode == nil || t.activeNode.Pane == nil {
+		return ""
+	}
+	return t.activeNode.Pane.CurrentDir()
+}
+
 // TabManager manages multiple terminal tabs
 type TabManager struct {
 	tabs        []*Tab
@@ -715,7 +860,12 @@ func (tm *TabManager) NewTab() error {
 	// New tab ID is based on current tab count + 1
 	newID := len(tm.tabs) + 1
 
-	tab, err := NewTab(newID, tm.cols, tm.rows)
+	startDir := ""
+	if len(tm.tabs) > 0 && tm.activeIndex >= 0 && tm.activeIndex < len(tm.tabs) {
+		startDir = tm.tabs[tm.activeIndex].ActiveDir()
+	}
+
+	tab, err := NewTab(newID, tm.cols, tm.rows, startDir)
 	if err != nil {
 		return err
 	}
