@@ -60,6 +60,11 @@ type mouseSelection struct {
 	startRow int
 }
 
+type toastState struct {
+	message   string
+	expiresAt time.Time
+}
+
 func main() {
 	// Create window
 	winConfig := window.DefaultConfig()
@@ -98,6 +103,14 @@ func main() {
 	resizeMode := false
 	const resizeStep = 0.05
 	selection := &mouseSelection{}
+	toast := &toastState{}
+	showToast := func(message string) {
+		if strings.TrimSpace(message) == "" {
+			return
+		}
+		toast.message = message
+		toast.expiresAt = time.Now().Add(900 * time.Millisecond)
+	}
 	settingsMenu := menu.NewMenu()
 	settingsMenu.OnConfigReload = func(cfg *config.Config) error {
 		if cfg == nil {
@@ -273,6 +286,7 @@ func main() {
 			}
 			if text != "" {
 				glfw.SetClipboardString(text)
+				showToast("Copied to clipboard")
 			}
 		case keybindings.ActionPaste:
 			clip := glfw.GetClipboardString()
@@ -281,6 +295,7 @@ func main() {
 				clip = strings.ReplaceAll(clip, "\n", "\r")
 				activeTab.Write([]byte(clip))
 				activeTab.Terminal.Grid.ResetScrollOffset()
+				showToast("Pasted from clipboard")
 			}
 		case keybindings.ActionNewTab:
 			lineBuf.clear()
@@ -440,6 +455,15 @@ func main() {
 					selection.pane.Terminal.Grid.ClearSelection()
 				}
 
+				if mods&glfw.ModControl != 0 {
+					if urlText, _, _ := urlAtCellRange(pane.Terminal.Grid, col, row); urlText != "" {
+						if err := openURL(urlText); err != nil {
+							log.Printf("failed to open url %q: %v", urlText, err)
+						}
+						return
+					}
+				}
+
 				selection.active = true
 				selection.pane = pane
 				selection.startCol = col
@@ -487,6 +511,7 @@ func main() {
 				g.SetSelection(selection.startCol, selection.startRow, col, row)
 				if text := g.SelectedText(); text != "" {
 					glfw.SetClipboardString(text)
+					showToast("Copied to clipboard")
 				}
 
 				selection.active = false
@@ -504,7 +529,7 @@ func main() {
 			g := pane.Terminal.Grid
 
 			if mods&glfw.ModControl != 0 {
-				if urlText := urlAtCell(g, col, row); urlText != "" {
+				if urlText, _, _ := urlAtCellRange(g, col, row); urlText != "" {
 					if err := openURL(urlText); err != nil {
 						log.Printf("failed to open url %q: %v", urlText, err)
 					}
@@ -515,6 +540,7 @@ func main() {
 			if g.HasSelection() {
 				if text := g.SelectedText(); text != "" {
 					glfw.SetClipboardString(text)
+					showToast("Copied to clipboard")
 				}
 				return
 			}
@@ -525,50 +551,67 @@ func main() {
 				clip = strings.ReplaceAll(clip, "\n", "\r")
 				pane.Write([]byte(clip))
 				g.ResetScrollOffset()
+				showToast("Pasted from clipboard")
 			}
 		}
 	})
 
 	win.GLFW().SetCursorPosCallback(func(w *glfw.Window, xpos, ypos float64) {
-		if !selection.active || selection.pane == nil {
-			return
-		}
 		if settingsMenu.IsOpen() || showHelp {
+			renderer.ClearHoverURL()
 			return
 		}
 
 		activeTab := tabManager.ActiveTab()
 		if activeTab == nil {
+			renderer.ClearHoverURL()
+			return
+		}
+
+		if selection.active && selection.pane != nil {
+			width, height := win.GetFramebufferSize()
+			rectX, rectY, rectW, rectH, ok := renderer.PaneRectFor(activeTab, selection.pane, width, height)
+			if !ok {
+				return
+			}
+
+			fx := float32(xpos)
+			fy := float32(ypos)
+			if fx < rectX {
+				fx = rectX
+			} else if fx >= rectX+rectW {
+				fx = rectX + rectW - 1
+			}
+			if fy < rectY {
+				fy = rectY
+			} else if fy >= rectY+rectH {
+				fy = rectY + rectH - 1
+			}
+
+			cellW, cellH := renderer.CellSize()
+			col := int((fx - rectX) / cellW)
+			row := int((fy - rectY) / cellH)
+			g := selection.pane.Terminal.Grid
+			col = clampInt(col, 0, g.Cols-1)
+			row = clampInt(row, 0, g.Rows-1)
+
+			g.SetSelection(selection.startCol, selection.startRow, col, row)
+			renderer.ClearHoverURL()
 			return
 		}
 
 		width, height := win.GetFramebufferSize()
-		rectX, rectY, rectW, rectH, ok := renderer.PaneRectFor(activeTab, selection.pane, width, height)
-		if !ok {
+		pane, col, row, ok := renderer.HitTestPane(activeTab, xpos, ypos, width, height)
+		if !ok || pane == nil {
+			renderer.ClearHoverURL()
 			return
 		}
 
-		fx := float32(xpos)
-		fy := float32(ypos)
-		if fx < rectX {
-			fx = rectX
-		} else if fx >= rectX+rectW {
-			fx = rectX + rectW - 1
+		if _, startCol, endCol := urlAtCellRange(pane.Terminal.Grid, col, row); startCol <= endCol {
+			renderer.SetHoverURL(pane.Terminal.Grid, row, startCol, endCol)
+			return
 		}
-		if fy < rectY {
-			fy = rectY
-		} else if fy >= rectY+rectH {
-			fy = rectY + rectH - 1
-		}
-
-		cellW, cellH := renderer.CellSize()
-		col := int((fx - rectX) / cellW)
-		row := int((fy - rectY) / cellH)
-		g := selection.pane.Terminal.Grid
-		col = clampInt(col, 0, g.Cols-1)
-		row = clampInt(row, 0, g.Rows-1)
-
-		g.SetSelection(selection.startCol, selection.startRow, col, row)
+		renderer.ClearHoverURL()
 	})
 
 	// Main loop
@@ -599,6 +642,9 @@ func main() {
 		} else {
 			renderer.RenderWithHelp(tabManager, width, height, cursorVisible, showHelp)
 		}
+		if now.Before(toast.expiresAt) {
+			renderer.DrawToast(toast.message, width, height)
+		}
 
 		// Swap buffers and poll events
 		win.SwapBuffers()
@@ -620,8 +666,13 @@ func clampInt(value, min, max int) int {
 }
 
 func urlAtCell(g *grid.Grid, col, row int) string {
+	urlText, _, _ := urlAtCellRange(g, col, row)
+	return urlText
+}
+
+func urlAtCellRange(g *grid.Grid, col, row int) (string, int, int) {
 	if g == nil || row < 0 || row >= g.Rows || col < 0 || col >= g.Cols {
-		return ""
+		return "", -1, -1
 	}
 
 	line := make([]rune, g.Cols)
@@ -635,7 +686,7 @@ func urlAtCell(g *grid.Grid, col, row int) string {
 	}
 
 	if line[col] == ' ' {
-		return ""
+		return "", -1, -1
 	}
 
 	start := col
@@ -647,26 +698,33 @@ func urlAtCell(g *grid.Grid, col, row int) string {
 		end++
 	}
 
-	candidate := strings.TrimSpace(string(line[start : end+1]))
-	candidate = strings.Trim(candidate, "<>\"'()[]{}")
-	candidate = strings.TrimRight(candidate, ".,;:!?")
-	if candidate == "" {
-		return ""
+	trimLeftChars := "<>\"'()[]{}"
+	trimRightChars := "<>\"'()[]{}.,;:!?"
+	for start <= end && strings.ContainsRune(trimLeftChars, line[start]) {
+		start++
+	}
+	for end >= start && strings.ContainsRune(trimRightChars, line[end]) {
+		end--
+	}
+	if start > end {
+		return "", -1, -1
 	}
 
-	if strings.HasPrefix(candidate, "www.") {
-		candidate = "http://" + candidate
+	display := string(line[start : end+1])
+	target := display
+	if strings.HasPrefix(target, "www.") {
+		target = "http://" + target
 	}
-	if !strings.Contains(candidate, "://") {
-		return ""
+	if !strings.Contains(target, "://") {
+		return "", -1, -1
 	}
 
-	parsed, err := url.Parse(candidate)
+	parsed, err := url.Parse(target)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return ""
+		return "", -1, -1
 	}
 
-	return candidate
+	return target, start, end
 }
 
 func openURL(target string) error {

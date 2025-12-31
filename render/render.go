@@ -125,6 +125,13 @@ type Renderer struct {
 
 	// Help panel scroll state
 	helpScrollOffset int
+
+	// Hover underline state for URLs
+	hoverGrid     *grid.Grid
+	hoverRow      int
+	hoverStartCol int
+	hoverEndCol   int
+	hoverActive   bool
 }
 
 type paneRect struct {
@@ -1277,12 +1284,22 @@ func (r *Renderer) renderGridAt(g *grid.Grid, offsetX, offsetY, paneWidth, paneH
 			}
 
 			// Draw character
+			fgColor := r.colorToRGBA(cell.Fg, false)
+			if cell.Flags&grid.FlagInverse != 0 {
+				fgColor = r.colorToRGBA(cell.Bg, true)
+			}
 			if cell.Char != ' ' && cell.Char != 0 {
-				fgColor := r.colorToRGBA(cell.Fg, false)
-				if cell.Flags&grid.FlagInverse != 0 {
-					fgColor = r.colorToRGBA(cell.Bg, true)
-				}
 				r.drawChar(x, y+r.cellHeight, cell.Char, fgColor, proj)
+			}
+
+			// Draw underline for ANSI styling or hovered URL
+			drawUnderline := cell.Flags&grid.FlagUnderline != 0
+			if r.hoverActive && r.hoverGrid == g && row == r.hoverRow && col >= r.hoverStartCol && col <= r.hoverEndCol {
+				drawUnderline = true
+			}
+			if drawUnderline && cell.Char != ' ' && cell.Char != 0 {
+				underlineY := y + r.cellHeight - 1
+				r.drawRect(x, underlineY, r.cellWidth, 1, fgColor, proj)
 			}
 		}
 	}
@@ -1304,6 +1321,63 @@ func (r *Renderer) renderGridAt(g *grid.Grid, offsetX, offsetY, paneWidth, paneH
 			}
 		}
 	}
+}
+
+// SetHoverURL sets the hover underline range for a grid.
+func (r *Renderer) SetHoverURL(g *grid.Grid, row, startCol, endCol int) {
+	if g == nil || row < 0 || startCol < 0 || endCol < startCol {
+		r.ClearHoverURL()
+		return
+	}
+	r.hoverGrid = g
+	r.hoverRow = row
+	r.hoverStartCol = startCol
+	r.hoverEndCol = endCol
+	r.hoverActive = true
+}
+
+// ClearHoverURL clears any active hover underline.
+func (r *Renderer) ClearHoverURL() {
+	r.hoverGrid = nil
+	r.hoverActive = false
+}
+
+// DrawToast renders a small notification overlay.
+func (r *Renderer) DrawToast(message string, width, height int) {
+	if strings.TrimSpace(message) == "" {
+		return
+	}
+
+	proj := orthoMatrix(0, float32(width), float32(height), 0, -1, 1)
+
+	paddingX := r.cellWidth * 0.8
+	paddingY := r.cellHeight * 0.35
+	runes := []rune(message)
+	textWidth := float32(len(runes)) * r.cellWidth
+	boxW := textWidth + paddingX*2
+	boxH := r.cellHeight + paddingY*2
+	margin := r.cellWidth * 0.8
+
+	maxWidth := float32(width) - margin*2
+	if boxW > maxWidth {
+		maxChars := int((maxWidth - paddingX*2) / r.cellWidth)
+		if maxChars > 3 {
+			message = string(runes[:maxChars-3]) + "..."
+			runes = []rune(message)
+			textWidth = float32(len(runes)) * r.cellWidth
+			boxW = textWidth + paddingX*2
+		} else {
+			return
+		}
+	}
+
+	x := float32(width) - boxW - margin
+	y := float32(height) - boxH - margin
+	bg := r.theme.TabBar
+	bg[3] = 0.85
+
+	r.drawRect(x, y, boxW, boxH, bg, proj)
+	r.drawText(x+paddingX, y+boxH-paddingY, message, r.theme.Foreground, proj)
 }
 
 // drawRect draws a colored rectangle
