@@ -3,11 +3,16 @@ package main
 import (
 	"log"
 	"math"
+	"net/url"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/javanhut/RavenTerminal/commands"
+	"github.com/javanhut/RavenTerminal/config"
+	"github.com/javanhut/RavenTerminal/grid"
 	"github.com/javanhut/RavenTerminal/keybindings"
 	"github.com/javanhut/RavenTerminal/menu"
 	"github.com/javanhut/RavenTerminal/render"
@@ -57,8 +62,8 @@ type mouseSelection struct {
 
 func main() {
 	// Create window
-	config := window.DefaultConfig()
-	win, err := window.NewWindow(config)
+	winConfig := window.DefaultConfig()
+	win, err := window.NewWindow(winConfig)
 	if err != nil {
 		log.Fatalf("Failed to create window: %v", err)
 	}
@@ -94,6 +99,13 @@ func main() {
 	const resizeStep = 0.05
 	selection := &mouseSelection{}
 	settingsMenu := menu.NewMenu()
+	settingsMenu.OnConfigReload = func(cfg *config.Config) error {
+		if cfg == nil {
+			return nil
+		}
+		renderer.SetThemeByName(cfg.Theme)
+		return nil
+	}
 	currentTheme := ""
 	if settingsMenu.Config != nil {
 		currentTheme = settingsMenu.Config.Theme
@@ -254,7 +266,11 @@ func main() {
 		case keybindings.ActionToggleFullscreen:
 			win.ToggleFullscreen()
 		case keybindings.ActionCopy:
-			text := activeTab.Terminal.Grid.VisibleText()
+			g := activeTab.Terminal.Grid
+			text := g.SelectedText()
+			if text == "" {
+				text = g.VisibleText()
+			}
 			if text != "" {
 				glfw.SetClipboardString(text)
 			}
@@ -479,13 +495,22 @@ func main() {
 			if action != glfw.Press {
 				return
 			}
-			pane, _, _, ok := renderer.HitTestPane(activeTab, x, y, width, height)
+			pane, col, row, ok := renderer.HitTestPane(activeTab, x, y, width, height)
 			if !ok || pane == nil {
 				return
 			}
 
 			activeTab.SetActivePane(pane)
 			g := pane.Terminal.Grid
+
+			if mods&glfw.ModControl != 0 {
+				if urlText := urlAtCell(g, col, row); urlText != "" {
+					if err := openURL(urlText); err != nil {
+						log.Printf("failed to open url %q: %v", urlText, err)
+					}
+					return
+				}
+			}
 
 			if g.HasSelection() {
 				if text := g.SelectedText(); text != "" {
@@ -592,4 +617,67 @@ func clampInt(value, min, max int) int {
 		return max
 	}
 	return value
+}
+
+func urlAtCell(g *grid.Grid, col, row int) string {
+	if g == nil || row < 0 || row >= g.Rows || col < 0 || col >= g.Cols {
+		return ""
+	}
+
+	line := make([]rune, g.Cols)
+	for c := 0; c < g.Cols; c++ {
+		cell := g.DisplayCell(c, row)
+		ch := cell.Char
+		if ch == 0 {
+			ch = ' '
+		}
+		line[c] = ch
+	}
+
+	if line[col] == ' ' {
+		return ""
+	}
+
+	start := col
+	for start > 0 && line[start-1] != ' ' {
+		start--
+	}
+	end := col
+	for end+1 < len(line) && line[end+1] != ' ' {
+		end++
+	}
+
+	candidate := strings.TrimSpace(string(line[start : end+1]))
+	candidate = strings.Trim(candidate, "<>\"'()[]{}")
+	candidate = strings.TrimRight(candidate, ".,;:!?")
+	if candidate == "" {
+		return ""
+	}
+
+	if strings.HasPrefix(candidate, "www.") {
+		candidate = "http://" + candidate
+	}
+	if !strings.Contains(candidate, "://") {
+		return ""
+	}
+
+	parsed, err := url.Parse(candidate)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+
+	return candidate
+}
+
+func openURL(target string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", target)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", target)
+	default:
+		cmd = exec.Command("xdg-open", target)
+	}
+	return cmd.Start()
 }

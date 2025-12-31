@@ -139,8 +139,8 @@ type paneRect struct {
 func NewRenderer() (*Renderer, error) {
 	r := &Renderer{
 		theme:         DefaultTheme(),
-		fontSize:      16.0,
-		baseFontSize:  16.0, // Fixed UI font size
+		fontSize:      15.0,
+		baseFontSize:  15.0, // Fixed UI font size
 		paddingTop:    12.0,
 		paddingBottom: 12.0,
 		tabBarWidth:   135.0,
@@ -1453,22 +1453,22 @@ func (r *Renderer) colorToRGBA(c grid.Color, isBackground bool) [4]float32 {
 func indexedColor(index uint8) [4]float32 {
 	// Standard 16 colors
 	standard := [][4]float32{
-		{0.0, 0.0, 0.0, 1.0},    // 0: Black
-		{0.8, 0.0, 0.0, 1.0},    // 1: Red
-		{0.0, 0.8, 0.0, 1.0},    // 2: Green
-		{0.8, 0.8, 0.0, 1.0},    // 3: Yellow
-		{0.0, 0.0, 0.8, 1.0},    // 4: Blue
-		{0.8, 0.0, 0.8, 1.0},    // 5: Magenta
-		{0.0, 0.8, 0.8, 1.0},    // 6: Cyan
-		{0.75, 0.75, 0.75, 1.0}, // 7: White
-		{0.5, 0.5, 0.5, 1.0},    // 8: Bright Black
-		{1.0, 0.0, 0.0, 1.0},    // 9: Bright Red
-		{0.0, 1.0, 0.0, 1.0},    // 10: Bright Green
-		{1.0, 1.0, 0.0, 1.0},    // 11: Bright Yellow
-		{0.0, 0.0, 1.0, 1.0},    // 12: Bright Blue
-		{1.0, 0.0, 1.0, 1.0},    // 13: Bright Magenta
-		{0.0, 1.0, 1.0, 1.0},    // 14: Bright Cyan
-		{1.0, 1.0, 1.0, 1.0},    // 15: Bright White
+		{0.043, 0.059, 0.078, 1.0}, // 0: Black
+		{0.820, 0.412, 0.412, 1.0}, // 1: Red
+		{0.498, 0.737, 0.549, 1.0}, // 2: Green
+		{0.843, 0.729, 0.490, 1.0}, // 3: Yellow
+		{0.533, 0.643, 0.831, 1.0}, // 4: Blue
+		{0.773, 0.525, 0.753, 1.0}, // 5: Magenta
+		{0.498, 0.773, 0.784, 1.0}, // 6: Cyan
+		{0.831, 0.847, 0.871, 1.0}, // 7: White
+		{0.294, 0.322, 0.388, 1.0}, // 8: Bright Black
+		{0.878, 0.478, 0.478, 1.0}, // 9: Bright Red
+		{0.604, 0.843, 0.659, 1.0}, // 10: Bright Green
+		{0.906, 0.788, 0.545, 1.0}, // 11: Bright Yellow
+		{0.647, 0.749, 0.941, 1.0}, // 12: Bright Blue
+		{0.847, 0.627, 0.831, 1.0}, // 13: Bright Magenta
+		{0.604, 0.843, 0.863, 1.0}, // 14: Bright Cyan
+		{0.945, 0.953, 0.961, 1.0}, // 15: Bright White
 	}
 
 	if index < 16 {
@@ -1554,7 +1554,7 @@ func (r *Renderer) GetAvailableFonts() []fonts.FontInfo {
 }
 
 // Default font size for reset
-const defaultFontSize = 16.0
+const defaultFontSize = 15.0
 const minFontSize = 8.0
 const maxFontSize = 32.0
 const zoomStep = 2.0

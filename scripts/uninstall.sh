@@ -18,6 +18,7 @@ UNINSTALL_MODE=""
 REMOVE_CONFIG=false
 FORCE=false
 VERBOSE=false
+REPORT=()
 
 # Application info
 APP_NAME="raven-terminal"
@@ -57,6 +58,10 @@ print_error() {
 
 print_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+record_action() {
+    REPORT+=("$1")
 }
 
 usage() {
@@ -196,6 +201,11 @@ confirm_uninstall() {
 remove_file() {
     local file="$1"
     local use_sudo="$2"
+    local label="$3"
+    local target="$file"
+    if [ -n "$label" ]; then
+        target="$label ($file)"
+    fi
     
     if [ -f "$file" ]; then
         if [ "$use_sudo" = true ]; then
@@ -203,15 +213,10 @@ remove_file() {
         else
             rm -f "$file"
         fi
-        
-        if [ "$VERBOSE" = true ]; then
-            print_success "Removed: $file"
-        fi
+        record_action "Removed: $target"
         return 0
     else
-        if [ "$VERBOSE" = true ]; then
-            print_info "Not found: $file"
-        fi
+        record_action "Not found: $target"
         return 1
     fi
 }
@@ -219,6 +224,11 @@ remove_file() {
 remove_dir() {
     local dir="$1"
     local use_sudo="$2"
+    local label="$3"
+    local target="$dir"
+    if [ -n "$label" ]; then
+        target="$label ($dir)"
+    fi
     
     if [ -d "$dir" ]; then
         if [ "$use_sudo" = true ]; then
@@ -226,15 +236,10 @@ remove_dir() {
         else
             rm -rf "$dir"
         fi
-        
-        if [ "$VERBOSE" = true ]; then
-            print_success "Removed directory: $dir"
-        fi
+        record_action "Removed: $target"
         return 0
     else
-        if [ "$VERBOSE" = true ]; then
-            print_info "Not found: $dir"
-        fi
+        record_action "Not found: $target"
         return 1
     fi
 }
@@ -245,32 +250,32 @@ uninstall_user() {
     local removed=0
     
     # Remove binary
-    if remove_file "$USER_BIN_DIR/$APP_NAME" false; then
+    if remove_file "$USER_BIN_DIR/$APP_NAME" false "User binary"; then
         ((removed++))
     fi
     
     # Remove launcher wrapper
-    if remove_file "$USER_BIN_DIR/raven-terminal-launcher" false; then
+    if remove_file "$USER_BIN_DIR/raven-terminal-launcher" false "User launcher"; then
         ((removed++))
     fi
     
     # Remove desktop file
-    if remove_file "$USER_APP_DIR/$APP_NAME.desktop" false; then
+    if remove_file "$USER_APP_DIR/$APP_NAME.desktop" false "User desktop file"; then
         ((removed++))
     fi
     
     # Remove icon
-    if remove_file "$USER_ICON_DIR/$APP_NAME.svg" false; then
+    if remove_file "$USER_ICON_DIR/$APP_NAME.svg" false "User icon"; then
         ((removed++))
     fi
     
     # Remove pixmap icon
-    if remove_file "$USER_PIXMAP_DIR/$APP_NAME.svg" false; then
+    if remove_file "$USER_PIXMAP_DIR/$APP_NAME.svg" false "User pixmap icon"; then
         ((removed++))
     fi
 
     # Remove log directory
-    if remove_dir "$HOME/.local/share/raven-terminal" false; then
+    if remove_dir "$HOME/.local/share/raven-terminal" false "User data dir"; then
         ((removed++))
     fi
     
@@ -303,35 +308,35 @@ uninstall_global() {
     local removed=0
     
     # Remove binary
-    if remove_file "$GLOBAL_BIN_DIR/$APP_NAME" true; then
+    if remove_file "$GLOBAL_BIN_DIR/$APP_NAME" true "Global binary"; then
         ((removed++))
     fi
     
     # Remove launcher wrapper
-    if remove_file "$GLOBAL_BIN_DIR/raven-terminal-launcher" true; then
+    if remove_file "$GLOBAL_BIN_DIR/raven-terminal-launcher" true "Global launcher"; then
         ((removed++))
     fi
 
     # Remove legacy binary locations
-    if remove_file "$LEGACY_GLOBAL_BIN_DIR/$APP_NAME" true; then
+    if remove_file "$LEGACY_GLOBAL_BIN_DIR/$APP_NAME" true "Legacy global binary"; then
         ((removed++))
     fi
-    if remove_file "$LEGACY_GLOBAL_BIN_DIR/raven-terminal-launcher" true; then
+    if remove_file "$LEGACY_GLOBAL_BIN_DIR/raven-terminal-launcher" true "Legacy global launcher"; then
         ((removed++))
     fi
     
     # Remove desktop file
-    if remove_file "$GLOBAL_APP_DIR/$APP_NAME.desktop" true; then
+    if remove_file "$GLOBAL_APP_DIR/$APP_NAME.desktop" true "Global desktop file"; then
         ((removed++))
     fi
     
     # Remove icon
-    if remove_file "$GLOBAL_ICON_DIR/$APP_NAME.svg" true; then
+    if remove_file "$GLOBAL_ICON_DIR/$APP_NAME.svg" true "Global icon"; then
         ((removed++))
     fi
 
     # Remove pixmap icon
-    if remove_file "$GLOBAL_PIXMAP_DIR/$APP_NAME.svg" true; then
+    if remove_file "$GLOBAL_PIXMAP_DIR/$APP_NAME.svg" true "Global pixmap icon"; then
         ((removed++))
     fi
     
@@ -354,8 +359,16 @@ uninstall_global() {
 
 remove_config() {
     print_info "Removing configuration files..."
-    
-    if remove_dir "$USER_CONFIG_DIR" false; then
+
+    local removed_any=false
+    if remove_file "$USER_CONFIG_DIR/config.toml" false "Config file"; then
+        removed_any=true
+    fi
+    if remove_dir "$USER_CONFIG_DIR" false "Config dir"; then
+        removed_any=true
+    fi
+
+    if [ "$removed_any" = true ]; then
         print_success "Configuration files removed"
     else
         print_info "No configuration files found"
@@ -368,6 +381,14 @@ print_completion() {
     echo -e "${GREEN}     Uninstallation Complete!${NC}"
     echo -e "${GREEN}============================================${NC}"
     echo ""
+
+    if [ "$VERBOSE" = true ] && [ ${#REPORT[@]} -gt 0 ]; then
+        echo "Removal details:"
+        for line in "${REPORT[@]}"; do
+            echo "  - $line"
+        done
+        echo ""
+    fi
     
     if [ "$REMOVE_CONFIG" = false ] && [ -d "$USER_CONFIG_DIR" ]; then
         echo "Configuration files were preserved at:"

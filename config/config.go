@@ -92,22 +92,91 @@ func DefaultConfig() *Config {
 ls *.crl >/dev/null 2>&1 && echo "Carrion" && return 0
 echo "None"
 `,
-			VCSDetect: `# Detect VCS
+			VCSDetect: `# Detect VCS (Git + Ivaldi)
 _vcs=""
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     _branch=$(git branch --show-current 2>/dev/null || echo "?")
-    _vcs="Git($_branch)"
+
+    _ahead=0
+    _behind=0
+    if git rev-parse --abbrev-ref @{upstream} >/dev/null 2>&1; then
+        _counts=$(git rev-list --left-right --count HEAD...@{upstream} 2>/dev/null)
+        _behind=${_counts%% *}
+        _ahead=${_counts##* }
+    fi
+
+    _staged=0
+    _unstaged=0
+    _untracked=0
+    while IFS= read -r _line; do
+        case "${_line:0:2}" in
+            "??") _untracked=$((_untracked + 1)) ;;
+            *) 
+                [ "${_line:0:1}" != " " ] && _staged=$((_staged + 1))
+                [ "${_line:1:1}" != " " ] && _unstaged=$((_unstaged + 1))
+                ;;
+        esac
+    done < <(git status --porcelain 2>/dev/null)
+
+    _state=""
+    [ "$_ahead" -gt 0 ] && _state="$_state ^$_ahead"
+    [ "$_behind" -gt 0 ] && _state="$_state v$_behind"
+    [ "$_staged" -gt 0 ] && _state="$_state +$_staged"
+    [ "$_unstaged" -gt 0 ] && _state="$_state ~$_unstaged"
+    [ "$_untracked" -gt 0 ] && _state="$_state ?$_untracked"
+
+    if [ -n "$_state" ]; then
+        _vcs="Git($_branch$_state)"
+    else
+        _vcs="Git($_branch)"
+    fi
 fi
-if [ -d .ivaldi ] || [ -f .ivaldi ]; then
-    [ -n "$_vcs" ] && _vcs="$_vcs+Ivaldi" || _vcs="Ivaldi"
+
+_ivaldi_tl=""
+_ivaldi_present=""
+if command -v ivaldi >/dev/null 2>&1; then
+    _ivaldi_raw="$(ivaldi whereami 2>/dev/null)"
+    if [ -z "$_ivaldi_raw" ]; then
+        _ivaldi_raw="$(ivaldi wai 2>/dev/null)"
+    fi
+    if [ -n "$_ivaldi_raw" ]; then
+        _ivaldi_present="1"
+    fi
+    _ivaldi_tl=$(printf "%s\n" "$_ivaldi_raw" | awk -F: 'tolower($1) ~ /^[[:space:]]*timeline[[:space:]]*$/ {sub(/^[[:space:]]+/, "", $2); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}')
 fi
+if [ -z "$_ivaldi_tl" ] && [ -f .ivaldi ]; then
+    _ivaldi_present="1"
+    _ivaldi_tl=$(awk -F: 'tolower($1) ~ /^[[:space:]]*timeline[[:space:]]*$/ {sub(/^[[:space:]]+/, "", $2); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit} NF{print; exit}' .ivaldi 2>/dev/null)
+fi
+if [ -z "$_ivaldi_tl" ] && [ -d .ivaldi ]; then
+    _ivaldi_present="1"
+    for _ivaldi_file in .ivaldi/timeline .ivaldi/whereami .ivaldi/wai; do
+        if [ -f "$_ivaldi_file" ]; then
+            _ivaldi_tl=$(awk -F: 'tolower($1) ~ /^[[:space:]]*timeline[[:space:]]*$/ {sub(/^[[:space:]]+/, "", $2); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit} NF{print; exit}' "$_ivaldi_file" 2>/dev/null)
+            [ -n "$_ivaldi_tl" ] && break
+        fi
+    done
+fi
+if [ -n "$_ivaldi_tl" ] || [ -n "$_ivaldi_present" ]; then
+    if [ -n "$_ivaldi_tl" ]; then
+        _ivaldi_display="Ivaldi (tl: $_ivaldi_tl)"
+    else
+        _ivaldi_display="Ivaldi"
+    fi
+    if [ -n "$_vcs" ]; then
+        _vcs="$_vcs | $_ivaldi_display"
+    else
+        _vcs="$_ivaldi_display"
+    fi
+fi
+
 [ -z "$_vcs" ] && _vcs="None"
 echo "$_vcs"
 `,
 		},
 		Commands: []CustomCommand{},
 		Aliases: map[string]string{
-			"ls": "ls --color=auto -p -C",
+			"ls": "ls --color=auto --group-directories-first -C",
 		},
 		Theme: "raven-blue",
 	}
@@ -318,6 +387,9 @@ func (c *Config) buildPromptFunction() string {
 	green := `\e[0;32m`
 	yellow := `\e[0;33m`
 	magenta := `\e[0;35m`
+	blue := `\e[0;34m`
+	red := `\e[0;31m`
+	dim := `\e[0;90m`
 	reset := `\e[0m`
 
 	distro := getDistroName()
@@ -342,16 +414,25 @@ func (c *Config) buildPromptFunction() string {
 	case "full":
 		fallthrough
 	default:
+		script += `    local _status=$?` + "\n"
 		// Build line 1
 		script += `    local _line1=""` + "\n"
 		if c.Prompt.ShowPath {
 			script += `    _line1="\[` + cyan + `\]\w\[` + reset + `\]"` + "\n"
 		}
 		if c.Prompt.ShowLanguage {
-			script += `    _line1="$_line1 \[` + yellow + `\]Language: $(__raven_detect_lang)\[` + reset + `\]"` + "\n"
+			script += `    if [ -n "$_line1" ]; then` + "\n"
+			script += `        _line1="$_line1 \[` + dim + `\] | \[` + blue + `\]Lang:\[` + reset + `\] \[` + yellow + `\]$(__raven_detect_lang)\[` + reset + `\]"` + "\n"
+			script += `    else` + "\n"
+			script += `        _line1="\[` + blue + `\]Lang:\[` + reset + `\] \[` + yellow + `\]$(__raven_detect_lang)\[` + reset + `\]"` + "\n"
+			script += `    fi` + "\n"
 		}
 		if c.Prompt.ShowVCS {
-			script += `    _line1="$_line1 \[` + magenta + `\]VCS: $(__raven_detect_vcs)\[` + reset + `\]"` + "\n"
+			script += `    if [ -n "$_line1" ]; then` + "\n"
+			script += `        _line1="$_line1 \[` + dim + `\] | \[` + blue + `\]VCS:\[` + reset + `\] \[` + magenta + `\]$(__raven_detect_vcs)\[` + reset + `\]"` + "\n"
+			script += `    else` + "\n"
+			script += `        _line1="\[` + blue + `\]VCS:\[` + reset + `\] \[` + magenta + `\]$(__raven_detect_vcs)\[` + reset + `\]"` + "\n"
+			script += `    fi` + "\n"
 		}
 
 		// Build line 2
@@ -370,7 +451,10 @@ func (c *Config) buildPromptFunction() string {
 			}
 			script += `    _line2="$_line2] "` + "\n"
 		}
-		script += `    _line2="$_line2> "` + "\n"
+		script += `    if [ $_status -ne 0 ]; then` + "\n"
+		script += `        _line2="$_line2\[` + red + `\]err:$_status\[` + reset + `\] "` + "\n"
+		script += `    fi` + "\n"
+		script += `    _line2="$_line2\[` + dim + `\]>\[` + reset + `\] "` + "\n"
 
 		// Combine
 		script += `    PS1="$_line1\n$_line2"` + "\n"

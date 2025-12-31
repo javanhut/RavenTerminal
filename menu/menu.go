@@ -78,6 +78,9 @@ type Menu struct {
 
 	// Messages
 	StatusMessage string
+
+	// Optional hook for applying config without closing the menu
+	OnConfigReload func(cfg *config.Config) error
 }
 
 // NewMenu creates a new menu instance
@@ -171,6 +174,7 @@ func (m *Menu) buildMainMenu() {
 		{Label: "Scripts..."},
 		{Label: "Commands (" + itoa(len(m.Config.Commands)) + ")..."},
 		{Label: "Aliases (" + itoa(len(m.Config.Aliases)) + ")..."},
+		{Label: "Reload Config"},
 		{Label: ""},
 		{Label: "Save and Close"},
 		{Label: "Cancel"},
@@ -428,11 +432,44 @@ func (m *Menu) handleMainSelect() {
 		m.State = MenuAliases
 		m.SelectedIndex = 0
 		m.buildAliasesMenu()
-	case 9: // Save and Close
+	case 8: // Reload Config
+		cfg, err := config.Load()
+		if err != nil {
+			m.StatusMessage = "Failed to reload config"
+			return
+		}
+		if _, err := cfg.WriteInitScript(); err != nil {
+			m.StatusMessage = "Reloaded (init regen failed)"
+		}
+		if m.OnConfigReload != nil {
+			if err := m.OnConfigReload(cfg); err != nil {
+				if m.StatusMessage == "" {
+					m.StatusMessage = "Reloaded (apply failed)"
+				}
+			}
+		}
+		m.Config = cfg
+		m.buildMainMenu()
+		if m.StatusMessage == "" {
+			m.StatusMessage = "Config reloaded"
+		}
+	case 10: // Save and Close
 		if m.saveConfig() {
+			if _, err := m.Config.WriteInitScript(); err != nil {
+				m.StatusMessage = "Saved (init regen failed)"
+				m.buildMainMenu()
+				return
+			}
+			if m.OnConfigReload != nil {
+				if err := m.OnConfigReload(m.Config); err != nil {
+					m.StatusMessage = "Saved (apply failed)"
+					m.buildMainMenu()
+					return
+				}
+			}
 			m.Close()
 		}
-	case 10: // Cancel
+	case 11: // Cancel
 		m.Config, _ = config.Load()
 		m.Close()
 	}
