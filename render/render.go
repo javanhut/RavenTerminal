@@ -238,8 +238,8 @@ func (r *Renderer) loadFontData(fontData []byte) error {
 	}
 
 	x, y := 0, metrics.Ascent.Ceil()
-	charHeight := int(r.cellHeight) + 4
-	charWidth := int(r.cellWidth) + 4
+	charHeight := int(r.cellHeight)
+	charWidth := int(r.cellWidth)
 
 	for _, cr := range charRanges {
 		for c := cr.start; c <= cr.end; c++ {
@@ -259,7 +259,7 @@ func (r *Renderer) loadFontData(fontData []byte) error {
 			}
 
 			// Render glyph
-			drawer.Dot = fixed.P(x+2, y)
+			drawer.Dot = fixed.P(x, y)
 			drawer.DrawString(string(c))
 
 			// Store glyph info (normalized coordinates)
