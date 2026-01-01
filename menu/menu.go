@@ -92,6 +92,8 @@ type Menu struct {
 
 	// Optional hook for applying config without closing the menu
 	OnConfigReload func(cfg *config.Config) error
+	// Optional hook for applying updated init script to the active shell
+	OnInitScriptUpdated func(initPath string) error
 }
 
 // NewMenu creates a new menu instance
@@ -507,21 +509,18 @@ func (m *Menu) handleMainSelect() {
 			m.StatusMessage = "Config reloaded"
 		}
 	case 12: // Save and Close
-		if m.saveConfig() {
-			if _, err := m.Config.WriteInitScript(); err != nil {
-				m.StatusMessage = "Saved (init regen failed)"
+		if !m.saveConfigWithInitScript("Saved") {
+			m.buildMainMenu()
+			return
+		}
+		if m.OnConfigReload != nil {
+			if err := m.OnConfigReload(m.Config); err != nil {
+				m.StatusMessage = "Saved (apply failed)"
 				m.buildMainMenu()
 				return
 			}
-			if m.OnConfigReload != nil {
-				if err := m.OnConfigReload(m.Config); err != nil {
-					m.StatusMessage = "Saved (apply failed)"
-					m.buildMainMenu()
-					return
-				}
-			}
-			m.Close()
 		}
+		m.Close()
 	case 13: // Cancel
 		m.Config, _ = config.Load()
 		m.Close()
@@ -885,9 +884,7 @@ func (m *Menu) HandleDelete() {
 			item := m.Items[m.SelectedIndex]
 			if item.Value != "" {
 				m.Config.RemoveAlias(item.Value)
-				if m.saveConfig() {
-					m.StatusMessage = "Alias deleted"
-				}
+				_ = m.saveConfigWithInitScript("Alias deleted")
 				m.buildAliasesMenu()
 				if m.SelectedIndex >= len(m.Items) {
 					m.SelectedIndex = len(m.Items) - 1
@@ -899,9 +896,7 @@ func (m *Menu) HandleDelete() {
 			item := m.Items[m.SelectedIndex]
 			if item.Value != "" {
 				m.Config.RemoveExport(item.Value)
-				if m.saveConfig() {
-					m.StatusMessage = "Export deleted"
-				}
+				_ = m.saveConfigWithInitScript("Export deleted")
 				m.buildExportsMenu()
 				if m.SelectedIndex >= len(m.Items) {
 					m.SelectedIndex = len(m.Items) - 1
@@ -1019,9 +1014,7 @@ func (m *Menu) handleAliasConfirmSelect() {
 			delete(m.Config.Aliases, m.EditingName)
 		}
 		m.Config.SetAlias(m.PendingName, m.PendingAliasCmd)
-		if m.saveConfig() {
-			m.StatusMessage = "Alias saved"
-		}
+		_ = m.saveConfigWithInitScript("Alias saved")
 		m.clearPendingAlias()
 		m.State = MenuAliases
 		m.SelectedIndex = 0
@@ -1045,9 +1038,7 @@ func (m *Menu) handleExportConfirmSelect() {
 			delete(m.Config.Exports, m.EditingExportName)
 		}
 		m.Config.SetExport(m.PendingName, m.PendingExport)
-		if m.saveConfig() {
-			m.StatusMessage = "Export saved"
-		}
+		_ = m.saveConfigWithInitScript("Export saved")
 		m.clearPendingExport()
 		m.State = MenuExports
 		m.SelectedIndex = 0
@@ -1090,6 +1081,25 @@ func (m *Menu) saveConfig() bool {
 		return false
 	}
 	m.debugf("save ok")
+	return true
+}
+
+func (m *Menu) saveConfigWithInitScript(successMessage string) bool {
+	if !m.saveConfig() {
+		return false
+	}
+	initPath, err := m.Config.WriteInitScript()
+	if err != nil {
+		m.StatusMessage = successMessage + " (init regen failed)"
+		return false
+	}
+	if m.OnInitScriptUpdated != nil {
+		if err := m.OnInitScriptUpdated(initPath); err != nil {
+			m.StatusMessage = successMessage + " (apply failed)"
+			return false
+		}
+	}
+	m.StatusMessage = successMessage
 	return true
 }
 

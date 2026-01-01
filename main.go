@@ -53,6 +53,13 @@ func (lb *lineBuffer) getLine() string {
 	return lb.buffer.String()
 }
 
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
 type mouseSelection struct {
 	active   bool
 	pane     *tab.Pane
@@ -124,6 +131,17 @@ func main() {
 		cols, rows := renderer.CalculateGridSize(width, height)
 		tabManager.ResizeAll(uint16(cols), uint16(rows))
 		return nil
+	}
+	settingsMenu.OnInitScriptUpdated = func(initPath string) error {
+		if initPath == "" {
+			return nil
+		}
+		activeTab := tabManager.ActiveTab()
+		if activeTab == nil {
+			return nil
+		}
+		cmd := ". " + shellQuote(initPath) + "\n"
+		return activeTab.Write([]byte(cmd))
 	}
 	currentTheme := ""
 	if settingsMenu.Config != nil {
