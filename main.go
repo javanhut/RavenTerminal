@@ -117,12 +117,23 @@ func main() {
 			return nil
 		}
 		renderer.SetThemeByName(cfg.Theme)
+		if err := renderer.SetDefaultFontSize(cfg.FontSize); err != nil {
+			return err
+		}
+		width, height := win.GetFramebufferSize()
+		cols, rows := renderer.CalculateGridSize(width, height)
+		tabManager.ResizeAll(uint16(cols), uint16(rows))
 		return nil
 	}
 	currentTheme := ""
 	if settingsMenu.Config != nil {
 		currentTheme = settingsMenu.Config.Theme
 		renderer.SetThemeByName(currentTheme)
+		if err := renderer.SetDefaultFontSize(settingsMenu.Config.FontSize); err == nil {
+			width, height := win.GetFramebufferSize()
+			cols, rows := renderer.CalculateGridSize(width, height)
+			tabManager.ResizeAll(uint16(cols), uint16(rows))
+		}
 	}
 
 	win.GLFW().SetKeyCallback(func(w *glfw.Window, key glfw.Key, scancode int, action glfw.Action, mods glfw.ModifierKey) {
@@ -138,6 +149,16 @@ func main() {
 
 		// Handle settings menu input when open
 		if settingsMenu.IsOpen() {
+			appCursor := activeTab.Terminal.AppCursorKeys()
+			result := keybindings.TranslateKey(key, mods, appCursor)
+			if result.Action == keybindings.ActionPaste && settingsMenu.InputMode() {
+				clip := glfw.GetClipboardString()
+				if clip != "" {
+					settingsMenu.HandlePaste(clip)
+					showToast("Pasted from clipboard")
+				}
+				return
+			}
 			switch key {
 			case glfw.KeyUp:
 				settingsMenu.MoveUp()

@@ -55,7 +55,9 @@ type Config struct {
 	Scripts  ScriptsConfig     `toml:"scripts"`
 	Commands []CustomCommand   `toml:"commands"`
 	Aliases  map[string]string `toml:"aliases"`
+	Exports  map[string]string `toml:"exports"`
 	Theme    string            `toml:"theme"`
+	FontSize float32           `toml:"font_size"`
 }
 
 // DefaultConfig returns the default configuration
@@ -178,7 +180,9 @@ echo "$_vcs"
 		Aliases: map[string]string{
 			"ls": "ls --color=auto --group-directories-first -C",
 		},
-		Theme: "raven-blue",
+		Exports:  map[string]string{},
+		Theme:    "raven-blue",
+		FontSize: 15.0,
 	}
 }
 
@@ -356,6 +360,14 @@ func (c *Config) WriteInitScript() (string, error) {
 		}
 	}
 
+	// Add exports
+	if len(c.Exports) > 0 {
+		script += "\n# Exports\n"
+		for name, value := range c.Exports {
+			script += "export " + name + "=\"" + escapeDoubleQuotes(value) + "\"\n"
+		}
+	}
+
 	if err := os.WriteFile(initPath, []byte(script), 0644); err != nil {
 		return "", err
 	}
@@ -494,4 +506,22 @@ func (c *Config) SetAlias(name, command string) {
 // RemoveAlias removes an alias
 func (c *Config) RemoveAlias(name string) {
 	delete(c.Aliases, name)
+}
+
+// SetExport sets an export value
+func (c *Config) SetExport(name, value string) {
+	if c.Exports == nil {
+		c.Exports = make(map[string]string)
+	}
+	c.Exports[name] = value
+}
+
+// RemoveExport removes an export
+func (c *Config) RemoveExport(name string) {
+	delete(c.Exports, name)
+}
+
+func escapeDoubleQuotes(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	return strings.ReplaceAll(s, "\"", "\\\"")
 }

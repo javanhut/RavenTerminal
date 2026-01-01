@@ -3,6 +3,8 @@ package menu
 import (
 	"log"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/javanhut/RavenTerminal/config"
 )
@@ -22,8 +24,10 @@ const (
 	MenuScripts
 	MenuCommands
 	MenuAliases
+	MenuExports
 	MenuConfirmCommand
 	MenuConfirmAlias
+	MenuConfirmExport
 )
 
 // InputState tracks what we're currently inputting
@@ -38,11 +42,16 @@ const (
 	// Alias input states
 	InputAliasName
 	InputAliasValue
+	// Export input states
+	InputExportName
+	InputExportValue
 	// Script input states
 	InputScriptInit
 	InputScriptPrePrompt
 	InputScriptLangDetect
 	InputScriptVCSDetect
+	// Font size input state
+	InputFontSize
 )
 
 // MenuItem represents a menu item
@@ -71,10 +80,12 @@ type Menu struct {
 	PendingCmd      string
 	PendingDesc     string
 	PendingAliasCmd string
+	PendingExport   string
 
 	// Edit tracking
-	EditingIndex int    // -1 for new, >= 0 for existing
-	EditingName  string // For alias editing
+	EditingIndex      int    // -1 for new, >= 0 for existing
+	EditingName       string // For alias editing
+	EditingExportName string
 
 	// Messages
 	StatusMessage string
@@ -169,11 +180,13 @@ func (m *Menu) buildMainMenu() {
 		{Label: "Shell: " + currentShell},
 		{Label: "Source RC Files: " + sourceRC},
 		{Label: "Theme: " + themeLabel},
+		{Label: "Font Size: " + formatFloat(m.Config.FontSize)},
 		{Label: "Prompt Style: " + promptStyle},
 		{Label: "Prompt Options..."},
 		{Label: "Scripts..."},
 		{Label: "Commands (" + itoa(len(m.Config.Commands)) + ")..."},
 		{Label: "Aliases (" + itoa(len(m.Config.Aliases)) + ")..."},
+		{Label: "Exports (" + itoa(len(m.Config.Exports)) + ")..."},
 		{Label: "Reload Config"},
 		{Label: ""},
 		{Label: "Save and Close"},
@@ -285,6 +298,21 @@ func (m *Menu) buildAliasesMenu() {
 	m.Items = append(m.Items, MenuItem{Label: "Back"})
 }
 
+// buildExportsMenu builds the exports menu
+func (m *Menu) buildExportsMenu() {
+	m.Items = []MenuItem{
+		{Label: "+ Add New Export"},
+	}
+	for name, value := range m.Config.Exports {
+		m.Items = append(m.Items, MenuItem{
+			Label: name + " = " + truncate(value, 25),
+			Value: name,
+		})
+	}
+	m.Items = append(m.Items, MenuItem{Label: ""})
+	m.Items = append(m.Items, MenuItem{Label: "Back"})
+}
+
 // buildCommandConfirmMenu builds the command confirmation menu
 func (m *Menu) buildCommandConfirmMenu() {
 	label := "Save Command"
@@ -315,6 +343,21 @@ func (m *Menu) buildAliasConfirmMenu() {
 		{Label: ""},
 		{Label: "Alias: " + m.PendingName, Disabled: true},
 		{Label: "Command: " + m.PendingAliasCmd, Disabled: true},
+	}
+}
+
+// buildExportConfirmMenu builds the export confirmation menu
+func (m *Menu) buildExportConfirmMenu() {
+	label := "Save Export"
+	if m.EditingExportName != "" {
+		label = "Save Changes"
+	}
+	m.Items = []MenuItem{
+		{Label: label, Value: "save"},
+		{Label: "Cancel", Value: "cancel"},
+		{Label: ""},
+		{Label: "Export: " + m.PendingName, Disabled: true},
+		{Label: "Value: " + m.PendingExport, Disabled: true},
 	}
 }
 
@@ -391,10 +434,14 @@ func (m *Menu) Select() {
 		m.handleCommandsSelect(item)
 	case MenuAliases:
 		m.handleAliasesSelect(item)
+	case MenuExports:
+		m.handleExportsSelect(item)
 	case MenuConfirmCommand:
 		m.handleCommandConfirmSelect()
 	case MenuConfirmAlias:
 		m.handleAliasConfirmSelect()
+	case MenuConfirmExport:
+		m.handleExportConfirmSelect()
 	}
 }
 
@@ -412,27 +459,33 @@ func (m *Menu) handleMainSelect() {
 		m.State = MenuThemeSelect
 		m.SelectedIndex = 0
 		m.buildThemeMenu()
-	case 3: // Prompt Style
+	case 3: // Font Size
+		m.startInputWithValue(InputFontSize, "Font size (8-32):", formatFloat(m.Config.FontSize))
+	case 4: // Prompt Style
 		m.State = MenuPromptStyle
 		m.SelectedIndex = 0
 		m.buildPromptStyleMenu()
-	case 4: // Prompt Options
+	case 5: // Prompt Options
 		m.State = MenuPromptSettings
 		m.SelectedIndex = 0
 		m.buildPromptSettingsMenu()
-	case 5: // Scripts
+	case 6: // Scripts
 		m.State = MenuScripts
 		m.SelectedIndex = 0
 		m.buildScriptsMenu()
-	case 6: // Commands
+	case 7: // Commands
 		m.State = MenuCommands
 		m.SelectedIndex = 0
 		m.buildCommandsMenu()
-	case 7: // Aliases
+	case 8: // Aliases
 		m.State = MenuAliases
 		m.SelectedIndex = 0
 		m.buildAliasesMenu()
-	case 8: // Reload Config
+	case 9: // Exports
+		m.State = MenuExports
+		m.SelectedIndex = 0
+		m.buildExportsMenu()
+	case 10: // Reload Config
 		cfg, err := config.Load()
 		if err != nil {
 			m.StatusMessage = "Failed to reload config"
@@ -453,7 +506,7 @@ func (m *Menu) handleMainSelect() {
 		if m.StatusMessage == "" {
 			m.StatusMessage = "Config reloaded"
 		}
-	case 10: // Save and Close
+	case 12: // Save and Close
 		if m.saveConfig() {
 			if _, err := m.Config.WriteInitScript(); err != nil {
 				m.StatusMessage = "Saved (init regen failed)"
@@ -469,7 +522,7 @@ func (m *Menu) handleMainSelect() {
 			}
 			m.Close()
 		}
-	case 11: // Cancel
+	case 13: // Cancel
 		m.Config, _ = config.Load()
 		m.Close()
 	}
@@ -582,6 +635,23 @@ func (m *Menu) handleAliasesSelect(item MenuItem) {
 	}
 }
 
+func (m *Menu) handleExportsSelect(item MenuItem) {
+	if item.Label == "Back" {
+		m.goBack()
+		return
+	}
+	if m.SelectedIndex == 0 { // Add new
+		m.EditingExportName = ""
+		m.PendingName = ""
+		m.PendingExport = ""
+		m.startInputWithValue(InputExportName, "Export name:", "")
+	} else if item.Value != "" { // Edit existing
+		m.EditingExportName = item.Value
+		m.PendingName = item.Value
+		m.startInputWithValue(InputExportName, "Export name:", item.Value)
+	}
+}
+
 // startInput begins input mode with optional initial value
 func (m *Menu) startInput(state InputState, label string) {
 	m.InputActive = true
@@ -604,6 +674,19 @@ func (m *Menu) HandleChar(char rune) {
 		return
 	}
 	m.InputBuffer += string(char)
+}
+
+// HandlePaste appends clipboard text to the input buffer.
+func (m *Menu) HandlePaste(text string) {
+	if !m.InputActive || text == "" {
+		return
+	}
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	if !m.InputIsMultiline() {
+		text = strings.ReplaceAll(text, "\n", " ")
+	}
+	m.InputBuffer += text
 }
 
 // HandleBackspace handles backspace
@@ -689,6 +772,33 @@ func (m *Menu) HandleEnter() bool {
 		m.SelectedIndex = m.firstSelectableIndex()
 		m.debugf("confirm alias name=%q cmd=%q", m.PendingName, m.PendingAliasCmd)
 
+	case InputExportName:
+		if value == "" {
+			m.InputState = InputNone
+			m.buildExportsMenu()
+			return false
+		}
+		m.PendingName = value
+		initialValue := ""
+		if m.EditingExportName != "" {
+			initialValue = m.Config.Exports[m.EditingExportName]
+		}
+		m.startInputWithValue(InputExportValue, "Value:", initialValue)
+
+	case InputExportValue:
+		if value == "" {
+			m.InputState = InputNone
+			m.buildExportsMenu()
+			return false
+		}
+		m.PendingExport = value
+		m.State = MenuConfirmExport
+		m.SelectedIndex = 0
+		m.ScrollOffset = 0
+		m.buildExportConfirmMenu()
+		m.SelectedIndex = m.firstSelectableIndex()
+		m.debugf("confirm export name=%q value=%q", m.PendingName, m.PendingExport)
+
 	case InputScriptInit:
 		m.Config.Scripts.Init = value
 		m.StatusMessage = "Script updated"
@@ -708,6 +818,17 @@ func (m *Menu) HandleEnter() bool {
 		m.Config.Scripts.VCSDetect = value
 		m.StatusMessage = "Script updated"
 		m.buildScriptsMenu()
+
+	case InputFontSize:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 32)
+		if err != nil {
+			m.StatusMessage = "Invalid font size"
+			m.buildMainMenu()
+			break
+		}
+		m.Config.FontSize = float32(parsed)
+		m.StatusMessage = "Font size updated (save to persist)"
+		m.buildMainMenu()
 	}
 
 	if !m.InputActive {
@@ -731,6 +852,8 @@ func (m *Menu) HandleEscape() {
 			m.buildAliasesMenu()
 		case MenuScripts:
 			m.buildScriptsMenu()
+		case MenuExports:
+			m.buildExportsMenu()
 		}
 		return
 	}
@@ -771,13 +894,27 @@ func (m *Menu) HandleDelete() {
 				}
 			}
 		}
+	case MenuExports:
+		if m.SelectedIndex > 0 {
+			item := m.Items[m.SelectedIndex]
+			if item.Value != "" {
+				m.Config.RemoveExport(item.Value)
+				if m.saveConfig() {
+					m.StatusMessage = "Export deleted"
+				}
+				m.buildExportsMenu()
+				if m.SelectedIndex >= len(m.Items) {
+					m.SelectedIndex = len(m.Items) - 1
+				}
+			}
+		}
 	}
 }
 
 // goBack goes back to previous menu
 func (m *Menu) goBack() {
 	switch m.State {
-	case MenuShellSelect, MenuThemeSelect, MenuPromptStyle, MenuPromptSettings, MenuScripts, MenuCommands, MenuAliases:
+	case MenuShellSelect, MenuThemeSelect, MenuPromptStyle, MenuPromptSettings, MenuScripts, MenuCommands, MenuAliases, MenuExports:
 		m.State = MenuMain
 		m.SelectedIndex = 0
 		m.ScrollOffset = 0
@@ -797,6 +934,13 @@ func (m *Menu) goBack() {
 		m.ScrollOffset = 0
 		m.buildAliasesMenu()
 		m.debugf("go back to aliases")
+	case MenuConfirmExport:
+		m.clearPendingExport()
+		m.State = MenuExports
+		m.SelectedIndex = 0
+		m.ScrollOffset = 0
+		m.buildExportsMenu()
+		m.debugf("go back to exports")
 	default:
 		m.Close()
 	}
@@ -821,10 +965,14 @@ func (m *Menu) GetTitle() string {
 		return "Commands"
 	case MenuAliases:
 		return "Aliases"
+	case MenuExports:
+		return "Exports"
 	case MenuConfirmCommand:
 		return "Confirm Command"
 	case MenuConfirmAlias:
 		return "Confirm Alias"
+	case MenuConfirmExport:
+		return "Confirm Export"
 	default:
 		return "Settings"
 	}
@@ -888,6 +1036,32 @@ func (m *Menu) handleAliasConfirmSelect() {
 	}
 }
 
+func (m *Menu) handleExportConfirmSelect() {
+	item := m.Items[m.SelectedIndex]
+	m.debugf("confirm export select value=%q", item.Value)
+	switch item.Value {
+	case "save":
+		if m.EditingExportName != "" && m.EditingExportName != m.PendingName {
+			delete(m.Config.Exports, m.EditingExportName)
+		}
+		m.Config.SetExport(m.PendingName, m.PendingExport)
+		if m.saveConfig() {
+			m.StatusMessage = "Export saved"
+		}
+		m.clearPendingExport()
+		m.State = MenuExports
+		m.SelectedIndex = 0
+		m.ScrollOffset = 0
+		m.buildExportsMenu()
+	case "cancel":
+		m.clearPendingExport()
+		m.State = MenuExports
+		m.SelectedIndex = 0
+		m.ScrollOffset = 0
+		m.buildExportsMenu()
+	}
+}
+
 func (m *Menu) clearPendingCommand() {
 	m.PendingName = ""
 	m.PendingCmd = ""
@@ -899,6 +1073,13 @@ func (m *Menu) clearPendingAlias() {
 	m.PendingName = ""
 	m.PendingAliasCmd = ""
 	m.EditingName = ""
+	m.EditingIndex = -1
+}
+
+func (m *Menu) clearPendingExport() {
+	m.PendingName = ""
+	m.PendingExport = ""
+	m.EditingExportName = ""
 	m.EditingIndex = -1
 }
 
@@ -966,10 +1147,14 @@ func (m *Menu) stateName() string {
 		return "commands"
 	case MenuAliases:
 		return "aliases"
+	case MenuExports:
+		return "exports"
 	case MenuConfirmCommand:
 		return "confirm_command"
 	case MenuConfirmAlias:
 		return "confirm_alias"
+	case MenuConfirmExport:
+		return "confirm_export"
 	default:
 		return "unknown"
 	}
@@ -997,6 +1182,12 @@ func (m *Menu) inputStateName() string {
 		return "script_lang_detect"
 	case InputScriptVCSDetect:
 		return "script_vcs_detect"
+	case InputExportName:
+		return "export_name"
+	case InputExportValue:
+		return "export_value"
+	case InputFontSize:
+		return "font_size"
 	default:
 		return "unknown"
 	}
@@ -1070,6 +1261,10 @@ func scriptStatus(s string) string {
 		return truncate(s, 20)
 	}
 	return itoa(lines) + " lines"
+}
+
+func formatFloat(f float32) string {
+	return strconv.FormatFloat(float64(f), 'f', -1, 32)
 }
 
 func escapeNewlines(s string) string {

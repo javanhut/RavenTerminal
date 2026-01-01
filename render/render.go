@@ -91,17 +91,18 @@ type Glyph struct {
 
 // Renderer handles OpenGL rendering with smooth fonts
 type Renderer struct {
-	theme          Theme
-	cellWidth      float32 // Current cell dimensions (may be zoomed)
-	cellHeight     float32
-	fontSize       float32 // Current font size
-	baseFontSize   float32 // Base font size (16.0)
-	baseCellWidth  float32 // Cell dimensions at base font size (for UI)
-	baseCellHeight float32
-	paddingTop     float32
-	paddingBottom  float32
-	tabBarWidth    float32
-	currentFont    string
+	theme           Theme
+	cellWidth       float32 // Current cell dimensions (may be zoomed)
+	cellHeight      float32
+	fontSize        float32 // Current font size
+	baseFontSize    float32 // Base font size (16.0)
+	baseCellWidth   float32 // Cell dimensions at base font size (for UI)
+	defaultFontSize float32 // Default font size for reset
+	baseCellHeight  float32
+	paddingTop      float32
+	paddingBottom   float32
+	tabBarWidth     float32
+	currentFont     string
 
 	// Font data
 	glyphs    map[rune]Glyph
@@ -145,15 +146,16 @@ type paneRect struct {
 // NewRenderer creates a new renderer with smooth font rendering
 func NewRenderer() (*Renderer, error) {
 	r := &Renderer{
-		theme:         DefaultTheme(),
-		fontSize:      15.0,
-		baseFontSize:  15.0, // Fixed UI font size
-		paddingTop:    12.0,
-		paddingBottom: 12.0,
-		tabBarWidth:   135.0,
-		currentFont:   fonts.DefaultFontName(),
-		glyphs:        make(map[rune]Glyph),
-		atlasSize:     512, // Larger atlas for Nerd Font icons
+		theme:           DefaultTheme(),
+		fontSize:        defaultFontSize,
+		baseFontSize:    defaultFontSize, // Fixed UI font size
+		defaultFontSize: defaultFontSize,
+		paddingTop:      12.0,
+		paddingBottom:   12.0,
+		tabBarWidth:     135.0,
+		currentFont:     fonts.DefaultFontName(),
+		glyphs:          make(map[rune]Glyph),
+		atlasSize:       512, // Larger atlas for Nerd Font icons
 	}
 
 	if err := r.initGL(); err != nil {
@@ -1653,7 +1655,7 @@ func (r *Renderer) ZoomOut() error {
 
 // ZoomReset resets the font size to default
 func (r *Renderer) ZoomReset() error {
-	return r.setFontSize(defaultFontSize)
+	return r.setFontSize(r.defaultFontSize)
 }
 
 // setFontSize changes the font size and reloads the font
@@ -1681,9 +1683,31 @@ func (r *Renderer) setFontSize(size float32) error {
 	return r.loadFontData(fontData)
 }
 
+// SetDefaultFontSize sets the default font size and applies it.
+func (r *Renderer) SetDefaultFontSize(size float32) error {
+	size = clampFontSize(size)
+	r.defaultFontSize = size
+	return r.setFontSize(size)
+}
+
+// SetFontSize sets the current font size without changing the default.
+func (r *Renderer) SetFontSize(size float32) error {
+	return r.setFontSize(clampFontSize(size))
+}
+
 // GetFontSize returns the current font size
 func (r *Renderer) GetFontSize() float32 {
 	return r.fontSize
+}
+
+func clampFontSize(size float32) float32 {
+	if size < minFontSize {
+		return minFontSize
+	}
+	if size > maxFontSize {
+		return maxFontSize
+	}
+	return size
 }
 
 // Destroy cleans up renderer resources
