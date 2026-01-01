@@ -22,6 +22,7 @@ const (
 	MenuPromptSettings
 	MenuPromptStyle
 	MenuScripts
+	MenuOllamaModels
 	MenuCommands
 	MenuAliases
 	MenuExports
@@ -50,6 +51,9 @@ const (
 	InputScriptPrePrompt
 	InputScriptLangDetect
 	InputScriptVCSDetect
+	// Ollama input states
+	InputOllamaURL
+	InputOllamaModel
 	// Font size input state
 	InputFontSize
 )
@@ -68,6 +72,7 @@ type Menu struct {
 	SelectedIndex int
 	Items         []MenuItem
 	ScrollOffset  int
+	OllamaModels  []string
 
 	// Input handling - simplified
 	InputActive bool
@@ -94,6 +99,12 @@ type Menu struct {
 	OnConfigReload func(cfg *config.Config) error
 	// Optional hook for applying updated init script to the active shell
 	OnInitScriptUpdated func(initPath string) error
+	// Optional hook for testing Ollama connectivity.
+	OnOllamaTest func(url string) error
+	// Optional hook for fetching Ollama models.
+	OnOllamaFetchModels func(url string) ([]string, error)
+	// Optional hook for pre-loading an Ollama model into memory.
+	OnOllamaLoadModel func(url, model string)
 }
 
 // NewMenu creates a new menu instance
@@ -185,6 +196,18 @@ func (m *Menu) buildMainMenu() {
 	if m.Config.WebSearch.UseReaderProxy {
 		readerProxy = "ON"
 	}
+	ollamaChat := "OFF"
+	if m.Config.Ollama.Enabled {
+		ollamaChat = "ON"
+	}
+	ollamaURL := m.Config.Ollama.URL
+	if ollamaURL == "" {
+		ollamaURL = "(not set)"
+	}
+	ollamaModel := m.Config.Ollama.Model
+	if ollamaModel == "" {
+		ollamaModel = "(not set)"
+	}
 
 	m.Items = []MenuItem{
 		{Label: "Shell: " + currentShell},
@@ -196,6 +219,12 @@ func (m *Menu) buildMainMenu() {
 		{Label: "Scripts..."},
 		{Label: "Web Search: " + webSearch},
 		{Label: "Web Search Reader Proxy: " + readerProxy},
+		{Label: "Ollama Chat: " + ollamaChat},
+		{Label: "Ollama URL: " + truncate(ollamaURL, 30)},
+		{Label: "Ollama Model: " + truncate(ollamaModel, 30)},
+		{Label: "Ollama Test Connection"},
+		{Label: "Ollama Refresh Models"},
+		{Label: "Ollama Models..."},
 		{Label: "Commands (" + itoa(len(m.Config.Commands)) + ")..."},
 		{Label: "Aliases (" + itoa(len(m.Config.Aliases)) + ")..."},
 		{Label: "Exports (" + itoa(len(m.Config.Exports)) + ")..."},
@@ -325,6 +354,23 @@ func (m *Menu) buildExportsMenu() {
 	m.Items = append(m.Items, MenuItem{Label: "Back"})
 }
 
+// buildOllamaModelsMenu builds the Ollama models list menu.
+func (m *Menu) buildOllamaModelsMenu() {
+	m.Items = []MenuItem{}
+	for _, model := range m.OllamaModels {
+		prefix := "  "
+		if m.Config.Ollama.Model == model {
+			prefix = "> "
+		}
+		m.Items = append(m.Items, MenuItem{Label: prefix + model, Value: model})
+	}
+	if len(m.Items) == 0 {
+		m.Items = append(m.Items, MenuItem{Label: "(no models loaded)"})
+	}
+	m.Items = append(m.Items, MenuItem{Label: ""})
+	m.Items = append(m.Items, MenuItem{Label: "Back"})
+}
+
 // buildCommandConfirmMenu builds the command confirmation menu
 func (m *Menu) buildCommandConfirmMenu() {
 	label := "Save Command"
@@ -442,6 +488,8 @@ func (m *Menu) Select() {
 		m.handlePromptSettingsSelect()
 	case MenuScripts:
 		m.handleScriptsSelect()
+	case MenuOllamaModels:
+		m.handleOllamaModelsSelect(item)
 	case MenuCommands:
 		m.handleCommandsSelect(item)
 	case MenuAliases:
@@ -462,6 +510,7 @@ func (m *Menu) handleMainSelect() {
 	case 0: // Shell
 		m.State = MenuShellSelect
 		m.SelectedIndex = 0
+		m.ScrollOffset = 0
 		m.buildShellMenu()
 	case 1: // Source RC
 		m.Config.Shell.SourceRC = !m.Config.Shell.SourceRC
@@ -470,20 +519,24 @@ func (m *Menu) handleMainSelect() {
 	case 2: // Theme
 		m.State = MenuThemeSelect
 		m.SelectedIndex = 0
+		m.ScrollOffset = 0
 		m.buildThemeMenu()
 	case 3: // Font Size
 		m.startInputWithValue(InputFontSize, "Font size (8-32):", formatFloat(m.Config.FontSize))
 	case 4: // Prompt Style
 		m.State = MenuPromptStyle
 		m.SelectedIndex = 0
+		m.ScrollOffset = 0
 		m.buildPromptStyleMenu()
 	case 5: // Prompt Options
 		m.State = MenuPromptSettings
 		m.SelectedIndex = 0
+		m.ScrollOffset = 0
 		m.buildPromptSettingsMenu()
 	case 6: // Scripts
 		m.State = MenuScripts
 		m.SelectedIndex = 0
+		m.ScrollOffset = 0
 		m.buildScriptsMenu()
 	case 7: // Web Search
 		m.Config.WebSearch.Enabled = !m.Config.WebSearch.Enabled
@@ -493,19 +546,61 @@ func (m *Menu) handleMainSelect() {
 		m.Config.WebSearch.UseReaderProxy = !m.Config.WebSearch.UseReaderProxy
 		m.buildMainMenu()
 		m.StatusMessage = "Updated (save to persist)"
-	case 9: // Commands
+	case 9: // Ollama Chat
+		m.Config.Ollama.Enabled = !m.Config.Ollama.Enabled
+		m.buildMainMenu()
+		m.StatusMessage = "Updated (save to persist)"
+	case 10: // Ollama URL
+		m.startInputWithValue(InputOllamaURL, "Ollama base URL:", m.Config.Ollama.URL)
+	case 11: // Ollama Model
+		m.startInputWithValue(InputOllamaModel, "Ollama model name:", m.Config.Ollama.Model)
+	case 12: // Ollama Test Connection
+		if m.OnOllamaTest == nil {
+			m.StatusMessage = "Ollama test unavailable"
+			return
+		}
+		if err := m.OnOllamaTest(m.Config.Ollama.URL); err != nil {
+			m.StatusMessage = "Ollama test failed: " + err.Error()
+			return
+		}
+		m.StatusMessage = "Ollama connection OK"
+	case 13: // Ollama Refresh Models
+		if m.OnOllamaFetchModels == nil {
+			m.StatusMessage = "Ollama fetch unavailable"
+			return
+		}
+		models, err := m.OnOllamaFetchModels(m.Config.Ollama.URL)
+		if err != nil {
+			m.StatusMessage = "Model refresh failed: " + err.Error()
+			return
+		}
+		m.OllamaModels = models
+		if len(models) == 0 {
+			m.StatusMessage = "No models found"
+			return
+		}
+		m.StatusMessage = "Models loaded (" + itoa(len(models)) + ")"
+	case 14: // Ollama Models
+		m.State = MenuOllamaModels
+		m.SelectedIndex = 0
+		m.ScrollOffset = 0
+		m.buildOllamaModelsMenu()
+	case 15: // Commands
 		m.State = MenuCommands
 		m.SelectedIndex = 0
+		m.ScrollOffset = 0
 		m.buildCommandsMenu()
-	case 10: // Aliases
+	case 16: // Aliases
 		m.State = MenuAliases
 		m.SelectedIndex = 0
+		m.ScrollOffset = 0
 		m.buildAliasesMenu()
-	case 11: // Exports
+	case 17: // Exports
 		m.State = MenuExports
 		m.SelectedIndex = 0
+		m.ScrollOffset = 0
 		m.buildExportsMenu()
-	case 12: // Reload Config
+	case 18: // Reload Config
 		cfg, err := config.Load()
 		if err != nil {
 			m.StatusMessage = "Failed to reload config"
@@ -526,7 +621,7 @@ func (m *Menu) handleMainSelect() {
 		if m.StatusMessage == "" {
 			m.StatusMessage = "Config reloaded"
 		}
-	case 14: // Save and Close
+	case 20: // Save and Close
 		if !m.saveConfigWithInitScript("Saved") {
 			m.buildMainMenu()
 			return
@@ -539,7 +634,7 @@ func (m *Menu) handleMainSelect() {
 			}
 		}
 		m.Close()
-	case 15: // Cancel
+	case 21: // Cancel
 		m.Config, _ = config.Load()
 		m.Close()
 	}
@@ -612,6 +707,23 @@ func (m *Menu) handleScriptsSelect() {
 	case 5:
 		m.goBack()
 	}
+}
+
+func (m *Menu) handleOllamaModelsSelect(item MenuItem) {
+	if item.Label == "Back" {
+		m.goBack()
+		return
+	}
+	if item.Value == "" {
+		return
+	}
+	m.Config.Ollama.Model = item.Value
+	m.StatusMessage = "Ollama model updated (save to persist)"
+	// Pre-load the model into memory
+	if m.OnOllamaLoadModel != nil && m.Config.Ollama.URL != "" {
+		m.OnOllamaLoadModel(m.Config.Ollama.URL, item.Value)
+	}
+	m.goBack()
 }
 
 func (m *Menu) handleCommandsSelect(item MenuItem) {
@@ -836,6 +948,17 @@ func (m *Menu) HandleEnter() bool {
 		m.StatusMessage = "Script updated"
 		m.buildScriptsMenu()
 
+	case InputOllamaURL:
+		m.Config.Ollama.URL = strings.TrimSpace(value)
+		m.OllamaModels = nil
+		m.StatusMessage = "Ollama URL updated (save to persist)"
+		m.buildMainMenu()
+
+	case InputOllamaModel:
+		m.Config.Ollama.Model = strings.TrimSpace(value)
+		m.StatusMessage = "Ollama model updated (save to persist)"
+		m.buildMainMenu()
+
 	case InputFontSize:
 		parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 32)
 		if err != nil {
@@ -927,7 +1050,7 @@ func (m *Menu) HandleDelete() {
 // goBack goes back to previous menu
 func (m *Menu) goBack() {
 	switch m.State {
-	case MenuShellSelect, MenuThemeSelect, MenuPromptStyle, MenuPromptSettings, MenuScripts, MenuCommands, MenuAliases, MenuExports:
+	case MenuShellSelect, MenuThemeSelect, MenuPromptStyle, MenuPromptSettings, MenuScripts, MenuOllamaModels, MenuCommands, MenuAliases, MenuExports:
 		m.State = MenuMain
 		m.SelectedIndex = 0
 		m.ScrollOffset = 0
@@ -974,6 +1097,8 @@ func (m *Menu) GetTitle() string {
 		return "Prompt Options"
 	case MenuScripts:
 		return "Scripts"
+	case MenuOllamaModels:
+		return "Ollama Models"
 	case MenuCommands:
 		return "Commands"
 	case MenuAliases:
@@ -1171,6 +1296,8 @@ func (m *Menu) stateName() string {
 		return "prompt_style"
 	case MenuScripts:
 		return "scripts"
+	case MenuOllamaModels:
+		return "ollama_models"
 	case MenuCommands:
 		return "commands"
 	case MenuAliases:
@@ -1214,6 +1341,10 @@ func (m *Menu) inputStateName() string {
 		return "export_name"
 	case InputExportValue:
 		return "export_value"
+	case InputOllamaURL:
+		return "ollama_url"
+	case InputOllamaModel:
+		return "ollama_model"
 	case InputFontSize:
 		return "font_size"
 	default:

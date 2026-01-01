@@ -2,6 +2,7 @@ package render
 
 import (
 	"fmt"
+	"github.com/javanhut/RavenTerminal/aipanel"
 	"github.com/javanhut/RavenTerminal/fonts"
 	"github.com/javanhut/RavenTerminal/grid"
 	"github.com/javanhut/RavenTerminal/menu"
@@ -417,8 +418,8 @@ func (r *Renderer) RenderWithHelp(tm *tab.TabManager, width, height int, cursorV
 	}
 }
 
-// RenderWithHelpAndSearch renders the terminal with optional help and search panel overlays
-func (r *Renderer) RenderWithHelpAndSearch(tm *tab.TabManager, width, height int, cursorVisible bool, showHelp bool, panel *searchpanel.Panel) {
+// RenderWithHelpAndPanels renders the terminal with optional help and overlay panels.
+func (r *Renderer) RenderWithHelpAndPanels(tm *tab.TabManager, width, height int, cursorVisible bool, showHelp bool, searchPanel *searchpanel.Panel, aiPanel *aipanel.Panel) {
 	proj := orthoMatrix(0, float32(width), float32(height), 0, -1, 1)
 
 	// Clear background
@@ -434,8 +435,11 @@ func (r *Renderer) RenderWithHelpAndSearch(tm *tab.TabManager, width, height int
 		r.renderPanes(activeTab, width, height, proj, cursorVisible)
 	}
 
-	if panel != nil && panel.Open {
-		r.renderSearchPanel(panel, width, height, proj)
+	if searchPanel != nil && searchPanel.Open {
+		r.renderSearchPanel(searchPanel, width, height, proj)
+	}
+	if aiPanel != nil && aiPanel.Open {
+		r.renderAIPanel(aiPanel, width, height, proj)
 	}
 
 	if showHelp {
@@ -504,6 +508,107 @@ func (r *Renderer) renderSearchPanel(panel *searchpanel.Panel, width, height int
 		footerText = "Esc/Left: back | Up/Down: scroll | PgUp/PgDn: page"
 		footerText = footerText + " | " + proxyState + " (Ctrl+Shift+R) | " + focusState + " (Ctrl+Shift+[ or ])"
 	}
+	if len(footerText) > maxChars {
+		footerText = footerText[:maxChars-3] + "..."
+	}
+	r.drawText(layout.ContentX, layout.FooterY, footerText, [4]float32{0.6, 0.6, 0.6, 1.0}, proj)
+}
+
+func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [16]float32) {
+	layout := panel.Layout(width, height, r.cellWidth, r.cellHeight)
+
+	panelBg := [4]float32{0.05, 0.06, 0.08, 0.95}
+	borderColor := r.theme.TabActive
+	borderWidth := float32(2)
+
+	r.drawRect(layout.PanelX, layout.PanelY, layout.PanelWidth, layout.PanelHeight, panelBg, proj)
+	r.drawRect(layout.PanelX, layout.PanelY, layout.PanelWidth, borderWidth, borderColor, proj)
+	r.drawRect(layout.PanelX, layout.PanelY+layout.PanelHeight-borderWidth, layout.PanelWidth, borderWidth, borderColor, proj)
+	r.drawRect(layout.PanelX, layout.PanelY, borderWidth, layout.PanelHeight, borderColor, proj)
+	r.drawRect(layout.PanelX+layout.PanelWidth-borderWidth, layout.PanelY, borderWidth, layout.PanelHeight, borderColor, proj)
+
+	maxChars := int(layout.ContentWidth/r.cellWidth) - 2
+	if maxChars < 10 {
+		maxChars = 10
+	}
+
+	r.drawText(layout.ContentX, layout.HeaderY, "AI Chat", r.theme.TabActive, proj)
+
+	status := panel.Status
+	if status == "" && panel.Loading {
+		status = "Thinking..."
+	}
+	if status != "" {
+		if len(status) > maxChars {
+			status = status[:maxChars-3] + "..."
+		}
+		r.drawText(layout.ContentX, layout.StatusY, status, r.theme.Cursor, proj)
+	}
+
+	r.drawText(layout.ContentX, layout.InputLabelY, "Ask", r.theme.Foreground, proj)
+	inputBoxColor := [4]float32{0.03, 0.03, 0.05, 1.0}
+	r.drawRect(layout.ContentX, layout.InputBoxY, layout.ContentWidth, layout.LineHeight, inputBoxColor, proj)
+
+	inputText := panel.Input
+	if len(inputText) > maxChars {
+		inputText = "..." + inputText[len(inputText)-maxChars+3:]
+	}
+	r.drawText(layout.ContentX+8, layout.InputBoxY+layout.LineHeight*0.75, inputText+"_", r.theme.TabActive, proj)
+
+	lines := aipanel.BuildWrappedLines(panel.Messages, maxChars)
+	panel.WrapChars = maxChars
+	panel.WrappedLines = lines
+
+	if len(lines) == 0 && !panel.Loading {
+		r.drawText(layout.ContentX, layout.MessagesStart, "Ask a quick question to begin.", [4]float32{0.6, 0.6, 0.6, 1.0}, proj)
+	} else {
+		visibleLines := layout.VisibleLines
+		totalLines := len(lines)
+		maxScroll := totalLines - visibleLines
+		if maxScroll < 0 {
+			maxScroll = 0
+		}
+		if panel.AutoScroll {
+			panel.Scroll = maxScroll
+			panel.AutoScroll = false
+		}
+		if panel.Scroll > maxScroll {
+			panel.Scroll = maxScroll
+		}
+		if panel.Scroll < 0 {
+			panel.Scroll = 0
+		}
+
+		startLine := panel.Scroll
+		lineY := layout.MessagesStart
+		for i := 0; i < visibleLines && startLine+i < totalLines; i++ {
+			line := lines[startLine+i]
+			if strings.TrimSpace(line.Text) != "" {
+				color := r.theme.Foreground
+				switch line.Role {
+				case "user":
+					color = r.theme.TabActive
+				case "assistant":
+					color = r.theme.Foreground
+				case "error":
+					color = [4]float32{0.9, 0.3, 0.3, 1.0} // Red for errors
+				default:
+					if line.Role != "" {
+						color = r.theme.Cursor
+					}
+				}
+				r.drawText(layout.ContentX, lineY, line.Text, color, proj)
+			}
+			lineY += layout.LineHeight
+		}
+	}
+
+	footerText := "Enter: send | Esc: close | Up/Down: scroll | PgUp/PgDn: page | Ctrl+U: clear"
+	focusState := "Focus: terminal"
+	if panel.Focused {
+		focusState = "Focus: panel"
+	}
+	footerText = footerText + " | " + focusState + " (Ctrl+Shift+[ or ])"
 	if len(footerText) > maxChars {
 		footerText = footerText[:maxChars-3] + "..."
 	}
@@ -737,6 +842,7 @@ func (r *Renderer) getHelpSections() []struct {
 				{"Ctrl+Shift+K", "Show/hide help"},
 				{"Ctrl+Shift+S", "Open settings"},
 				{"Ctrl+Shift+F", "Toggle web search"},
+				{"Ctrl+Shift+A", "Toggle AI chat"},
 				{"Ctrl+Shift++", "Zoom in"},
 				{"Ctrl+Shift+-", "Zoom out"},
 				{"Ctrl+Shift+0", "Reset zoom"},
@@ -760,7 +866,7 @@ func (r *Renderer) getHelpSections() []struct {
 				{"Shift+Tab", "Cycle panes"},
 				{"Ctrl+Shift+]", "Next pane"},
 				{"Ctrl+Shift+[", "Previous pane"},
-				{"Ctrl+Shift+[ or ]", "Cycle search panel (when open)"},
+				{"Ctrl+Shift+[ or ]", "Cycle overlay panel (when open)"},
 				{"Ctrl+R", "Toggle resize mode"},
 				{"Arrow Keys", "Resize active pane"},
 			},

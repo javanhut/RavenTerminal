@@ -12,11 +12,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/javanhut/RavenTerminal/aipanel"
 	"github.com/javanhut/RavenTerminal/commands"
 	"github.com/javanhut/RavenTerminal/config"
 	"github.com/javanhut/RavenTerminal/grid"
 	"github.com/javanhut/RavenTerminal/keybindings"
 	"github.com/javanhut/RavenTerminal/menu"
+	"github.com/javanhut/RavenTerminal/ollama"
 	"github.com/javanhut/RavenTerminal/render"
 	"github.com/javanhut/RavenTerminal/searchpanel"
 	"github.com/javanhut/RavenTerminal/tab"
@@ -72,6 +74,21 @@ type previewResponse struct {
 	source   string
 	proxyErr string
 	err      error
+}
+
+type aiResponse struct {
+	id      int
+	content string
+	err     error
+	loaded  bool
+	token   string // For streaming: incremental token
+	done    bool   // For streaming: indicates final response
+}
+
+type modelLoadResponse struct {
+	url   string
+	model string
+	err   error
 }
 
 func shellQuote(value string) string {
@@ -140,15 +157,26 @@ func main() {
 		toast.expiresAt = time.Now().Add(900 * time.Millisecond)
 	}
 	searchPanel := searchpanel.New()
+	aiPanel := aipanel.New()
 	searchResponses := make(chan searchResponse, 4)
 	previewResponses := make(chan previewResponse, 4)
+	aiResponses := make(chan aiResponse, 4)
+	modelLoadResponses := make(chan modelLoadResponse, 2)
 	const maxSearchResults = 8
+	const maxChatMessages = 6
 	settingsMenu := menu.NewMenu()
 	settingsMenu.OnConfigReload = func(cfg *config.Config) error {
 		if cfg == nil {
 			return nil
 		}
 		searchPanel.SetEnabled(cfg.WebSearch.Enabled)
+		aiPanel.SetEnabled(cfg.Ollama.Enabled)
+		settingsMenu.OllamaModels = nil
+		if aiPanel.LoadedURL != cfg.Ollama.URL || aiPanel.LoadedModel != cfg.Ollama.Model {
+			aiPanel.ModelLoaded = false
+			aiPanel.LoadedURL = cfg.Ollama.URL
+			aiPanel.LoadedModel = cfg.Ollama.Model
+		}
 		renderer.SetThemeByName(cfg.Theme)
 		if err := renderer.SetDefaultFontSize(cfg.FontSize); err != nil {
 			return err
@@ -169,10 +197,39 @@ func main() {
 		cmd := ". " + shellQuote(initPath) + "\n"
 		return activeTab.Write([]byte(cmd))
 	}
+	settingsMenu.OnOllamaTest = func(baseURL string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		client := ollama.NewClient(baseURL, "")
+		_, err := client.ListModels(ctx)
+		return err
+	}
+	settingsMenu.OnOllamaFetchModels = func(baseURL string) ([]string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		client := ollama.NewClient(baseURL, "")
+		return client.ListModels(ctx)
+	}
+	settingsMenu.OnOllamaLoadModel = func(baseURL, model string) {
+		// Show loading status immediately
+		aiPanel.Status = "Loading model..."
+		aiPanel.ModelLoaded = false
+		// Load model in background
+		go func(url, m string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+			defer cancel()
+			client := ollama.NewClient(url, m)
+			err := client.LoadModel(ctx)
+			modelLoadResponses <- modelLoadResponse{url: url, model: m, err: err}
+		}(baseURL, model)
+	}
 	currentTheme := ""
 	if settingsMenu.Config != nil {
 		currentTheme = settingsMenu.Config.Theme
 		searchPanel.SetEnabled(settingsMenu.Config.WebSearch.Enabled)
+		aiPanel.SetEnabled(settingsMenu.Config.Ollama.Enabled)
+		aiPanel.LoadedURL = settingsMenu.Config.Ollama.URL
+		aiPanel.LoadedModel = settingsMenu.Config.Ollama.Model
 		renderer.SetThemeByName(currentTheme)
 		if err := renderer.SetDefaultFontSize(settingsMenu.Config.FontSize); err == nil {
 			width, height := win.GetFramebufferSize()
@@ -219,6 +276,61 @@ func main() {
 			lines, source, proxyErr, err := websearch.FetchText(ctx, url, 12000, useProxy, proxyURLs)
 			previewResponses <- previewResponse{id: id, url: url, title: title, lines: lines, source: source, proxyErr: proxyErr, err: err}
 		}(previewID, result.URL, result.Title, useReaderProxy)
+	}
+
+	startAIChat := func(prompt string) {
+		if settingsMenu.Config == nil {
+			aiPanel.Status = "Missing config"
+			return
+		}
+		trimmed := strings.TrimSpace(prompt)
+		if trimmed == "" {
+			return
+		}
+
+		cfg := settingsMenu.Config.Ollama
+		if aiPanel.LoadedURL != cfg.URL || aiPanel.LoadedModel != cfg.Model {
+			aiPanel.ModelLoaded = false
+		}
+
+		aiPanel.AddMessage("user", trimmed)
+		aiPanel.TrimMessages(maxChatMessages)
+		aiPanel.ClearInput()
+		aiPanel.Status = "Thinking..."
+		aiPanel.Loading = true
+		aiPanel.RequestID++
+		requestID := aiPanel.RequestID
+		needLoad := !aiPanel.ModelLoaded
+
+		messages := make([]ollama.Message, 0, len(aiPanel.Messages))
+		for _, msg := range aiPanel.Messages {
+			messages = append(messages, ollama.Message{
+				Role:    msg.Role,
+				Content: msg.Content,
+			})
+		}
+
+		go func(id int, baseURL, model string, messages []ollama.Message, loadModel bool) {
+			ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+			defer cancel()
+
+			client := ollama.NewClient(baseURL, model)
+			loadSuccess := false
+			if loadModel {
+				aiResponses <- aiResponse{id: id, token: "", done: false} // Signal streaming start
+				if err := client.LoadModel(ctx); err != nil {
+					aiResponses <- aiResponse{id: id, err: err, done: true}
+					return
+				}
+				loadSuccess = true
+			}
+
+			// Use streaming chat
+			_, err := client.ChatStream(ctx, messages, func(token string) {
+				aiResponses <- aiResponse{id: id, token: token, done: false}
+			})
+			aiResponses <- aiResponse{id: id, err: err, done: true, loaded: loadSuccess}
+		}(requestID, cfg.URL, cfg.Model, messages, needLoad)
 	}
 
 	win.GLFW().SetKeyCallback(func(w *glfw.Window, key glfw.Key, scancode int, action glfw.Action, mods glfw.ModifierKey) {
@@ -289,6 +401,150 @@ func main() {
 			return
 		}
 
+		// Handle AI panel focus and input
+		if aiPanel.Open {
+			appCursor := activeTab.Terminal.AppCursorKeys()
+			result := keybindings.TranslateKey(key, mods, appCursor)
+			if result.Action == keybindings.ActionNextPane || result.Action == keybindings.ActionPrevPane {
+				if aiPanel.Focused {
+					aiPanel.Focused = false
+					if result.Action == keybindings.ActionNextPane {
+						activeTab.NextPane()
+					} else {
+						activeTab.PrevPane()
+					}
+					showToast("Terminal focused")
+				} else {
+					aiPanel.Focused = true
+					showToast("AI panel focused")
+				}
+				return
+			}
+			if result.Action == keybindings.ActionToggleAIPanel {
+				aiPanel.Open = false
+				aiPanel.Reset()
+				return
+			}
+			if result.Action == keybindings.ActionToggleSearchPanel {
+				aiPanel.Open = false
+				aiPanel.Reset()
+				if !searchPanel.Enabled {
+					showToast("Enable web search in settings")
+					return
+				}
+				searchPanel.Toggle()
+				if searchPanel.Open {
+					if settingsMenu.Config != nil {
+						searchPanel.ProxyEnabled = settingsMenu.Config.WebSearch.UseReaderProxy
+					}
+					searchPanel.Focused = true
+					showHelp = false
+					renderer.ResetHelpScroll()
+				}
+				return
+			}
+			if !aiPanel.Focused {
+				// Let terminal handle input while panel stays visible.
+				goto handleTerminalInput
+			}
+
+			switch result.Action {
+			case keybindings.ActionCopy:
+				g := activeTab.Terminal.Grid
+				text := g.SelectedText()
+				if text == "" {
+					text = g.VisibleText()
+				}
+				if text != "" {
+					glfw.SetClipboardString(text)
+					showToast("Copied to clipboard")
+				}
+				return
+			case keybindings.ActionPaste:
+				clip := glfw.GetClipboardString()
+				if clip != "" {
+					clip = strings.ReplaceAll(clip, "\r\n", "\n")
+					clip = strings.ReplaceAll(clip, "\r", "\n")
+					clip = strings.ReplaceAll(clip, "\n", " ")
+					aiPanel.SetInput(aiPanel.Input + clip)
+					showToast("Pasted into AI prompt")
+				}
+				return
+			}
+
+			width, height := win.GetFramebufferSize()
+			cellW, cellH := renderer.CellDimensions()
+			layout := aiPanel.Layout(width, height, cellW, cellH)
+			maxChars := int(layout.ContentWidth/cellW) - 2
+			if maxChars < 10 {
+				maxChars = 10
+			}
+			wrapped := aipanel.BuildWrappedLines(aiPanel.Messages, maxChars)
+			totalLines := len(wrapped)
+			visibleLines := layout.VisibleLines
+			maxScroll := totalLines - visibleLines
+			if maxScroll < 0 {
+				maxScroll = 0
+			}
+			if aiPanel.Scroll > maxScroll {
+				aiPanel.Scroll = maxScroll
+			}
+
+			if action == glfw.Repeat && (key == glfw.KeyEnter || key == glfw.KeyKPEnter) {
+				return
+			}
+
+			if mods&glfw.ModControl != 0 && key == glfw.KeyU {
+				aiPanel.ClearInput()
+				return
+			}
+
+			switch key {
+			case glfw.KeyEscape:
+				aiPanel.Open = false
+				aiPanel.Reset()
+				return
+			case glfw.KeyEnter, glfw.KeyKPEnter:
+				if aiPanel.Loading {
+					return
+				}
+				startAIChat(aiPanel.Input)
+				return
+			case glfw.KeyUp:
+				if aiPanel.Scroll > 0 {
+					aiPanel.Scroll--
+				}
+				return
+			case glfw.KeyDown:
+				if aiPanel.Scroll < maxScroll {
+					aiPanel.Scroll++
+				}
+				return
+			case glfw.KeyPageUp:
+				aiPanel.Scroll -= visibleLines
+				if aiPanel.Scroll < 0 {
+					aiPanel.Scroll = 0
+				}
+				return
+			case glfw.KeyPageDown:
+				aiPanel.Scroll += visibleLines
+				if aiPanel.Scroll > maxScroll {
+					aiPanel.Scroll = maxScroll
+				}
+				return
+			case glfw.KeyHome:
+				aiPanel.Scroll = 0
+				return
+			case glfw.KeyEnd:
+				aiPanel.Scroll = maxScroll
+				return
+			case glfw.KeyBackspace:
+				aiPanel.Backspace()
+				return
+			}
+			return
+		}
+
 		// Handle search panel focus and input
 		if searchPanel.Open {
 			appCursor := activeTab.Terminal.AppCursorKeys()
@@ -310,6 +566,22 @@ func main() {
 			}
 			if result.Action == keybindings.ActionToggleSearchPanel {
 				searchPanel.Toggle()
+				return
+			}
+			if result.Action == keybindings.ActionToggleAIPanel {
+				searchPanel.Open = false
+				if !aiPanel.Enabled {
+					showToast("Enable Ollama chat in settings")
+					return
+				}
+				aiPanel.Toggle()
+				if aiPanel.Open {
+					aiPanel.Focused = true
+					showHelp = false
+					renderer.ResetHelpScroll()
+				} else {
+					aiPanel.Reset()
+				}
 				return
 			}
 			if !searchPanel.Focused {
@@ -636,6 +908,8 @@ func main() {
 				settingsMenu.Close()
 			} else {
 				searchPanel.Open = false
+				aiPanel.Open = false
+				aiPanel.Reset()
 				settingsMenu.Open()
 			}
 		case keybindings.ActionToggleResizeMode:
@@ -645,6 +919,8 @@ func main() {
 				showToast("Enable web search in settings")
 				return
 			}
+			aiPanel.Open = false
+			aiPanel.Reset()
 			searchPanel.Toggle()
 			if searchPanel.Open {
 				if settingsMenu.Config != nil {
@@ -654,6 +930,20 @@ func main() {
 				showHelp = false
 				renderer.ResetHelpScroll()
 			}
+		case keybindings.ActionToggleAIPanel:
+			if !aiPanel.Enabled {
+				showToast("Enable Ollama chat in settings")
+				return
+			}
+			searchPanel.Open = false
+			aiPanel.Toggle()
+			if aiPanel.Open {
+				aiPanel.Focused = true
+				showHelp = false
+				renderer.ResetHelpScroll()
+			} else {
+				aiPanel.Reset()
+			}
 		}
 	})
 
@@ -661,6 +951,11 @@ func main() {
 		// Handle character input for settings menu
 		if settingsMenu.IsOpen() && settingsMenu.InputMode() {
 			settingsMenu.HandleChar(char)
+			return
+		}
+
+		if aiPanel.Open && aiPanel.Focused {
+			aiPanel.AppendInput(char)
 			return
 		}
 
@@ -710,6 +1005,38 @@ func main() {
 					settingsMenu.MoveUp()
 				} else if yoff < 0 {
 					settingsMenu.MoveDown()
+				}
+			}
+			return
+		}
+
+		if aiPanel.Open && aiPanel.Focused {
+			width, height := win.GetFramebufferSize()
+			cellW, cellH := renderer.CellDimensions()
+			layout := aiPanel.Layout(width, height, cellW, cellH)
+			maxChars := int(layout.ContentWidth/cellW) - 2
+			if maxChars < 10 {
+				maxChars = 10
+			}
+			totalLines := len(aipanel.BuildWrappedLines(aiPanel.Messages, maxChars))
+			visibleLines := layout.VisibleLines
+			maxScroll := totalLines - visibleLines
+			if maxScroll < 0 {
+				maxScroll = 0
+			}
+			steps := int(math.Abs(yoff))
+			if steps == 0 {
+				steps = 1
+			}
+			for i := 0; i < steps; i++ {
+				if yoff > 0 {
+					if aiPanel.Scroll > 0 {
+						aiPanel.Scroll--
+					}
+				} else if yoff < 0 {
+					if aiPanel.Scroll < maxScroll {
+						aiPanel.Scroll++
+					}
 				}
 			}
 			return
@@ -1016,6 +1343,62 @@ func main() {
 		}
 	previewDone:
 
+		for {
+			select {
+			case resp := <-aiResponses:
+				if resp.id != aiPanel.RequestID {
+					break
+				}
+				if !resp.done {
+					// Streaming token - append to assistant message
+					if resp.token != "" {
+						aiPanel.Status = ""
+						aiPanel.AppendToLastMessage("assistant", resp.token)
+					}
+					break
+				}
+				// Final response
+				aiPanel.Loading = false
+				if resp.err != nil {
+					aiPanel.Status = "Error occurred"
+					aiPanel.AddMessage("error", resp.err.Error())
+					break
+				}
+				aiPanel.Status = ""
+				aiPanel.TrimMessages(maxChatMessages)
+				if resp.loaded {
+					if settingsMenu.Config != nil {
+						aiPanel.ModelLoaded = true
+						aiPanel.LoadedURL = settingsMenu.Config.Ollama.URL
+						aiPanel.LoadedModel = settingsMenu.Config.Ollama.Model
+					}
+				}
+			default:
+				goto aiDone
+			}
+		}
+	aiDone:
+
+		// Handle model load responses
+		for {
+			select {
+			case resp := <-modelLoadResponses:
+				if resp.err != nil {
+					aiPanel.Status = "Load failed"
+					aiPanel.AddMessage("error", "Failed to load model: "+resp.err.Error())
+					aiPanel.ModelLoaded = false
+				} else {
+					aiPanel.Status = "Model Loaded: " + resp.model
+					aiPanel.ModelLoaded = true
+					aiPanel.LoadedURL = resp.url
+					aiPanel.LoadedModel = resp.model
+				}
+			default:
+				goto modelLoadDone
+			}
+		}
+	modelLoadDone:
+
 		// Handle cursor blinking
 		now := time.Now()
 		if now.Sub(lastBlink) >= blinkInterval {
@@ -1029,7 +1412,7 @@ func main() {
 		if settingsMenu.IsOpen() {
 			renderer.RenderWithMenu(tabManager, width, height, cursorVisible, settingsMenu)
 		} else {
-			renderer.RenderWithHelpAndSearch(tabManager, width, height, cursorVisible, showHelp, searchPanel)
+			renderer.RenderWithHelpAndPanels(tabManager, width, height, cursorVisible, showHelp, searchPanel, aiPanel)
 		}
 		if now.Before(toast.expiresAt) {
 			renderer.DrawToast(toast.message, width, height)
