@@ -251,32 +251,32 @@ uninstall_user() {
     
     # Remove binary
     if remove_file "$USER_BIN_DIR/$APP_NAME" false "User binary"; then
-        ((removed++))
+        ((++removed))
     fi
     
     # Remove launcher wrapper
     if remove_file "$USER_BIN_DIR/raven-terminal-launcher" false "User launcher"; then
-        ((removed++))
+        ((++removed))
     fi
     
     # Remove desktop file
     if remove_file "$USER_APP_DIR/$APP_NAME.desktop" false "User desktop file"; then
-        ((removed++))
+        ((++removed))
     fi
     
     # Remove icon
     if remove_file "$USER_ICON_DIR/$APP_NAME.svg" false "User icon"; then
-        ((removed++))
+        ((++removed))
     fi
     
     # Remove pixmap icon
     if remove_file "$USER_PIXMAP_DIR/$APP_NAME.svg" false "User pixmap icon"; then
-        ((removed++))
+        ((++removed))
     fi
 
     # Remove log directory
     if remove_dir "$HOME/.local/share/raven-terminal" false "User data dir"; then
-        ((removed++))
+        ((++removed))
     fi
     
     if [ $removed -gt 0 ]; then
@@ -309,35 +309,35 @@ uninstall_global() {
     
     # Remove binary
     if remove_file "$GLOBAL_BIN_DIR/$APP_NAME" true "Global binary"; then
-        ((removed++))
+        ((++removed))
     fi
     
     # Remove launcher wrapper
     if remove_file "$GLOBAL_BIN_DIR/raven-terminal-launcher" true "Global launcher"; then
-        ((removed++))
+        ((++removed))
     fi
 
     # Remove legacy binary locations
     if remove_file "$LEGACY_GLOBAL_BIN_DIR/$APP_NAME" true "Legacy global binary"; then
-        ((removed++))
+        ((++removed))
     fi
     if remove_file "$LEGACY_GLOBAL_BIN_DIR/raven-terminal-launcher" true "Legacy global launcher"; then
-        ((removed++))
+        ((++removed))
     fi
     
     # Remove desktop file
     if remove_file "$GLOBAL_APP_DIR/$APP_NAME.desktop" true "Global desktop file"; then
-        ((removed++))
+        ((++removed))
     fi
     
     # Remove icon
     if remove_file "$GLOBAL_ICON_DIR/$APP_NAME.svg" true "Global icon"; then
-        ((removed++))
+        ((++removed))
     fi
 
     # Remove pixmap icon
     if remove_file "$GLOBAL_PIXMAP_DIR/$APP_NAME.svg" true "Global pixmap icon"; then
-        ((removed++))
+        ((++removed))
     fi
     
     if [ $removed -gt 0 ]; then

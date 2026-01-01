@@ -10,6 +10,9 @@
 | Shift+Enter | Toggle fullscreen mode |
 | Ctrl+Shift+K | Show/hide keybindings help panel |
 | Ctrl+Shift+P | Open settings menu |
+| Ctrl+Shift+F | Toggle web search panel |
+| Ctrl+Shift+[ | Previous pane or search panel in cycle (when open) |
+| Ctrl+Shift+] | Next pane or search panel in cycle (when open) |
 
 ## Zoom
 

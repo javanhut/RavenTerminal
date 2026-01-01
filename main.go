@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"log"
 	"math"
 	"net/url"
@@ -16,7 +18,9 @@ import (
 	"github.com/javanhut/RavenTerminal/keybindings"
 	"github.com/javanhut/RavenTerminal/menu"
 	"github.com/javanhut/RavenTerminal/render"
+	"github.com/javanhut/RavenTerminal/searchpanel"
 	"github.com/javanhut/RavenTerminal/tab"
+	"github.com/javanhut/RavenTerminal/websearch"
 	"github.com/javanhut/RavenTerminal/window"
 
 	"github.com/go-gl/glfw/v3.3/glfw"
@@ -51,6 +55,23 @@ func (lb *lineBuffer) clear() {
 
 func (lb *lineBuffer) getLine() string {
 	return lb.buffer.String()
+}
+
+type searchResponse struct {
+	id      int
+	query   string
+	results []websearch.Result
+	err     error
+}
+
+type previewResponse struct {
+	id       int
+	url      string
+	title    string
+	lines    []string
+	source   string
+	proxyErr string
+	err      error
 }
 
 func shellQuote(value string) string {
@@ -118,11 +139,16 @@ func main() {
 		toast.message = message
 		toast.expiresAt = time.Now().Add(900 * time.Millisecond)
 	}
+	searchPanel := searchpanel.New()
+	searchResponses := make(chan searchResponse, 4)
+	previewResponses := make(chan previewResponse, 4)
+	const maxSearchResults = 8
 	settingsMenu := menu.NewMenu()
 	settingsMenu.OnConfigReload = func(cfg *config.Config) error {
 		if cfg == nil {
 			return nil
 		}
+		searchPanel.SetEnabled(cfg.WebSearch.Enabled)
 		renderer.SetThemeByName(cfg.Theme)
 		if err := renderer.SetDefaultFontSize(cfg.FontSize); err != nil {
 			return err
@@ -146,12 +172,53 @@ func main() {
 	currentTheme := ""
 	if settingsMenu.Config != nil {
 		currentTheme = settingsMenu.Config.Theme
+		searchPanel.SetEnabled(settingsMenu.Config.WebSearch.Enabled)
 		renderer.SetThemeByName(currentTheme)
 		if err := renderer.SetDefaultFontSize(settingsMenu.Config.FontSize); err == nil {
 			width, height := win.GetFramebufferSize()
 			cols, rows := renderer.CalculateGridSize(width, height)
 			tabManager.ResizeAll(uint16(cols), uint16(rows))
 		}
+	}
+
+	startSearch := func(query string) {
+		searchPanel.Mode = searchpanel.ModeResults
+		searchPanel.Status = "Searching..."
+		searchPanel.Loading = true
+		searchPanel.Results = nil
+		searchPanel.Selected = 0
+		searchPanel.ResultsScroll = 0
+		searchPanel.SearchID++
+		searchID := searchPanel.SearchID
+		go func(id int, q string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			defer cancel()
+			results, err := websearch.SearchDuckDuckGo(ctx, q, maxSearchResults)
+			searchResponses <- searchResponse{id: id, query: q, results: results, err: err}
+		}(searchID, query)
+	}
+
+	startPreview := func(result searchpanel.Result) {
+		searchPanel.Mode = searchpanel.ModePreview
+		searchPanel.Status = "Loading preview..."
+		searchPanel.Loading = true
+		searchPanel.PreviewTitle = result.Title
+		searchPanel.PreviewURL = result.URL
+		searchPanel.PreviewLines = nil
+		searchPanel.PreviewScroll = 0
+		searchPanel.PreviewID++
+		previewID := searchPanel.PreviewID
+		useReaderProxy := searchPanel.ProxyEnabled
+		var proxyURLs []string
+		if settingsMenu.Config != nil {
+			proxyURLs = settingsMenu.Config.WebSearch.ReaderProxyURLs
+		}
+		go func(id int, url, title string, useProxy bool) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			lines, source, proxyErr, err := websearch.FetchText(ctx, url, 12000, useProxy, proxyURLs)
+			previewResponses <- previewResponse{id: id, url: url, title: title, lines: lines, source: source, proxyErr: proxyErr, err: err}
+		}(previewID, result.URL, result.Title, useReaderProxy)
 	}
 
 	win.GLFW().SetKeyCallback(func(w *glfw.Window, key glfw.Key, scancode int, action glfw.Action, mods glfw.ModifierKey) {
@@ -222,6 +289,182 @@ func main() {
 			return
 		}
 
+		// Handle search panel focus and input
+		if searchPanel.Open {
+			appCursor := activeTab.Terminal.AppCursorKeys()
+			result := keybindings.TranslateKey(key, mods, appCursor)
+			if result.Action == keybindings.ActionNextPane || result.Action == keybindings.ActionPrevPane {
+				if searchPanel.Focused {
+					searchPanel.Focused = false
+					if result.Action == keybindings.ActionNextPane {
+						activeTab.NextPane()
+					} else {
+						activeTab.PrevPane()
+					}
+					showToast("Terminal focused")
+				} else {
+					searchPanel.Focused = true
+					showToast("Search panel focused")
+				}
+				return
+			}
+			if result.Action == keybindings.ActionToggleSearchPanel {
+				searchPanel.Toggle()
+				return
+			}
+			if !searchPanel.Focused {
+				// Let terminal handle input while panel stays visible.
+				goto handleTerminalInput
+			}
+
+			switch result.Action {
+			case keybindings.ActionCopy:
+				g := activeTab.Terminal.Grid
+				text := g.SelectedText()
+				if text == "" {
+					text = g.VisibleText()
+				}
+				if text != "" {
+					glfw.SetClipboardString(text)
+					showToast("Copied to clipboard")
+				}
+				return
+			case keybindings.ActionPaste:
+				clip := glfw.GetClipboardString()
+				if clip != "" {
+					clip = strings.ReplaceAll(clip, "\r\n", "\n")
+					clip = strings.ReplaceAll(clip, "\n", "\r")
+					activeTab.Write([]byte(clip))
+					activeTab.Terminal.Grid.ResetScrollOffset()
+					showToast("Pasted from clipboard")
+				}
+				return
+			}
+
+			width, height := win.GetFramebufferSize()
+			cellW, cellH := renderer.CellDimensions()
+			layout := searchPanel.Layout(width, height, cellW, cellH)
+			previewVisible := layout.VisibleLines - 1
+			if previewVisible < 1 {
+				previewVisible = 1
+			}
+			previewTotal := len(searchPanel.PreviewLines)
+			if len(searchPanel.PreviewWrapped) > 0 && searchPanel.PreviewWrapChars > 0 {
+				previewTotal = len(searchPanel.PreviewWrapped)
+			}
+			if action == glfw.Repeat && (key == glfw.KeyEnter || key == glfw.KeyKPEnter) {
+				return
+			}
+			if mods&glfw.ModControl != 0 && mods&glfw.ModShift != 0 && key == glfw.KeyR {
+				searchPanel.ProxyEnabled = !searchPanel.ProxyEnabled
+				if searchPanel.ProxyEnabled {
+					searchPanel.Status = "Reader proxy enabled"
+				} else {
+					searchPanel.Status = "Reader proxy disabled"
+				}
+				if searchPanel.Mode == searchpanel.ModePreview && searchPanel.PreviewURL != "" {
+					startPreview(searchpanel.Result{
+						Title: searchPanel.PreviewTitle,
+						URL:   searchPanel.PreviewURL,
+					})
+				}
+				return
+			}
+
+			if mods&glfw.ModControl != 0 && key == glfw.KeyU {
+				searchPanel.ClearQuery()
+				return
+			}
+
+			switch key {
+			case glfw.KeyEscape:
+				if searchPanel.Mode == searchpanel.ModePreview {
+					searchPanel.Mode = searchpanel.ModeResults
+					searchPanel.PreviewScroll = 0
+				} else {
+					searchPanel.Open = false
+				}
+				return
+			case glfw.KeyEnter, glfw.KeyKPEnter:
+				if searchPanel.Mode == searchpanel.ModePreview {
+					searchPanel.Mode = searchpanel.ModeResults
+					searchPanel.PreviewScroll = 0
+					return
+				}
+				if strings.TrimSpace(searchPanel.Query) == "" {
+					return
+				}
+				if searchPanel.QueryDirty || len(searchPanel.Results) == 0 {
+					startSearch(searchPanel.Query)
+					return
+				}
+				if searchPanel.Selected >= 0 && searchPanel.Selected < len(searchPanel.Results) {
+					startPreview(searchPanel.Results[searchPanel.Selected])
+				}
+				return
+			case glfw.KeyUp:
+				if searchPanel.Mode == searchpanel.ModePreview {
+					searchPanel.ScrollPreview(-1, previewVisible)
+				} else {
+					searchPanel.MoveSelection(-1, layout.VisibleLines)
+				}
+				return
+			case glfw.KeyDown:
+				if searchPanel.Mode == searchpanel.ModePreview {
+					searchPanel.ScrollPreview(1, previewVisible)
+				} else {
+					searchPanel.MoveSelection(1, layout.VisibleLines)
+				}
+				return
+			case glfw.KeyPageUp:
+				if searchPanel.Mode == searchpanel.ModePreview {
+					searchPanel.ScrollPreview(-previewVisible, previewVisible)
+				} else {
+					searchPanel.ScrollResults(-layout.VisibleLines, layout.VisibleLines)
+				}
+				return
+			case glfw.KeyPageDown:
+				if searchPanel.Mode == searchpanel.ModePreview {
+					searchPanel.ScrollPreview(previewVisible, previewVisible)
+				} else {
+					searchPanel.ScrollResults(layout.VisibleLines, layout.VisibleLines)
+				}
+				return
+			case glfw.KeyHome:
+				if searchPanel.Mode == searchpanel.ModePreview {
+					searchPanel.PreviewScroll = 0
+				} else {
+					searchPanel.ResultsScroll = 0
+					searchPanel.Selected = 0
+				}
+				return
+			case glfw.KeyEnd:
+				if searchPanel.Mode == searchpanel.ModePreview {
+					searchPanel.ScrollPreview(previewTotal, previewVisible)
+				} else if len(searchPanel.Results) > 0 {
+					searchPanel.Selected = len(searchPanel.Results) - 1
+					searchPanel.ScrollResults(searchPanel.ResultsTotalLines(), layout.VisibleLines)
+				}
+				return
+			case glfw.KeyLeft:
+				if searchPanel.Mode == searchpanel.ModePreview {
+					searchPanel.Mode = searchpanel.ModeResults
+					searchPanel.PreviewScroll = 0
+				}
+				return
+			case glfw.KeyRight:
+				if searchPanel.Mode == searchpanel.ModeResults && !searchPanel.QueryDirty && len(searchPanel.Results) > 0 {
+					startPreview(searchPanel.Results[searchPanel.Selected])
+				}
+				return
+			case glfw.KeyBackspace:
+				searchPanel.Backspace()
+				return
+			}
+			return
+		}
+
+	handleTerminalInput:
 		// Handle help panel scrolling with arrow keys when help is open
 		if showHelp {
 			switch key {
@@ -392,10 +635,25 @@ func main() {
 			if settingsMenu.IsOpen() {
 				settingsMenu.Close()
 			} else {
+				searchPanel.Open = false
 				settingsMenu.Open()
 			}
 		case keybindings.ActionToggleResizeMode:
 			resizeMode = !resizeMode
+		case keybindings.ActionToggleSearchPanel:
+			if !searchPanel.Enabled {
+				showToast("Enable web search in settings")
+				return
+			}
+			searchPanel.Toggle()
+			if searchPanel.Open {
+				if settingsMenu.Config != nil {
+					searchPanel.ProxyEnabled = settingsMenu.Config.WebSearch.UseReaderProxy
+				}
+				searchPanel.Focused = true
+				showHelp = false
+				renderer.ResetHelpScroll()
+			}
 		}
 	})
 
@@ -403,6 +661,11 @@ func main() {
 		// Handle character input for settings menu
 		if settingsMenu.IsOpen() && settingsMenu.InputMode() {
 			settingsMenu.HandleChar(char)
+			return
+		}
+
+		if searchPanel.Open && searchPanel.Focused {
+			searchPanel.AppendQuery(char)
 			return
 		}
 
@@ -447,6 +710,36 @@ func main() {
 					settingsMenu.MoveUp()
 				} else if yoff < 0 {
 					settingsMenu.MoveDown()
+				}
+			}
+			return
+		}
+
+		if searchPanel.Open && searchPanel.Focused {
+			width, height := win.GetFramebufferSize()
+			cellW, cellH := renderer.CellDimensions()
+			layout := searchPanel.Layout(width, height, cellW, cellH)
+			previewVisible := layout.VisibleLines - 1
+			if previewVisible < 1 {
+				previewVisible = 1
+			}
+			steps := int(math.Abs(yoff))
+			if steps == 0 {
+				steps = 1
+			}
+			for i := 0; i < steps; i++ {
+				if yoff > 0 {
+					if searchPanel.Mode == searchpanel.ModePreview {
+						searchPanel.ScrollPreview(-1, previewVisible)
+					} else {
+						searchPanel.ScrollResults(-1, layout.VisibleLines)
+					}
+				} else if yoff < 0 {
+					if searchPanel.Mode == searchpanel.ModePreview {
+						searchPanel.ScrollPreview(1, previewVisible)
+					} else {
+						searchPanel.ScrollResults(1, layout.VisibleLines)
+					}
 				}
 			}
 			return
@@ -665,6 +958,63 @@ func main() {
 			renderer.SetThemeByName(settingsMenu.Config.Theme)
 			currentTheme = settingsMenu.Config.Theme
 		}
+		if settingsMenu.Config != nil {
+			searchPanel.SetEnabled(settingsMenu.Config.WebSearch.Enabled)
+			if !searchPanel.Open {
+				searchPanel.ProxyEnabled = settingsMenu.Config.WebSearch.UseReaderProxy
+			}
+		}
+
+		for {
+			select {
+			case resp := <-searchResponses:
+				if resp.id != searchPanel.SearchID {
+					break
+				}
+				results := make([]searchpanel.Result, 0, len(resp.results))
+				for _, r := range resp.results {
+					results = append(results, searchpanel.Result{
+						Title:   r.Title,
+						URL:     r.URL,
+						Snippet: r.Snippet,
+					})
+				}
+				searchPanel.SetResults(resp.query, results, resp.err)
+				if resp.err == nil {
+					if len(results) == 0 {
+						searchPanel.Status = "No results"
+					} else {
+						searchPanel.Status = fmt.Sprintf("%d results", len(results))
+					}
+				}
+			default:
+				goto searchDone
+			}
+		}
+	searchDone:
+
+		for {
+			select {
+			case resp := <-previewResponses:
+				if resp.id != searchPanel.PreviewID {
+					break
+				}
+				searchPanel.SetPreview(resp.url, resp.title, resp.lines, resp.err)
+				if resp.err == nil {
+					if resp.source == "proxy" {
+						searchPanel.Status = "Source: reader proxy"
+					} else {
+						searchPanel.Status = "Source: direct HTML"
+					}
+					if resp.proxyErr != "" && resp.source != "proxy" {
+						searchPanel.Status = "Proxy failed: " + resp.proxyErr
+					}
+				}
+			default:
+				goto previewDone
+			}
+		}
+	previewDone:
 
 		// Handle cursor blinking
 		now := time.Now()
@@ -679,7 +1029,7 @@ func main() {
 		if settingsMenu.IsOpen() {
 			renderer.RenderWithMenu(tabManager, width, height, cursorVisible, settingsMenu)
 		} else {
-			renderer.RenderWithHelp(tabManager, width, height, cursorVisible, showHelp)
+			renderer.RenderWithHelpAndSearch(tabManager, width, height, cursorVisible, showHelp, searchPanel)
 		}
 		if now.Before(toast.expiresAt) {
 			renderer.DrawToast(toast.message, width, height)

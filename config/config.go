@@ -31,6 +31,15 @@ type ScriptsConfig struct {
 	VCSDetect string `toml:"vcs_detect"`
 }
 
+// WebSearchConfig holds web search settings
+type WebSearchConfig struct {
+	Enabled bool `toml:"enabled"`
+	// UseReaderProxy enables a text-only proxy fallback for JS-heavy pages.
+	UseReaderProxy bool `toml:"use_reader_proxy"`
+	// ReaderProxyURLs lists proxy base URLs to try for text extraction.
+	ReaderProxyURLs []string `toml:"reader_proxy_urls"`
+}
+
 // ShellConfig holds shell-specific settings
 type ShellConfig struct {
 	// Path to shell binary (empty = system default)
@@ -50,14 +59,15 @@ type CustomCommand struct {
 
 // Config holds the terminal configuration
 type Config struct {
-	Shell    ShellConfig       `toml:"shell"`
-	Prompt   PromptConfig      `toml:"prompt"`
-	Scripts  ScriptsConfig     `toml:"scripts"`
-	Commands []CustomCommand   `toml:"commands"`
-	Aliases  map[string]string `toml:"aliases"`
-	Exports  map[string]string `toml:"exports"`
-	Theme    string            `toml:"theme"`
-	FontSize float32           `toml:"font_size"`
+	Shell     ShellConfig       `toml:"shell"`
+	Prompt    PromptConfig      `toml:"prompt"`
+	Scripts   ScriptsConfig     `toml:"scripts"`
+	WebSearch WebSearchConfig   `toml:"web_search"`
+	Commands  []CustomCommand   `toml:"commands"`
+	Aliases   map[string]string `toml:"aliases"`
+	Exports   map[string]string `toml:"exports"`
+	Theme     string            `toml:"theme"`
+	FontSize  float32           `toml:"font_size"`
 }
 
 // DefaultConfig returns the default configuration
@@ -175,6 +185,13 @@ fi
 [ -z "$_vcs" ] && _vcs="None"
 echo "$_vcs"
 `,
+		},
+		WebSearch: WebSearchConfig{
+			Enabled:        false,
+			UseReaderProxy: false,
+			ReaderProxyURLs: []string{
+				"https://r.jina.ai/",
+			},
 		},
 		Commands: []CustomCommand{},
 		Aliases: map[string]string{

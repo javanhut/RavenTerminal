@@ -5,6 +5,7 @@ import (
 	"github.com/javanhut/RavenTerminal/fonts"
 	"github.com/javanhut/RavenTerminal/grid"
 	"github.com/javanhut/RavenTerminal/menu"
+	"github.com/javanhut/RavenTerminal/searchpanel"
 	"github.com/javanhut/RavenTerminal/tab"
 	"image"
 	"image/color"
@@ -416,6 +417,307 @@ func (r *Renderer) RenderWithHelp(tm *tab.TabManager, width, height int, cursorV
 	}
 }
 
+// RenderWithHelpAndSearch renders the terminal with optional help and search panel overlays
+func (r *Renderer) RenderWithHelpAndSearch(tm *tab.TabManager, width, height int, cursorVisible bool, showHelp bool, panel *searchpanel.Panel) {
+	proj := orthoMatrix(0, float32(width), float32(height), 0, -1, 1)
+
+	// Clear background
+	gl.ClearColor(r.theme.Background[0], r.theme.Background[1], r.theme.Background[2], r.theme.Background[3])
+	gl.Clear(gl.COLOR_BUFFER_BIT)
+
+	// Render tab bar
+	r.renderTabBar(tm, width, height, proj)
+
+	// Render terminal content with split pane support
+	activeTab := tm.ActiveTab()
+	if activeTab != nil {
+		r.renderPanes(activeTab, width, height, proj, cursorVisible)
+	}
+
+	if panel != nil && panel.Open {
+		r.renderSearchPanel(panel, width, height, proj)
+	}
+
+	if showHelp {
+		r.renderHelpPanel(width, height, proj)
+	}
+}
+
+func (r *Renderer) renderSearchPanel(panel *searchpanel.Panel, width, height int, proj [16]float32) {
+	layout := panel.Layout(width, height, r.cellWidth, r.cellHeight)
+
+	panelBg := [4]float32{0.05, 0.06, 0.08, 0.95}
+	borderColor := r.theme.TabActive
+	borderWidth := float32(2)
+
+	r.drawRect(layout.PanelX, layout.PanelY, layout.PanelWidth, layout.PanelHeight, panelBg, proj)
+	r.drawRect(layout.PanelX, layout.PanelY, layout.PanelWidth, borderWidth, borderColor, proj)
+	r.drawRect(layout.PanelX, layout.PanelY+layout.PanelHeight-borderWidth, layout.PanelWidth, borderWidth, borderColor, proj)
+	r.drawRect(layout.PanelX, layout.PanelY, borderWidth, layout.PanelHeight, borderColor, proj)
+	r.drawRect(layout.PanelX+layout.PanelWidth-borderWidth, layout.PanelY, borderWidth, layout.PanelHeight, borderColor, proj)
+
+	maxChars := int(layout.ContentWidth/r.cellWidth) - 2
+	if maxChars < 10 {
+		maxChars = 10
+	}
+
+	r.drawText(layout.ContentX, layout.HeaderY, "Web Search", r.theme.TabActive, proj)
+
+	r.drawText(layout.ContentX, layout.InputLabelY, "Query", r.theme.Foreground, proj)
+	inputBoxColor := [4]float32{0.03, 0.03, 0.05, 1.0}
+	r.drawRect(layout.ContentX, layout.InputBoxY, layout.ContentWidth, layout.LineHeight, inputBoxColor, proj)
+
+	inputText := panel.Query
+	if len(inputText) > maxChars {
+		inputText = "..." + inputText[len(inputText)-maxChars+3:]
+	}
+	r.drawText(layout.ContentX+8, layout.InputBoxY+layout.LineHeight*0.75, inputText+"_", r.theme.TabActive, proj)
+
+	status := panel.Status
+	if status == "" && panel.Loading {
+		status = "Loading..."
+	}
+	if status != "" {
+		if len(status) > maxChars {
+			status = status[:maxChars-3] + "..."
+		}
+		r.drawText(layout.ContentX, layout.StatusY, status, r.theme.Cursor, proj)
+	}
+
+	if panel.Mode == searchpanel.ModePreview {
+		r.renderSearchPreview(panel, layout, maxChars, proj)
+	} else {
+		r.renderSearchResults(panel, layout, maxChars, proj)
+	}
+
+	footerText := "Enter: search/open | Esc: close | Up/Down: navigate | PgUp/PgDn: scroll"
+	proxyState := "Proxy: off"
+	if panel.ProxyEnabled {
+		proxyState = "Proxy: on"
+	}
+	focusState := "Focus: terminal"
+	if panel.Focused {
+		focusState = "Focus: panel"
+	}
+	footerText = footerText + " | " + proxyState + " (Ctrl+Shift+R) | " + focusState + " (Ctrl+Shift+[ or ])"
+	if panel.Mode == searchpanel.ModePreview {
+		footerText = "Esc/Left: back | Up/Down: scroll | PgUp/PgDn: page"
+		footerText = footerText + " | " + proxyState + " (Ctrl+Shift+R) | " + focusState + " (Ctrl+Shift+[ or ])"
+	}
+	if len(footerText) > maxChars {
+		footerText = footerText[:maxChars-3] + "..."
+	}
+	r.drawText(layout.ContentX, layout.FooterY, footerText, [4]float32{0.6, 0.6, 0.6, 1.0}, proj)
+}
+
+func (r *Renderer) renderSearchResults(panel *searchpanel.Panel, layout searchpanel.Layout, maxChars int, proj [16]float32) {
+	if len(panel.Results) == 0 {
+		if !panel.Loading && strings.TrimSpace(panel.Query) != "" {
+			r.drawText(layout.ContentX, layout.ResultsStart, "No results.", [4]float32{0.6, 0.6, 0.6, 1.0}, proj)
+		}
+		return
+	}
+
+	linesPerResult := panel.LinesPerResult()
+	visibleLines := layout.VisibleLines
+
+	for i, result := range panel.Results {
+		startLine := i * linesPerResult
+		if startLine+linesPerResult <= panel.ResultsScroll {
+			continue
+		}
+		if startLine >= panel.ResultsScroll+visibleLines {
+			break
+		}
+
+		drawLine := startLine - panel.ResultsScroll
+		drawY := layout.ResultsStart + float32(drawLine)*layout.LineHeight
+
+		if i == panel.Selected {
+			highlightColor := [4]float32{0.12, 0.14, 0.22, 1.0}
+			r.drawRect(layout.ContentX, drawY-layout.LineHeight+6, layout.ContentWidth, layout.LineHeight*2.2, highlightColor, proj)
+		}
+
+		title := strings.TrimSpace(result.Title)
+		if len(title) > maxChars {
+			title = title[:maxChars-3] + "..."
+		}
+		r.drawText(layout.ContentX, drawY, title, r.theme.TabActive, proj)
+
+		subLine := strings.TrimSpace(result.Snippet)
+		if subLine == "" {
+			subLine = strings.TrimSpace(result.URL)
+		}
+		if len(subLine) > maxChars {
+			subLine = subLine[:maxChars-3] + "..."
+		}
+		r.drawText(layout.ContentX+12, drawY+layout.LineHeight, subLine, r.theme.Foreground, proj)
+	}
+}
+
+func (r *Renderer) renderSearchPreview(panel *searchpanel.Panel, layout searchpanel.Layout, maxChars int, proj [16]float32) {
+	header := "Preview"
+	if panel.PreviewTitle != "" {
+		header = "Preview: " + panel.PreviewTitle
+	}
+	if len(header) > maxChars {
+		header = header[:maxChars-3] + "..."
+	}
+	r.drawText(layout.ContentX, layout.ResultsStart, header, r.theme.TabActive, proj)
+
+	wrappedLines := buildWrappedPreview(panel.PreviewLines, maxChars, r.theme)
+	panel.PreviewWrapped = nil
+	panel.PreviewWrapChars = maxChars
+	for _, line := range wrappedLines {
+		panel.PreviewWrapped = append(panel.PreviewWrapped, line.text)
+	}
+
+	visibleLines := layout.VisibleLines - 1
+	if visibleLines < 1 {
+		visibleLines = 1
+	}
+	startLine := panel.PreviewScroll
+	maxScroll := len(wrappedLines) - visibleLines
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if startLine > maxScroll {
+		startLine = maxScroll
+	}
+
+	lineY := layout.ResultsStart + layout.LineHeight
+	for i := 0; i < visibleLines && startLine+i < len(wrappedLines); i++ {
+		line := wrappedLines[startLine+i]
+		r.drawText(layout.ContentX, lineY, line.text, line.color, proj)
+		lineY += layout.LineHeight
+	}
+}
+
+type styledLine struct {
+	text  string
+	color [4]float32
+}
+
+func buildWrappedPreview(lines []string, maxChars int, theme Theme) []styledLine {
+	out := []styledLine{}
+	inCode := false
+
+	for _, raw := range lines {
+		trimmed := strings.TrimSpace(raw)
+		if strings.HasPrefix(trimmed, "```") {
+			inCode = !inCode
+			continue
+		}
+
+		color := theme.Foreground
+		prefix := ""
+		indent := ""
+		text := trimmed
+
+		if inCode {
+			color = theme.Cursor
+		} else if strings.HasPrefix(text, "#") {
+			level := 0
+			for level < len(text) && text[level] == '#' {
+				level++
+			}
+			text = strings.TrimSpace(text[level:])
+			if text == "" {
+				continue
+			}
+			if level > 3 {
+				level = 3
+			}
+			prefix = strings.Repeat("=", level) + " "
+			color = theme.TabActive
+		} else if strings.HasPrefix(text, "- ") || strings.HasPrefix(text, "* ") || strings.HasPrefix(text, "+ ") {
+			prefix = text[:2]
+			text = strings.TrimSpace(text[2:])
+			indent = "  "
+		} else if strings.HasPrefix(text, "> ") {
+			prefix = "> "
+			text = strings.TrimSpace(text[2:])
+			indent = "  "
+		}
+
+		text = stripInlineMarkdown(text)
+		wrapped := wrapText(text, maxChars, prefix, indent)
+		for _, line := range wrapped {
+			out = append(out, styledLine{text: line, color: color})
+		}
+	}
+	return out
+}
+
+func stripInlineMarkdown(text string) string {
+	text = strings.ReplaceAll(text, "`", "")
+	text = strings.ReplaceAll(text, "**", "")
+	text = strings.ReplaceAll(text, "__", "")
+	text = strings.ReplaceAll(text, "*", "")
+	text = strings.ReplaceAll(text, "_", "")
+	return strings.TrimSpace(text)
+}
+
+func wrapText(text string, maxChars int, prefix, indent string) []string {
+	if maxChars <= 0 {
+		return []string{prefix + text}
+	}
+	if prefix == "" && indent == "" && len(text) <= maxChars {
+		return []string{text}
+	}
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return []string{strings.TrimRight(prefix, " ")}
+	}
+
+	lines := []string{}
+	line := prefix
+	lineLimit := maxChars
+	if lineLimit < 4 {
+		lineLimit = 4
+	}
+
+	for _, word := range words {
+		if line == "" {
+			line = prefix
+		}
+		next := line
+		if next != "" && !strings.HasSuffix(next, " ") {
+			next += " "
+		}
+		next += word
+
+		if len(next) <= lineLimit {
+			line = next
+			continue
+		}
+
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, strings.TrimRight(line, " "))
+			line = indent + word
+			continue
+		}
+
+		// Hard wrap long word
+		for len(word) > 0 {
+			limit := lineLimit
+			if len(word) <= limit {
+				lines = append(lines, indent+word)
+				word = ""
+				break
+			}
+			lines = append(lines, indent+word[:limit])
+			word = word[limit:]
+		}
+		line = ""
+	}
+
+	if strings.TrimSpace(line) != "" {
+		lines = append(lines, strings.TrimRight(line, " "))
+	}
+	return lines
+}
+
 // getHelpSections returns all keybinding sections for the help panel
 func (r *Renderer) getHelpSections() []struct {
 	title    string
@@ -434,6 +736,7 @@ func (r *Renderer) getHelpSections() []struct {
 				{"Shift+Enter", "Toggle fullscreen"},
 				{"Ctrl+Shift+K", "Show/hide help"},
 				{"Ctrl+Shift+S", "Open settings"},
+				{"Ctrl+Shift+F", "Toggle web search"},
 				{"Ctrl+Shift++", "Zoom in"},
 				{"Ctrl+Shift+-", "Zoom out"},
 				{"Ctrl+Shift+0", "Reset zoom"},
@@ -457,6 +760,7 @@ func (r *Renderer) getHelpSections() []struct {
 				{"Shift+Tab", "Cycle panes"},
 				{"Ctrl+Shift+]", "Next pane"},
 				{"Ctrl+Shift+[", "Previous pane"},
+				{"Ctrl+Shift+[ or ]", "Cycle search panel (when open)"},
 				{"Ctrl+R", "Toggle resize mode"},
 				{"Arrow Keys", "Resize active pane"},
 			},

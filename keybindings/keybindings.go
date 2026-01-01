@@ -32,6 +32,7 @@ const (
 	ActionZoomOut
 	ActionZoomReset
 	ActionOpenMenu
+	ActionToggleSearchPanel
 	ActionCopy
 	ActionPaste
 	ActionToggleResizeMode
@@ -108,6 +109,10 @@ func TranslateKey(key glfw.Key, mods glfw.ModifierKey, appCursorMode bool) KeyRe
 	// Ctrl+Shift+S to open settings menu (like command palette)
 	if ctrl && shift && key == glfw.KeyS {
 		return KeyResult{Action: ActionOpenMenu}
+	}
+	// Ctrl+Shift+F to toggle web search panel
+	if ctrl && shift && key == glfw.KeyF {
+		return KeyResult{Action: ActionToggleSearchPanel}
 	}
 
 	if ctrl && !shift && key == glfw.KeyR {

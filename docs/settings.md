@@ -24,6 +24,7 @@ The settings menu is organized into the following sections:
 - **Prompt Style**: Select prompt style (minimal, simple, full, custom)
 - **Prompt Options**: Toggle individual prompt elements
 - **Scripts**: Edit initialization and detection scripts
+- **Web Search**: Toggle built-in web search panel (off by default)
 - **Commands**: Add/edit/delete custom commands
 - **Aliases**: Add/edit/delete shell aliases
 - **Reload Config**: Reload settings from config.toml
@@ -156,6 +157,19 @@ fi
 echo "$_vcs"
 '''
 ```
+
+### Web Search
+
+```toml
+[web_search]
+enabled = false
+use_reader_proxy = false
+reader_proxy_urls = ["https://r.jina.ai/"]
+```
+
+- **enabled**: Allow Raven Terminal to make outbound web requests for the search panel
+- **use_reader_proxy**: Use a text-only proxy fallback for JS-heavy pages
+- **reader_proxy_urls**: Proxy base URLs to try in order (target URL appended)
 
 ### Custom Commands
 

@@ -177,6 +177,14 @@ func (m *Menu) buildMainMenu() {
 	if m.Config.Shell.SourceRC {
 		sourceRC = "ON"
 	}
+	webSearch := "OFF"
+	if m.Config.WebSearch.Enabled {
+		webSearch = "ON"
+	}
+	readerProxy := "OFF"
+	if m.Config.WebSearch.UseReaderProxy {
+		readerProxy = "ON"
+	}
 
 	m.Items = []MenuItem{
 		{Label: "Shell: " + currentShell},
@@ -186,6 +194,8 @@ func (m *Menu) buildMainMenu() {
 		{Label: "Prompt Style: " + promptStyle},
 		{Label: "Prompt Options..."},
 		{Label: "Scripts..."},
+		{Label: "Web Search: " + webSearch},
+		{Label: "Web Search Reader Proxy: " + readerProxy},
 		{Label: "Commands (" + itoa(len(m.Config.Commands)) + ")..."},
 		{Label: "Aliases (" + itoa(len(m.Config.Aliases)) + ")..."},
 		{Label: "Exports (" + itoa(len(m.Config.Exports)) + ")..."},
@@ -475,19 +485,27 @@ func (m *Menu) handleMainSelect() {
 		m.State = MenuScripts
 		m.SelectedIndex = 0
 		m.buildScriptsMenu()
-	case 7: // Commands
+	case 7: // Web Search
+		m.Config.WebSearch.Enabled = !m.Config.WebSearch.Enabled
+		m.buildMainMenu()
+		m.StatusMessage = "Updated (save to persist)"
+	case 8: // Web Search Reader Proxy
+		m.Config.WebSearch.UseReaderProxy = !m.Config.WebSearch.UseReaderProxy
+		m.buildMainMenu()
+		m.StatusMessage = "Updated (save to persist)"
+	case 9: // Commands
 		m.State = MenuCommands
 		m.SelectedIndex = 0
 		m.buildCommandsMenu()
-	case 8: // Aliases
+	case 10: // Aliases
 		m.State = MenuAliases
 		m.SelectedIndex = 0
 		m.buildAliasesMenu()
-	case 9: // Exports
+	case 11: // Exports
 		m.State = MenuExports
 		m.SelectedIndex = 0
 		m.buildExportsMenu()
-	case 10: // Reload Config
+	case 12: // Reload Config
 		cfg, err := config.Load()
 		if err != nil {
 			m.StatusMessage = "Failed to reload config"
@@ -508,7 +526,7 @@ func (m *Menu) handleMainSelect() {
 		if m.StatusMessage == "" {
 			m.StatusMessage = "Config reloaded"
 		}
-	case 12: // Save and Close
+	case 14: // Save and Close
 		if !m.saveConfigWithInitScript("Saved") {
 			m.buildMainMenu()
 			return
@@ -521,7 +539,7 @@ func (m *Menu) handleMainSelect() {
 			}
 		}
 		m.Close()
-	case 13: // Cancel
+	case 15: // Cancel
 		m.Config, _ = config.Load()
 		m.Close()
 	}
