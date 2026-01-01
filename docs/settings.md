@@ -26,6 +26,7 @@ The settings menu is organized into the following sections:
 - **Scripts**: Edit initialization and detection scripts
 - **Commands**: Add/edit/delete custom commands
 - **Aliases**: Add/edit/delete shell aliases
+- **Reload Config**: Reload settings from config.toml
 - **Save and Close**: Save all changes to config.toml
 - **Cancel**: Discard changes and close menu
 

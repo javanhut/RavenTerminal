@@ -104,47 +104,46 @@ func NewPtySession(cols, rows uint16, startDir string) (*PtySession, error) {
 		xdgRuntimeDir = "/run/user/" + currentUser.Uid
 	}
 
-	// Build environment
-	env := []string{
-		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:" + os.Getenv("PATH"),
-		"TERM=xterm-256color",
-		"COLORTERM=truecolor",
-		"RAVEN_TERMINAL=1",
-		"HOME=" + currentUser.HomeDir,
-		"USER=" + currentUser.Username,
-		"SHELL=" + shell,
-		"COLUMNS=" + strconv.Itoa(int(cols)),
-		"LINES=" + strconv.Itoa(int(rows)),
-		"LANG=en_US.UTF-8",
-		"LC_ALL=en_US.UTF-8",
-		"XDG_RUNTIME_DIR=" + xdgRuntimeDir,
-		"LS_COLORS=di=01;34:fi=0:ln=01;36:ex=01;32:*.crl=01;35",
-	}
+	// Build environment (inherit then override)
+	env := os.Environ()
+	env = replaceEnv(env, "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:"+os.Getenv("PATH"))
+	env = replaceEnv(env, "TERM", "xterm-256color")
+	env = replaceEnv(env, "COLORTERM", "truecolor")
+	env = replaceEnv(env, "RAVEN_TERMINAL", "1")
+	env = replaceEnv(env, "HOME", currentUser.HomeDir)
+	env = replaceEnv(env, "USER", currentUser.Username)
+	env = replaceEnv(env, "SHELL", shell)
+	env = replaceEnv(env, "COLUMNS", strconv.Itoa(int(cols)))
+	env = replaceEnv(env, "LINES", strconv.Itoa(int(rows)))
+	env = replaceEnv(env, "LANG", "en_US.UTF-8")
+	env = replaceEnv(env, "LC_ALL", "en_US.UTF-8")
+	env = replaceEnv(env, "XDG_RUNTIME_DIR", xdgRuntimeDir)
+	env = replaceEnv(env, "LS_COLORS", "rs=0:di=38;5;110:ln=38;5;109:mh=38;5;109:pi=38;5;173:so=38;5;173:do=38;5;173:bd=38;5;180:cd=38;5;180:or=38;5;196:mi=38;5;196:su=38;5;160:sg=38;5;160:tw=38;5;110:ow=38;5;110:st=38;5;150:ex=38;5;114:fi=38;5;253:*.go=38;5;150:*.rs=38;5;179:*.js=38;5;178:*.ts=38;5;178:*.json=38;5;173:*.md=38;5;109:*.txt=38;5;245:*.png=38;5;176:*.jpg=38;5;176:*.jpeg=38;5;176:*.svg=38;5;176:*.zip=38;5;173:*.tar=38;5;173:*.gz=38;5;173:*.mp3=38;5;140:*.mp4=38;5;140")
 
 	// Add display variables if present
 	if display := os.Getenv("DISPLAY"); display != "" {
-		env = append(env, "DISPLAY="+display)
+		env = replaceEnv(env, "DISPLAY", display)
 	}
 	if waylandDisplay := os.Getenv("WAYLAND_DISPLAY"); waylandDisplay != "" {
-		env = append(env, "WAYLAND_DISPLAY="+waylandDisplay)
-		env = append(env, "XDG_SESSION_TYPE=wayland")
+		env = replaceEnv(env, "WAYLAND_DISPLAY", waylandDisplay)
+		env = replaceEnv(env, "XDG_SESSION_TYPE", "wayland")
 	}
 
 	// Add additional env from config
 	for k, v := range cfg.Shell.AdditionalEnv {
-		env = append(env, k+"="+v)
+		env = replaceEnv(env, k, v)
 	}
 
 	// For zsh, set up custom init by prepending to .zshrc
 	if shellBase == "zsh" && initScriptPath != "" {
 		// Create a custom ZDOTDIR to source our init script
-		env = append(env, "RAVEN_INIT_SCRIPT="+initScriptPath)
+		env = replaceEnv(env, "RAVEN_INIT_SCRIPT", initScriptPath)
 		// Zsh will source the script via .zshenv or we use precmd
 	}
 
 	// For bash without sourcing rc, we need to run the init script
 	if shellBase == "bash" && !cfg.Shell.SourceRC && initScriptPath != "" {
-		env = append(env, "BASH_ENV="+initScriptPath)
+		env = replaceEnv(env, "BASH_ENV", initScriptPath)
 	}
 
 	cmd.Env = env
@@ -181,6 +180,16 @@ func NewPtySession(cols, rows uint16, startDir string) (*PtySession, error) {
 	}()
 
 	return session, nil
+}
+
+func replaceEnv(env []string, key, value string) []string {
+	prefix := key + "="
+	for i := len(env) - 1; i >= 0; i-- {
+		if strings.HasPrefix(env[i], prefix) {
+			env = append(env[:i], env[i+1:]...)
+		}
+	}
+	return append(env, prefix+value)
 }
 
 // CurrentDir returns the process working directory if available.

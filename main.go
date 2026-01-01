@@ -3,11 +3,16 @@ package main
 import (
 	"log"
 	"math"
+	"net/url"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/javanhut/RavenTerminal/commands"
+	"github.com/javanhut/RavenTerminal/config"
+	"github.com/javanhut/RavenTerminal/grid"
 	"github.com/javanhut/RavenTerminal/keybindings"
 	"github.com/javanhut/RavenTerminal/menu"
 	"github.com/javanhut/RavenTerminal/render"
@@ -48,6 +53,13 @@ func (lb *lineBuffer) getLine() string {
 	return lb.buffer.String()
 }
 
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
 type mouseSelection struct {
 	active   bool
 	pane     *tab.Pane
@@ -55,10 +67,15 @@ type mouseSelection struct {
 	startRow int
 }
 
+type toastState struct {
+	message   string
+	expiresAt time.Time
+}
+
 func main() {
 	// Create window
-	config := window.DefaultConfig()
-	win, err := window.NewWindow(config)
+	winConfig := window.DefaultConfig()
+	win, err := window.NewWindow(winConfig)
 	if err != nil {
 		log.Fatalf("Failed to create window: %v", err)
 	}
@@ -93,11 +110,48 @@ func main() {
 	resizeMode := false
 	const resizeStep = 0.05
 	selection := &mouseSelection{}
+	toast := &toastState{}
+	showToast := func(message string) {
+		if strings.TrimSpace(message) == "" {
+			return
+		}
+		toast.message = message
+		toast.expiresAt = time.Now().Add(900 * time.Millisecond)
+	}
 	settingsMenu := menu.NewMenu()
+	settingsMenu.OnConfigReload = func(cfg *config.Config) error {
+		if cfg == nil {
+			return nil
+		}
+		renderer.SetThemeByName(cfg.Theme)
+		if err := renderer.SetDefaultFontSize(cfg.FontSize); err != nil {
+			return err
+		}
+		width, height := win.GetFramebufferSize()
+		cols, rows := renderer.CalculateGridSize(width, height)
+		tabManager.ResizeAll(uint16(cols), uint16(rows))
+		return nil
+	}
+	settingsMenu.OnInitScriptUpdated = func(initPath string) error {
+		if initPath == "" {
+			return nil
+		}
+		activeTab := tabManager.ActiveTab()
+		if activeTab == nil {
+			return nil
+		}
+		cmd := ". " + shellQuote(initPath) + "\n"
+		return activeTab.Write([]byte(cmd))
+	}
 	currentTheme := ""
 	if settingsMenu.Config != nil {
 		currentTheme = settingsMenu.Config.Theme
 		renderer.SetThemeByName(currentTheme)
+		if err := renderer.SetDefaultFontSize(settingsMenu.Config.FontSize); err == nil {
+			width, height := win.GetFramebufferSize()
+			cols, rows := renderer.CalculateGridSize(width, height)
+			tabManager.ResizeAll(uint16(cols), uint16(rows))
+		}
 	}
 
 	win.GLFW().SetKeyCallback(func(w *glfw.Window, key glfw.Key, scancode int, action glfw.Action, mods glfw.ModifierKey) {
@@ -113,6 +167,16 @@ func main() {
 
 		// Handle settings menu input when open
 		if settingsMenu.IsOpen() {
+			appCursor := activeTab.Terminal.AppCursorKeys()
+			result := keybindings.TranslateKey(key, mods, appCursor)
+			if result.Action == keybindings.ActionPaste && settingsMenu.InputMode() {
+				clip := glfw.GetClipboardString()
+				if clip != "" {
+					settingsMenu.HandlePaste(clip)
+					showToast("Pasted from clipboard")
+				}
+				return
+			}
 			switch key {
 			case glfw.KeyUp:
 				settingsMenu.MoveUp()
@@ -254,9 +318,14 @@ func main() {
 		case keybindings.ActionToggleFullscreen:
 			win.ToggleFullscreen()
 		case keybindings.ActionCopy:
-			text := activeTab.Terminal.Grid.VisibleText()
+			g := activeTab.Terminal.Grid
+			text := g.SelectedText()
+			if text == "" {
+				text = g.VisibleText()
+			}
 			if text != "" {
 				glfw.SetClipboardString(text)
+				showToast("Copied to clipboard")
 			}
 		case keybindings.ActionPaste:
 			clip := glfw.GetClipboardString()
@@ -265,6 +334,7 @@ func main() {
 				clip = strings.ReplaceAll(clip, "\n", "\r")
 				activeTab.Write([]byte(clip))
 				activeTab.Terminal.Grid.ResetScrollOffset()
+				showToast("Pasted from clipboard")
 			}
 		case keybindings.ActionNewTab:
 			lineBuf.clear()
@@ -424,6 +494,15 @@ func main() {
 					selection.pane.Terminal.Grid.ClearSelection()
 				}
 
+				if mods&glfw.ModControl != 0 {
+					if urlText, _, _ := urlAtCellRange(pane.Terminal.Grid, col, row); urlText != "" {
+						if err := openURL(urlText); err != nil {
+							log.Printf("failed to open url %q: %v", urlText, err)
+						}
+						return
+					}
+				}
+
 				selection.active = true
 				selection.pane = pane
 				selection.startCol = col
@@ -471,6 +550,7 @@ func main() {
 				g.SetSelection(selection.startCol, selection.startRow, col, row)
 				if text := g.SelectedText(); text != "" {
 					glfw.SetClipboardString(text)
+					showToast("Copied to clipboard")
 				}
 
 				selection.active = false
@@ -479,7 +559,7 @@ func main() {
 			if action != glfw.Press {
 				return
 			}
-			pane, _, _, ok := renderer.HitTestPane(activeTab, x, y, width, height)
+			pane, col, row, ok := renderer.HitTestPane(activeTab, x, y, width, height)
 			if !ok || pane == nil {
 				return
 			}
@@ -487,9 +567,19 @@ func main() {
 			activeTab.SetActivePane(pane)
 			g := pane.Terminal.Grid
 
+			if mods&glfw.ModControl != 0 {
+				if urlText, _, _ := urlAtCellRange(g, col, row); urlText != "" {
+					if err := openURL(urlText); err != nil {
+						log.Printf("failed to open url %q: %v", urlText, err)
+					}
+					return
+				}
+			}
+
 			if g.HasSelection() {
 				if text := g.SelectedText(); text != "" {
 					glfw.SetClipboardString(text)
+					showToast("Copied to clipboard")
 				}
 				return
 			}
@@ -500,50 +590,67 @@ func main() {
 				clip = strings.ReplaceAll(clip, "\n", "\r")
 				pane.Write([]byte(clip))
 				g.ResetScrollOffset()
+				showToast("Pasted from clipboard")
 			}
 		}
 	})
 
 	win.GLFW().SetCursorPosCallback(func(w *glfw.Window, xpos, ypos float64) {
-		if !selection.active || selection.pane == nil {
-			return
-		}
 		if settingsMenu.IsOpen() || showHelp {
+			renderer.ClearHoverURL()
 			return
 		}
 
 		activeTab := tabManager.ActiveTab()
 		if activeTab == nil {
+			renderer.ClearHoverURL()
+			return
+		}
+
+		if selection.active && selection.pane != nil {
+			width, height := win.GetFramebufferSize()
+			rectX, rectY, rectW, rectH, ok := renderer.PaneRectFor(activeTab, selection.pane, width, height)
+			if !ok {
+				return
+			}
+
+			fx := float32(xpos)
+			fy := float32(ypos)
+			if fx < rectX {
+				fx = rectX
+			} else if fx >= rectX+rectW {
+				fx = rectX + rectW - 1
+			}
+			if fy < rectY {
+				fy = rectY
+			} else if fy >= rectY+rectH {
+				fy = rectY + rectH - 1
+			}
+
+			cellW, cellH := renderer.CellSize()
+			col := int((fx - rectX) / cellW)
+			row := int((fy - rectY) / cellH)
+			g := selection.pane.Terminal.Grid
+			col = clampInt(col, 0, g.Cols-1)
+			row = clampInt(row, 0, g.Rows-1)
+
+			g.SetSelection(selection.startCol, selection.startRow, col, row)
+			renderer.ClearHoverURL()
 			return
 		}
 
 		width, height := win.GetFramebufferSize()
-		rectX, rectY, rectW, rectH, ok := renderer.PaneRectFor(activeTab, selection.pane, width, height)
-		if !ok {
+		pane, col, row, ok := renderer.HitTestPane(activeTab, xpos, ypos, width, height)
+		if !ok || pane == nil {
+			renderer.ClearHoverURL()
 			return
 		}
 
-		fx := float32(xpos)
-		fy := float32(ypos)
-		if fx < rectX {
-			fx = rectX
-		} else if fx >= rectX+rectW {
-			fx = rectX + rectW - 1
+		if _, startCol, endCol := urlAtCellRange(pane.Terminal.Grid, col, row); startCol <= endCol {
+			renderer.SetHoverURL(pane.Terminal.Grid, row, startCol, endCol)
+			return
 		}
-		if fy < rectY {
-			fy = rectY
-		} else if fy >= rectY+rectH {
-			fy = rectY + rectH - 1
-		}
-
-		cellW, cellH := renderer.CellSize()
-		col := int((fx - rectX) / cellW)
-		row := int((fy - rectY) / cellH)
-		g := selection.pane.Terminal.Grid
-		col = clampInt(col, 0, g.Cols-1)
-		row = clampInt(row, 0, g.Rows-1)
-
-		g.SetSelection(selection.startCol, selection.startRow, col, row)
+		renderer.ClearHoverURL()
 	})
 
 	// Main loop
@@ -574,6 +681,9 @@ func main() {
 		} else {
 			renderer.RenderWithHelp(tabManager, width, height, cursorVisible, showHelp)
 		}
+		if now.Before(toast.expiresAt) {
+			renderer.DrawToast(toast.message, width, height)
+		}
 
 		// Swap buffers and poll events
 		win.SwapBuffers()
@@ -592,4 +702,79 @@ func clampInt(value, min, max int) int {
 		return max
 	}
 	return value
+}
+
+func urlAtCell(g *grid.Grid, col, row int) string {
+	urlText, _, _ := urlAtCellRange(g, col, row)
+	return urlText
+}
+
+func urlAtCellRange(g *grid.Grid, col, row int) (string, int, int) {
+	if g == nil || row < 0 || row >= g.Rows || col < 0 || col >= g.Cols {
+		return "", -1, -1
+	}
+
+	line := make([]rune, g.Cols)
+	for c := 0; c < g.Cols; c++ {
+		cell := g.DisplayCell(c, row)
+		ch := cell.Char
+		if ch == 0 {
+			ch = ' '
+		}
+		line[c] = ch
+	}
+
+	if line[col] == ' ' {
+		return "", -1, -1
+	}
+
+	start := col
+	for start > 0 && line[start-1] != ' ' {
+		start--
+	}
+	end := col
+	for end+1 < len(line) && line[end+1] != ' ' {
+		end++
+	}
+
+	trimLeftChars := "<>\"'()[]{}"
+	trimRightChars := "<>\"'()[]{}.,;:!?"
+	for start <= end && strings.ContainsRune(trimLeftChars, line[start]) {
+		start++
+	}
+	for end >= start && strings.ContainsRune(trimRightChars, line[end]) {
+		end--
+	}
+	if start > end {
+		return "", -1, -1
+	}
+
+	display := string(line[start : end+1])
+	target := display
+	if strings.HasPrefix(target, "www.") {
+		target = "http://" + target
+	}
+	if !strings.Contains(target, "://") {
+		return "", -1, -1
+	}
+
+	parsed, err := url.Parse(target)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", -1, -1
+	}
+
+	return target, start, end
+}
+
+func openURL(target string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", target)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", target)
+	default:
+		cmd = exec.Command("xdg-open", target)
+	}
+	return cmd.Start()
 }

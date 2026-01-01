@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"fmt"
 	"github.com/javanhut/RavenTerminal/grid"
 	"net/url"
 	"strconv"
@@ -34,6 +35,7 @@ type Terminal struct {
 	alternateScreen bool
 	savedMainGrid   *grid.Grid
 	lastWorkingDir  string
+	responseWriter  func([]byte)
 	mu              sync.Mutex
 	// UTF-8 decoding state
 	utf8Buf       []byte
@@ -325,6 +327,7 @@ func (t *Terminal) executeCSI(final byte) {
 	case 'u': // RCP - Restore cursor position
 		t.Grid.RestoreCursor()
 	case 'n': // DSR - Device status report (ignore for now)
+		t.handleDSR(params)
 	case 'c': // DA - Device attributes (ignore for now)
 	case 't': // Window manipulation (ignore)
 	case 'q': // DECSCUSR - Set cursor style (ignore for now)
@@ -577,4 +580,26 @@ func (t *Terminal) AppCursorKeys() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.appCursorKeys
+}
+
+// SetResponseWriter sets a callback used to write responses back to the PTY.
+func (t *Terminal) SetResponseWriter(writer func([]byte)) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.responseWriter = writer
+}
+
+func (t *Terminal) handleDSR(params []int) {
+	if t.responseWriter == nil {
+		return
+	}
+	code := t.getParam(params, 0, 0)
+	switch code {
+	case 5: // Status report
+		t.responseWriter([]byte("\x1b[0n"))
+	case 6: // Cursor position report
+		col, row := t.Grid.GetCursor()
+		response := fmt.Sprintf("\x1b[%d;%dR", row+1, col+1)
+		t.responseWriter([]byte(response))
+	}
 }

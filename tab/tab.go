@@ -76,6 +76,9 @@ func NewPane(id int, cols, rows uint16, startDir string) (*Pane, error) {
 		id:       id,
 		exited:   false,
 	}
+	pane.Terminal.SetResponseWriter(func(data []byte) {
+		_, _ = pty.Write(data)
+	})
 
 	// Start reader goroutine
 	go pane.readLoop()

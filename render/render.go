@@ -91,17 +91,18 @@ type Glyph struct {
 
 // Renderer handles OpenGL rendering with smooth fonts
 type Renderer struct {
-	theme          Theme
-	cellWidth      float32 // Current cell dimensions (may be zoomed)
-	cellHeight     float32
-	fontSize       float32 // Current font size
-	baseFontSize   float32 // Base font size (16.0)
-	baseCellWidth  float32 // Cell dimensions at base font size (for UI)
-	baseCellHeight float32
-	paddingTop     float32
-	paddingBottom  float32
-	tabBarWidth    float32
-	currentFont    string
+	theme           Theme
+	cellWidth       float32 // Current cell dimensions (may be zoomed)
+	cellHeight      float32
+	fontSize        float32 // Current font size
+	baseFontSize    float32 // Base font size (16.0)
+	baseCellWidth   float32 // Cell dimensions at base font size (for UI)
+	defaultFontSize float32 // Default font size for reset
+	baseCellHeight  float32
+	paddingTop      float32
+	paddingBottom   float32
+	tabBarWidth     float32
+	currentFont     string
 
 	// Font data
 	glyphs    map[rune]Glyph
@@ -125,6 +126,13 @@ type Renderer struct {
 
 	// Help panel scroll state
 	helpScrollOffset int
+
+	// Hover underline state for URLs
+	hoverGrid     *grid.Grid
+	hoverRow      int
+	hoverStartCol int
+	hoverEndCol   int
+	hoverActive   bool
 }
 
 type paneRect struct {
@@ -138,15 +146,16 @@ type paneRect struct {
 // NewRenderer creates a new renderer with smooth font rendering
 func NewRenderer() (*Renderer, error) {
 	r := &Renderer{
-		theme:         DefaultTheme(),
-		fontSize:      16.0,
-		baseFontSize:  16.0, // Fixed UI font size
-		paddingTop:    12.0,
-		paddingBottom: 12.0,
-		tabBarWidth:   135.0,
-		currentFont:   fonts.DefaultFontName(),
-		glyphs:        make(map[rune]Glyph),
-		atlasSize:     512, // Larger atlas for Nerd Font icons
+		theme:           DefaultTheme(),
+		fontSize:        defaultFontSize,
+		baseFontSize:    defaultFontSize, // Fixed UI font size
+		defaultFontSize: defaultFontSize,
+		paddingTop:      12.0,
+		paddingBottom:   12.0,
+		tabBarWidth:     135.0,
+		currentFont:     fonts.DefaultFontName(),
+		glyphs:          make(map[rune]Glyph),
+		atlasSize:       512, // Larger atlas for Nerd Font icons
 	}
 
 	if err := r.initGL(); err != nil {
@@ -229,8 +238,8 @@ func (r *Renderer) loadFontData(fontData []byte) error {
 	}
 
 	x, y := 0, metrics.Ascent.Ceil()
-	charHeight := int(r.cellHeight) + 4
-	charWidth := int(r.cellWidth) + 4
+	charHeight := int(r.cellHeight)
+	charWidth := int(r.cellWidth)
 
 	for _, cr := range charRanges {
 		for c := cr.start; c <= cr.end; c++ {
@@ -250,7 +259,7 @@ func (r *Renderer) loadFontData(fontData []byte) error {
 			}
 
 			// Render glyph
-			drawer.Dot = fixed.P(x+2, y)
+			drawer.Dot = fixed.P(x, y)
 			drawer.DrawString(string(c))
 
 			// Store glyph info (normalized coordinates)
@@ -1277,12 +1286,22 @@ func (r *Renderer) renderGridAt(g *grid.Grid, offsetX, offsetY, paneWidth, paneH
 			}
 
 			// Draw character
+			fgColor := r.colorToRGBA(cell.Fg, false)
+			if cell.Flags&grid.FlagInverse != 0 {
+				fgColor = r.colorToRGBA(cell.Bg, true)
+			}
 			if cell.Char != ' ' && cell.Char != 0 {
-				fgColor := r.colorToRGBA(cell.Fg, false)
-				if cell.Flags&grid.FlagInverse != 0 {
-					fgColor = r.colorToRGBA(cell.Bg, true)
-				}
 				r.drawChar(x, y+r.cellHeight, cell.Char, fgColor, proj)
+			}
+
+			// Draw underline for ANSI styling or hovered URL
+			drawUnderline := cell.Flags&grid.FlagUnderline != 0
+			if r.hoverActive && r.hoverGrid == g && row == r.hoverRow && col >= r.hoverStartCol && col <= r.hoverEndCol {
+				drawUnderline = true
+			}
+			if drawUnderline && cell.Char != ' ' && cell.Char != 0 {
+				underlineY := y + r.cellHeight - 1
+				r.drawRect(x, underlineY, r.cellWidth, 1, fgColor, proj)
 			}
 		}
 	}
@@ -1304,6 +1323,63 @@ func (r *Renderer) renderGridAt(g *grid.Grid, offsetX, offsetY, paneWidth, paneH
 			}
 		}
 	}
+}
+
+// SetHoverURL sets the hover underline range for a grid.
+func (r *Renderer) SetHoverURL(g *grid.Grid, row, startCol, endCol int) {
+	if g == nil || row < 0 || startCol < 0 || endCol < startCol {
+		r.ClearHoverURL()
+		return
+	}
+	r.hoverGrid = g
+	r.hoverRow = row
+	r.hoverStartCol = startCol
+	r.hoverEndCol = endCol
+	r.hoverActive = true
+}
+
+// ClearHoverURL clears any active hover underline.
+func (r *Renderer) ClearHoverURL() {
+	r.hoverGrid = nil
+	r.hoverActive = false
+}
+
+// DrawToast renders a small notification overlay.
+func (r *Renderer) DrawToast(message string, width, height int) {
+	if strings.TrimSpace(message) == "" {
+		return
+	}
+
+	proj := orthoMatrix(0, float32(width), float32(height), 0, -1, 1)
+
+	paddingX := r.cellWidth * 0.8
+	paddingY := r.cellHeight * 0.35
+	runes := []rune(message)
+	textWidth := float32(len(runes)) * r.cellWidth
+	boxW := textWidth + paddingX*2
+	boxH := r.cellHeight + paddingY*2
+	margin := r.cellWidth * 0.8
+
+	maxWidth := float32(width) - margin*2
+	if boxW > maxWidth {
+		maxChars := int((maxWidth - paddingX*2) / r.cellWidth)
+		if maxChars > 3 {
+			message = string(runes[:maxChars-3]) + "..."
+			runes = []rune(message)
+			textWidth = float32(len(runes)) * r.cellWidth
+			boxW = textWidth + paddingX*2
+		} else {
+			return
+		}
+	}
+
+	x := float32(width) - boxW - margin
+	y := float32(height) - boxH - margin
+	bg := r.theme.TabBar
+	bg[3] = 0.85
+
+	r.drawRect(x, y, boxW, boxH, bg, proj)
+	r.drawText(x+paddingX, y+boxH-paddingY, message, r.theme.Foreground, proj)
 }
 
 // drawRect draws a colored rectangle
@@ -1453,22 +1529,22 @@ func (r *Renderer) colorToRGBA(c grid.Color, isBackground bool) [4]float32 {
 func indexedColor(index uint8) [4]float32 {
 	// Standard 16 colors
 	standard := [][4]float32{
-		{0.0, 0.0, 0.0, 1.0},    // 0: Black
-		{0.8, 0.0, 0.0, 1.0},    // 1: Red
-		{0.0, 0.8, 0.0, 1.0},    // 2: Green
-		{0.8, 0.8, 0.0, 1.0},    // 3: Yellow
-		{0.0, 0.0, 0.8, 1.0},    // 4: Blue
-		{0.8, 0.0, 0.8, 1.0},    // 5: Magenta
-		{0.0, 0.8, 0.8, 1.0},    // 6: Cyan
-		{0.75, 0.75, 0.75, 1.0}, // 7: White
-		{0.5, 0.5, 0.5, 1.0},    // 8: Bright Black
-		{1.0, 0.0, 0.0, 1.0},    // 9: Bright Red
-		{0.0, 1.0, 0.0, 1.0},    // 10: Bright Green
-		{1.0, 1.0, 0.0, 1.0},    // 11: Bright Yellow
-		{0.0, 0.0, 1.0, 1.0},    // 12: Bright Blue
-		{1.0, 0.0, 1.0, 1.0},    // 13: Bright Magenta
-		{0.0, 1.0, 1.0, 1.0},    // 14: Bright Cyan
-		{1.0, 1.0, 1.0, 1.0},    // 15: Bright White
+		{0.043, 0.059, 0.078, 1.0}, // 0: Black
+		{0.820, 0.412, 0.412, 1.0}, // 1: Red
+		{0.498, 0.737, 0.549, 1.0}, // 2: Green
+		{0.843, 0.729, 0.490, 1.0}, // 3: Yellow
+		{0.533, 0.643, 0.831, 1.0}, // 4: Blue
+		{0.773, 0.525, 0.753, 1.0}, // 5: Magenta
+		{0.498, 0.773, 0.784, 1.0}, // 6: Cyan
+		{0.831, 0.847, 0.871, 1.0}, // 7: White
+		{0.294, 0.322, 0.388, 1.0}, // 8: Bright Black
+		{0.878, 0.478, 0.478, 1.0}, // 9: Bright Red
+		{0.604, 0.843, 0.659, 1.0}, // 10: Bright Green
+		{0.906, 0.788, 0.545, 1.0}, // 11: Bright Yellow
+		{0.647, 0.749, 0.941, 1.0}, // 12: Bright Blue
+		{0.847, 0.627, 0.831, 1.0}, // 13: Bright Magenta
+		{0.604, 0.843, 0.863, 1.0}, // 14: Bright Cyan
+		{0.945, 0.953, 0.961, 1.0}, // 15: Bright White
 	}
 
 	if index < 16 {
@@ -1554,7 +1630,7 @@ func (r *Renderer) GetAvailableFonts() []fonts.FontInfo {
 }
 
 // Default font size for reset
-const defaultFontSize = 16.0
+const defaultFontSize = 15.0
 const minFontSize = 8.0
 const maxFontSize = 32.0
 const zoomStep = 2.0
@@ -1579,7 +1655,7 @@ func (r *Renderer) ZoomOut() error {
 
 // ZoomReset resets the font size to default
 func (r *Renderer) ZoomReset() error {
-	return r.setFontSize(defaultFontSize)
+	return r.setFontSize(r.defaultFontSize)
 }
 
 // setFontSize changes the font size and reloads the font
@@ -1607,9 +1683,31 @@ func (r *Renderer) setFontSize(size float32) error {
 	return r.loadFontData(fontData)
 }
 
+// SetDefaultFontSize sets the default font size and applies it.
+func (r *Renderer) SetDefaultFontSize(size float32) error {
+	size = clampFontSize(size)
+	r.defaultFontSize = size
+	return r.setFontSize(size)
+}
+
+// SetFontSize sets the current font size without changing the default.
+func (r *Renderer) SetFontSize(size float32) error {
+	return r.setFontSize(clampFontSize(size))
+}
+
 // GetFontSize returns the current font size
 func (r *Renderer) GetFontSize() float32 {
 	return r.fontSize
+}
+
+func clampFontSize(size float32) float32 {
+	if size < minFontSize {
+		return minFontSize
+	}
+	if size > maxFontSize {
+		return maxFontSize
+	}
+	return size
 }
 
 // Destroy cleans up renderer resources
