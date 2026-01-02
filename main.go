@@ -148,6 +148,10 @@ func main() {
 	resizeMode := false
 	const resizeStep = 0.05
 	selection := &mouseSelection{}
+	var lastCursorX float64
+	var lastCursorY float64
+	var haveCursorPos bool
+	lastAutoScroll := time.Time{}
 	toast := &toastState{}
 	showToast := func(message string) {
 		if strings.TrimSpace(message) == "" {
@@ -1010,6 +1014,61 @@ func main() {
 			return
 		}
 
+		activeTab := tabManager.ActiveTab()
+		if activeTab == nil {
+			return
+		}
+
+		if selection.active && selection.pane != nil {
+			pane := selection.pane
+			g := pane.Terminal.Grid
+			steps := int(math.Abs(yoff))
+			if steps == 0 {
+				steps = 1
+			}
+			if yoff > 0 {
+				g.ScrollViewUp(steps)
+				selection.startRow += steps
+			} else if yoff < 0 {
+				g.ScrollViewDown(steps)
+				selection.startRow -= steps
+			} else {
+				return
+			}
+
+			selection.startRow = clampInt(selection.startRow, 0, g.Rows-1)
+
+			width, height := win.GetFramebufferSize()
+			x, y := w.GetCursorPos()
+			rectX, rectY, rectW, rectH, ok := renderer.PaneRectFor(activeTab, pane, width, height)
+			if !ok {
+				return
+			}
+
+			fx := float32(x)
+			fy := float32(y)
+			if fx < rectX {
+				fx = rectX
+			} else if fx >= rectX+rectW {
+				fx = rectX + rectW - 1
+			}
+			if fy < rectY {
+				fy = rectY
+			} else if fy >= rectY+rectH {
+				fy = rectY + rectH - 1
+			}
+
+			cellW, cellH := renderer.CellSize()
+			col := int((fx - rectX) / cellW)
+			row := int((fy - rectY) / cellH)
+			col = clampInt(col, 0, g.Cols-1)
+			row = clampInt(row, 0, g.Rows-1)
+
+			g.SetSelection(selection.startCol, selection.startRow, col, row)
+			renderer.ClearHoverURL()
+			return
+		}
+
 		if aiPanel.Open && aiPanel.Focused {
 			width, height := win.GetFramebufferSize()
 			cellW, cellH := renderer.CellDimensions()
@@ -1072,10 +1131,6 @@ func main() {
 			return
 		}
 
-		activeTab := tabManager.ActiveTab()
-		if activeTab == nil {
-			return
-		}
 		if yoff > 0 {
 			activeTab.Terminal.Grid.ScrollViewUp(3)
 		} else if yoff < 0 {
@@ -1216,6 +1271,10 @@ func main() {
 	})
 
 	win.GLFW().SetCursorPosCallback(func(w *glfw.Window, xpos, ypos float64) {
+		lastCursorX = xpos
+		lastCursorY = ypos
+		haveCursorPos = true
+
 		if settingsMenu.IsOpen() || showHelp {
 			renderer.ClearHoverURL()
 			return
@@ -1404,6 +1463,64 @@ func main() {
 		if now.Sub(lastBlink) >= blinkInterval {
 			cursorVisible = !cursorVisible
 			lastBlink = now
+		}
+
+		if selection.active && selection.pane != nil && haveCursorPos {
+			if now.Sub(lastAutoScroll) >= time.Millisecond*50 {
+				activeTab := tabManager.ActiveTab()
+				if activeTab != nil {
+					width, height := win.GetFramebufferSize()
+					rectX, rectY, rectW, rectH, ok := renderer.PaneRectFor(activeTab, selection.pane, width, height)
+					if ok {
+						cellW, cellH := renderer.CellSize()
+						edge := float64(cellH)
+						var dir int
+						if lastCursorY < float64(rectY)+edge {
+							dir = -1
+						} else if lastCursorY > float64(rectY+rectH)-edge {
+							dir = 1
+						}
+						if dir != 0 {
+							g := selection.pane.Terminal.Grid
+							prevOffset := g.GetScrollOffset()
+							if dir < 0 {
+								g.ScrollViewUp(1)
+							} else {
+								g.ScrollViewDown(1)
+							}
+							if g.GetScrollOffset() != prevOffset {
+								if dir < 0 {
+									selection.startRow++
+								} else {
+									selection.startRow--
+								}
+								selection.startRow = clampInt(selection.startRow, 0, g.Rows-1)
+
+								fx := float32(lastCursorX)
+								fy := float32(lastCursorY)
+								if fx < rectX {
+									fx = rectX
+								} else if fx >= rectX+rectW {
+									fx = rectX + rectW - 1
+								}
+								if fy < rectY {
+									fy = rectY
+								} else if fy >= rectY+rectH {
+									fy = rectY + rectH - 1
+								}
+
+								col := int((fx - rectX) / cellW)
+								row := int((fy - rectY) / cellH)
+								col = clampInt(col, 0, g.Cols-1)
+								row = clampInt(row, 0, g.Rows-1)
+								g.SetSelection(selection.startCol, selection.startRow, col, row)
+								renderer.ClearHoverURL()
+								lastAutoScroll = now
+							}
+						}
+					}
+				}
+			}
 		}
 
 		// Render
