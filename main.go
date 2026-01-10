@@ -245,10 +245,11 @@ func main() {
 	startSearch := func(query string) {
 		searchPanel.Mode = searchpanel.ModeResults
 		searchPanel.Status = "Searching..."
-		searchPanel.Loading = true
+		searchPanel.StartLoading()
 		searchPanel.Results = nil
 		searchPanel.Selected = 0
 		searchPanel.ResultsScroll = 0
+		searchPanel.ResetHistory()
 		searchPanel.SearchID++
 		searchID := searchPanel.SearchID
 		go func(id int, q string) {
@@ -262,7 +263,7 @@ func main() {
 	startPreview := func(result searchpanel.Result) {
 		searchPanel.Mode = searchpanel.ModePreview
 		searchPanel.Status = "Loading preview..."
-		searchPanel.Loading = true
+		searchPanel.StartLoading()
 		searchPanel.PreviewTitle = result.Title
 		searchPanel.PreviewURL = result.URL
 		searchPanel.PreviewLines = nil
@@ -301,7 +302,7 @@ func main() {
 		aiPanel.TrimMessages(maxChatMessages)
 		aiPanel.ClearInput()
 		aiPanel.Status = "Thinking..."
-		aiPanel.Loading = true
+		aiPanel.StartLoading()
 		aiPanel.RequestID++
 		requestID := aiPanel.RequestID
 		needLoad := !aiPanel.ModelLoaded
@@ -454,14 +455,13 @@ func main() {
 
 			switch result.Action {
 			case keybindings.ActionCopy:
-				g := activeTab.Terminal.Grid
-				text := g.SelectedText()
-				if text == "" {
-					text = g.VisibleText()
-				}
-				if text != "" {
-					glfw.SetClipboardString(text)
-					showToast("Copied to clipboard")
+				// In AI panel, copy the last assistant response
+				lastResponse := aiPanel.GetLastAssistantMessage()
+				if lastResponse != "" {
+					glfw.SetClipboardString(lastResponse)
+					showToast("Copied AI response")
+				} else {
+					showToast("No AI response to copy")
 				}
 				return
 			case keybindings.ActionPaste:
@@ -652,6 +652,24 @@ func main() {
 				return
 			}
 
+			// Ctrl+O: Open selected URL in browser
+			if mods&glfw.ModControl != 0 && key == glfw.KeyO {
+				var urlToOpen string
+				if searchPanel.Mode == searchpanel.ModePreview {
+					urlToOpen = searchPanel.PreviewURL
+				} else {
+					urlToOpen = searchPanel.GetSelectedURL()
+				}
+				if urlToOpen != "" {
+					if err := openURL(urlToOpen); err != nil {
+						searchPanel.Status = "Failed to open browser"
+					} else {
+						searchPanel.Status = "Opening in browser..."
+					}
+				}
+				return
+			}
+
 			switch key {
 			case glfw.KeyEscape:
 				if searchPanel.Mode == searchpanel.ModePreview {
@@ -681,6 +699,9 @@ func main() {
 			case glfw.KeyUp:
 				if searchPanel.Mode == searchpanel.ModePreview {
 					searchPanel.ScrollPreview(-1, previewVisible)
+				} else if searchPanel.QueryDirty || len(searchPanel.Results) == 0 {
+					// Navigate history when editing query
+					searchPanel.HistoryUp()
 				} else {
 					searchPanel.MoveSelection(-1, layout.VisibleLines)
 				}
@@ -688,6 +709,9 @@ func main() {
 			case glfw.KeyDown:
 				if searchPanel.Mode == searchpanel.ModePreview {
 					searchPanel.ScrollPreview(1, previewVisible)
+				} else if searchPanel.HistoryIndex >= 0 {
+					// Navigate history back to current
+					searchPanel.HistoryDown()
 				} else {
 					searchPanel.MoveSelection(1, layout.VisibleLines)
 				}
@@ -1367,6 +1391,8 @@ func main() {
 				}
 				searchPanel.SetResults(resp.query, results, resp.err)
 				if resp.err == nil {
+					// Add successful query to history
+					searchPanel.AddToHistory(resp.query)
 					if len(results) == 0 {
 						searchPanel.Status = "No results"
 					} else {

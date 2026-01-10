@@ -1,6 +1,9 @@
 package searchpanel
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 type Mode int
 
@@ -10,8 +13,13 @@ const (
 )
 
 const (
-	linesPerResult = 3
+	linesPerResult   = 3
+	maxHistorySize   = 20
+	spinnerFrameRate = 100 * time.Millisecond
 )
+
+// Spinner frames for loading animation
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 type Result struct {
 	Title   string
@@ -41,6 +49,14 @@ type Panel struct {
 	Loading          bool
 	SearchID         int
 	PreviewID        int
+
+	// Search history
+	History      []string // Previous search queries
+	HistoryIndex int      // Current position in history (-1 = current query)
+	TempQuery    string   // Saved current query when browsing history
+
+	// Loading animation
+	LoadingStart time.Time // When loading started
 }
 
 type Layout struct {
@@ -63,8 +79,10 @@ type Layout struct {
 
 func New() *Panel {
 	return &Panel{
-		Mode:     ModeResults,
-		Selected: 0,
+		Mode:         ModeResults,
+		Selected:     0,
+		History:      make([]string, 0, maxHistorySize),
+		HistoryIndex: -1,
 	}
 }
 
@@ -304,4 +322,103 @@ func (p *Panel) ResultTitle(idx int) string {
 		return ""
 	}
 	return strings.TrimSpace(p.Results[idx].Title)
+}
+
+// AddToHistory adds a query to the search history
+func (p *Panel) AddToHistory(query string) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return
+	}
+
+	// Remove duplicate if exists
+	for i, h := range p.History {
+		if h == query {
+			p.History = append(p.History[:i], p.History[i+1:]...)
+			break
+		}
+	}
+
+	// Add to front
+	p.History = append([]string{query}, p.History...)
+
+	// Trim to max size
+	if len(p.History) > maxHistorySize {
+		p.History = p.History[:maxHistorySize]
+	}
+
+	// Reset history navigation
+	p.HistoryIndex = -1
+	p.TempQuery = ""
+}
+
+// HistoryUp navigates to older query in history
+func (p *Panel) HistoryUp() bool {
+	if len(p.History) == 0 {
+		return false
+	}
+
+	// Save current query when first navigating
+	if p.HistoryIndex == -1 {
+		p.TempQuery = p.Query
+	}
+
+	// Move up in history
+	nextIdx := p.HistoryIndex + 1
+	if nextIdx >= len(p.History) {
+		return false
+	}
+
+	p.HistoryIndex = nextIdx
+	p.Query = p.History[p.HistoryIndex]
+	p.QueryDirty = p.Query != p.LastQuery
+	return true
+}
+
+// HistoryDown navigates to newer query in history
+func (p *Panel) HistoryDown() bool {
+	if p.HistoryIndex < 0 {
+		return false
+	}
+
+	p.HistoryIndex--
+	if p.HistoryIndex < 0 {
+		// Restore original query
+		p.Query = p.TempQuery
+		p.TempQuery = ""
+	} else {
+		p.Query = p.History[p.HistoryIndex]
+	}
+	p.QueryDirty = p.Query != p.LastQuery
+	return true
+}
+
+// ResetHistory resets history navigation state
+func (p *Panel) ResetHistory() {
+	p.HistoryIndex = -1
+	p.TempQuery = ""
+}
+
+// StartLoading marks the panel as loading with timestamp
+func (p *Panel) StartLoading() {
+	p.Loading = true
+	p.LoadingStart = time.Now()
+}
+
+// SpinnerFrame returns the current spinner character based on elapsed time
+func (p *Panel) SpinnerFrame() string {
+	if !p.Loading {
+		return ""
+	}
+	elapsed := time.Since(p.LoadingStart)
+	frameCount := int(elapsed / spinnerFrameRate)
+	return spinnerFrames[frameCount%len(spinnerFrames)]
+}
+
+// GetSelectedURL returns the URL of the currently selected result
+func (p *Panel) GetSelectedURL() string {
+	if p.Selected < 0 || p.Selected >= len(p.Results) {
+		return ""
+	}
+	return p.Results[p.Selected].URL
 }

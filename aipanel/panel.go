@@ -1,6 +1,14 @@
 package aipanel
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
+
+// Spinner frames for loading animation
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+const spinnerFrameRate = 100 * time.Millisecond
 
 type Message struct {
 	Role    string
@@ -8,8 +16,11 @@ type Message struct {
 }
 
 type WrappedLine struct {
-	Role string
-	Text string
+	Role     string
+	Text     string
+	InCode   bool // Whether this line is inside a code block
+	IsHeader bool // Whether this is a header line
+	IsBullet bool // Whether this is a bullet point
 }
 
 type Panel struct {
@@ -22,12 +33,14 @@ type Panel struct {
 	Messages     []Message
 	Scroll       int
 	AutoScroll   bool
+	WasAtBottom  bool // Track if user was at bottom before new content
 	WrapChars    int
 	WrappedLines []WrappedLine
 	RequestID    int
 	ModelLoaded  bool
 	LoadedURL    string
 	LoadedModel  string
+	LoadingStart time.Time
 }
 
 type Layout struct {
@@ -132,6 +145,58 @@ func (p *Panel) TrimMessages(maxMessages int) {
 	p.Messages = append([]Message{}, p.Messages[len(p.Messages)-maxMessages:]...)
 }
 
+// StartLoading marks the panel as loading with timestamp
+func (p *Panel) StartLoading() {
+	p.Loading = true
+	p.LoadingStart = time.Now()
+}
+
+// SpinnerFrame returns the current spinner character based on elapsed time
+func (p *Panel) SpinnerFrame() string {
+	if !p.Loading {
+		return ""
+	}
+	elapsed := time.Since(p.LoadingStart)
+	frameCount := int(elapsed / spinnerFrameRate)
+	return spinnerFrames[frameCount%len(spinnerFrames)]
+}
+
+// GetLastAssistantMessage returns the last assistant message content
+func (p *Panel) GetLastAssistantMessage() string {
+	for i := len(p.Messages) - 1; i >= 0; i-- {
+		if p.Messages[i].Role == "assistant" {
+			return p.Messages[i].Content
+		}
+	}
+	return ""
+}
+
+// IsAtBottom returns true if scroll is at the bottom of content
+func (p *Panel) IsAtBottom(visibleLines int) bool {
+	if len(p.WrappedLines) <= visibleLines {
+		return true
+	}
+	maxScroll := len(p.WrappedLines) - visibleLines
+	return p.Scroll >= maxScroll-1
+}
+
+// SaveScrollPosition saves whether user is at bottom before content changes
+func (p *Panel) SaveScrollPosition(visibleLines int) {
+	p.WasAtBottom = p.IsAtBottom(visibleLines)
+}
+
+// RestoreScrollPosition scrolls to bottom if user was at bottom before content changed
+func (p *Panel) RestoreScrollPosition(visibleLines int) {
+	if p.AutoScroll || p.WasAtBottom {
+		maxScroll := len(p.WrappedLines) - visibleLines
+		if maxScroll < 0 {
+			maxScroll = 0
+		}
+		p.Scroll = maxScroll
+		p.AutoScroll = false
+	}
+}
+
 func (p *Panel) Layout(width, height int, cellWidth, cellHeight float32) Layout {
 	panelWidth := float32(width) * 0.35
 	minPanelWidth := float32(340)
@@ -211,16 +276,166 @@ func BuildWrappedLines(messages []Message, maxChars int) []WrappedLine {
 			prefix = role + ": "
 		}
 		indent := strings.Repeat(" ", len(prefix))
-		content := strings.ReplaceAll(message.Content, "\n", " ")
-		wrapped := wrapText(content, maxChars, prefix, indent)
-		for _, line := range wrapped {
-			lines = append(lines, WrappedLine{Role: role, Text: line})
+
+		// Split content by lines first to handle code blocks
+		contentLines := strings.Split(message.Content, "\n")
+		inCode := false
+		isFirstLine := true
+
+		for _, contentLine := range contentLines {
+			trimmed := strings.TrimSpace(contentLine)
+
+			// Toggle code block state
+			if strings.HasPrefix(trimmed, "```") {
+				inCode = !inCode
+				continue // Skip the ``` markers entirely
+			}
+
+			linePrefix := indent
+			if isFirstLine {
+				linePrefix = prefix
+				isFirstLine = false
+			}
+
+			if inCode {
+				// In code block: preserve line as-is (with indent only)
+				codeLine := linePrefix + contentLine
+				if len(codeLine) > maxChars {
+					codeLine = codeLine[:maxChars-3] + "..."
+				}
+				lines = append(lines, WrappedLine{Role: role, Text: codeLine, InCode: true})
+				continue
+			}
+
+			// Skip empty lines
+			if trimmed == "" {
+				lines = append(lines, WrappedLine{Role: role, Text: "", InCode: false})
+				continue
+			}
+
+			// Skip table separators
+			if strings.HasPrefix(trimmed, "|--") || strings.HasPrefix(trimmed, "| --") ||
+				strings.HasPrefix(trimmed, "|:") || strings.HasPrefix(trimmed, "| :") {
+				continue
+			}
+
+			// Handle headers
+			if strings.HasPrefix(trimmed, "#") {
+				level := 0
+				for level < len(trimmed) && trimmed[level] == '#' {
+					level++
+				}
+				headerText := strings.TrimSpace(trimmed[level:])
+				headerText = stripMarkdownFormatting(headerText)
+				if headerText != "" {
+					headerPrefix := strings.Repeat("=", min(level, 3)) + " "
+					text := linePrefix + headerPrefix + headerText
+					if len(text) > maxChars {
+						text = text[:maxChars-3] + "..."
+					}
+					lines = append(lines, WrappedLine{Role: role, Text: text, IsHeader: true})
+				}
+				continue
+			}
+
+			// Handle bullet points
+			isBullet := false
+			bulletPrefix := ""
+			text := trimmed
+			if strings.HasPrefix(trimmed, "* ") || strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "+ ") {
+				isBullet = true
+				bulletPrefix = "• "
+				text = strings.TrimSpace(trimmed[2:])
+			} else if len(trimmed) > 2 && trimmed[0] >= '0' && trimmed[0] <= '9' {
+				// Numbered list
+				dotIdx := strings.Index(trimmed, ".")
+				if dotIdx > 0 && dotIdx < 4 {
+					isBullet = true
+					bulletPrefix = trimmed[:dotIdx+1] + " "
+					text = strings.TrimSpace(trimmed[dotIdx+1:])
+				}
+			}
+
+			// Handle table rows - convert to readable format
+			if strings.HasPrefix(trimmed, "|") && strings.HasSuffix(trimmed, "|") {
+				cells := strings.Split(trimmed, "|")
+				var cellTexts []string
+				for _, cell := range cells {
+					cell = strings.TrimSpace(cell)
+					if cell != "" {
+						cellTexts = append(cellTexts, stripMarkdownFormatting(cell))
+					}
+				}
+				if len(cellTexts) > 0 {
+					text = strings.Join(cellTexts, " | ")
+					wrapped := wrapText(text, maxChars, linePrefix, indent)
+					for _, wline := range wrapped {
+						lines = append(lines, WrappedLine{Role: role, Text: wline, InCode: false})
+					}
+				}
+				continue
+			}
+
+			// Strip markdown formatting from regular text
+			text = stripMarkdownFormatting(text)
+
+			// Wrap the text
+			fullPrefix := linePrefix
+			if isBullet {
+				fullPrefix = linePrefix + bulletPrefix
+			}
+			bulletIndent := indent + strings.Repeat(" ", len(bulletPrefix))
+
+			wrapped := wrapText(text, maxChars, fullPrefix, bulletIndent)
+			for _, wline := range wrapped {
+				lines = append(lines, WrappedLine{Role: role, Text: wline, IsBullet: isBullet})
+			}
 		}
+
 		if i < len(messages)-1 {
 			lines = append(lines, WrappedLine{Role: "", Text: ""})
 		}
 	}
 	return lines
+}
+
+// stripMarkdownFormatting removes markdown formatting from text
+func stripMarkdownFormatting(text string) string {
+	// Remove bold/italic markers
+	text = strings.ReplaceAll(text, "**", "")
+	text = strings.ReplaceAll(text, "__", "")
+	text = strings.ReplaceAll(text, "*", "")
+	text = strings.ReplaceAll(text, "_", "")
+	text = strings.ReplaceAll(text, "`", "")
+
+	// Convert links [text](url) to just text
+	for {
+		start := strings.Index(text, "[")
+		if start == -1 {
+			break
+		}
+		end := strings.Index(text[start:], "](")
+		if end == -1 {
+			break
+		}
+		end += start
+		urlEnd := strings.Index(text[end:], ")")
+		if urlEnd == -1 {
+			break
+		}
+		urlEnd += end
+		linkText := text[start+1 : end]
+		text = text[:start] + linkText + text[urlEnd+1:]
+	}
+
+	return strings.TrimSpace(text)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func wrapText(text string, maxChars int, prefix, indent string) []string {

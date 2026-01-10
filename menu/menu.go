@@ -29,6 +29,8 @@ const (
 	MenuConfirmCommand
 	MenuConfirmAlias
 	MenuConfirmExport
+	MenuConfirmDelete  // Confirmation before deleting items
+	MenuCursorStyle    // Cursor style selection
 )
 
 // InputState tracks what we're currently inputting
@@ -56,6 +58,8 @@ const (
 	InputOllamaModel
 	// Font size input state
 	InputFontSize
+	// Panel width input state
+	InputPanelWidth
 )
 
 // MenuItem represents a menu item
@@ -63,6 +67,9 @@ type MenuItem struct {
 	Label    string
 	Value    string
 	Disabled bool
+	IsHeader bool   // Section header (non-selectable, styled differently)
+	IsToggle bool   // Toggle item (shows checkbox indicator)
+	Toggled  bool   // Current toggle state
 }
 
 // Menu manages the configuration menu
@@ -73,6 +80,10 @@ type Menu struct {
 	Items         []MenuItem
 	ScrollOffset  int
 	OllamaModels  []string
+
+	// Position memory - preserve selection when navigating between menus
+	savedIndex  map[MenuState]int
+	savedScroll map[MenuState]int
 
 	// Input handling - simplified
 	InputActive bool
@@ -91,6 +102,11 @@ type Menu struct {
 	EditingIndex      int    // -1 for new, >= 0 for existing
 	EditingName       string // For alias editing
 	EditingExportName string
+
+	// Delete confirmation tracking
+	DeleteType   string // "command", "alias", or "export"
+	DeleteTarget string // Name or index of item to delete
+	DeleteIndex  int    // Index for commands
 
 	// Messages
 	StatusMessage string
@@ -117,7 +133,51 @@ func NewMenu() *Menu {
 		State:        MenuClosed,
 		Config:       cfg,
 		EditingIndex: -1,
+		savedIndex:   make(map[MenuState]int),
+		savedScroll:  make(map[MenuState]int),
 	}
+}
+
+// savePosition stores the current position for the current state
+func (m *Menu) savePosition() {
+	m.savedIndex[m.State] = m.SelectedIndex
+	m.savedScroll[m.State] = m.ScrollOffset
+}
+
+// restorePosition restores position for the given state, or resets to 0
+func (m *Menu) restorePosition(state MenuState) {
+	if idx, ok := m.savedIndex[state]; ok {
+		m.SelectedIndex = idx
+	} else {
+		m.SelectedIndex = 0
+	}
+	if scroll, ok := m.savedScroll[state]; ok {
+		m.ScrollOffset = scroll
+	} else {
+		m.ScrollOffset = 0
+	}
+}
+
+// navigateTo transitions to a new menu state, saving current position
+func (m *Menu) navigateTo(newState MenuState, buildFunc func()) {
+	m.savePosition()
+	m.State = newState
+	buildFunc()
+	m.restorePosition(newState)
+	// Ensure selection is valid after rebuild
+	if m.SelectedIndex >= len(m.Items) {
+		m.SelectedIndex = 0
+	}
+	// Skip to first navigable item if current is not navigable
+	if !m.isNavigable(m.SelectedIndex) {
+		for i := 0; i < len(m.Items); i++ {
+			if m.isNavigable(i) {
+				m.SelectedIndex = i
+				break
+			}
+		}
+	}
+	m.adjustScroll()
 }
 
 // Open opens the menu
@@ -184,22 +244,6 @@ func (m *Menu) buildMainMenu() {
 		promptStyle = "full"
 	}
 
-	sourceRC := "OFF"
-	if m.Config.Shell.SourceRC {
-		sourceRC = "ON"
-	}
-	webSearch := "OFF"
-	if m.Config.WebSearch.Enabled {
-		webSearch = "ON"
-	}
-	readerProxy := "OFF"
-	if m.Config.WebSearch.UseReaderProxy {
-		readerProxy = "ON"
-	}
-	ollamaChat := "OFF"
-	if m.Config.Ollama.Enabled {
-		ollamaChat = "ON"
-	}
 	ollamaURL := m.Config.Ollama.URL
 	if ollamaURL == "" {
 		ollamaURL = "(not set)"
@@ -209,27 +253,47 @@ func (m *Menu) buildMainMenu() {
 		ollamaModel = "(not set)"
 	}
 
+	// Get appearance values with defaults
+	cursorStyle := m.Config.Appearance.CursorStyle
+	if cursorStyle == "" {
+		cursorStyle = "block"
+	}
+	panelWidth := m.Config.Appearance.PanelWidthPercent
+	if panelWidth == 0 {
+		panelWidth = 35.0
+	}
+
 	m.Items = []MenuItem{
+		// Shell & Environment
+		{Label: "SHELL & ENVIRONMENT", IsHeader: true},
 		{Label: "Shell: " + currentShell},
-		{Label: "Source RC Files: " + sourceRC},
-		{Label: "Theme: " + themeLabel},
-		{Label: "Font Size: " + formatFloat(m.Config.FontSize)},
-		{Label: "Prompt Style: " + promptStyle},
-		{Label: "Prompt Options..."},
+		{Label: "Source RC Files", IsToggle: true, Toggled: m.Config.Shell.SourceRC},
 		{Label: "Scripts..."},
-		{Label: "Web Search: " + webSearch},
-		{Label: "Web Search Reader Proxy: " + readerProxy},
-		{Label: "Ollama Chat: " + ollamaChat},
-		{Label: "Ollama URL: " + truncate(ollamaURL, 30)},
-		{Label: "Ollama Model: " + truncate(ollamaModel, 30)},
-		{Label: "Ollama Test Connection"},
-		{Label: "Ollama Refresh Models"},
-		{Label: "Ollama Models..."},
 		{Label: "Commands (" + itoa(len(m.Config.Commands)) + ")..."},
 		{Label: "Aliases (" + itoa(len(m.Config.Aliases)) + ")..."},
 		{Label: "Exports (" + itoa(len(m.Config.Exports)) + ")..."},
+		// Appearance
+		{Label: "APPEARANCE", IsHeader: true},
+		{Label: "Theme: " + themeLabel},
+		{Label: "Font Size: " + formatFloat(m.Config.FontSize)},
+		{Label: "Cursor Style: " + cursorStyle},
+		{Label: "Cursor Blink", IsToggle: true, Toggled: m.Config.Appearance.CursorBlink},
+		{Label: "Panel Width: " + formatFloat(panelWidth) + "%"},
+		{Label: "Prompt Style: " + promptStyle},
+		{Label: "Prompt Options..."},
+		// AI Features
+		{Label: "AI FEATURES", IsHeader: true},
+		{Label: "Web Search", IsToggle: true, Toggled: m.Config.WebSearch.Enabled},
+		{Label: "Reader Proxy", IsToggle: true, Toggled: m.Config.WebSearch.UseReaderProxy},
+		{Label: "Ollama Chat", IsToggle: true, Toggled: m.Config.Ollama.Enabled},
+		{Label: "Ollama URL: " + truncate(ollamaURL, 25)},
+		{Label: "Ollama Model: " + truncate(ollamaModel, 25)},
+		{Label: "Test Ollama Connection"},
+		{Label: "Refresh Ollama Models"},
+		{Label: "Ollama Models..."},
+		// Actions
+		{Label: "ACTIONS", IsHeader: true},
 		{Label: "Reload Config"},
-		{Label: ""},
 		{Label: "Save and Close"},
 		{Label: "Cancel"},
 	}
@@ -278,15 +342,34 @@ func (m *Menu) buildPromptStyleMenu() {
 	m.Items = append(m.Items, MenuItem{Label: "Back"})
 }
 
+// buildCursorStyleMenu builds the cursor style selection menu
+func (m *Menu) buildCursorStyleMenu() {
+	styles := []string{"block", "underline", "bar"}
+	currentStyle := m.Config.Appearance.CursorStyle
+	if currentStyle == "" {
+		currentStyle = "block"
+	}
+	m.Items = []MenuItem{}
+	for _, style := range styles {
+		prefix := "  "
+		if currentStyle == style {
+			prefix = "> "
+		}
+		m.Items = append(m.Items, MenuItem{Label: prefix + style, Value: style})
+	}
+	m.Items = append(m.Items, MenuItem{Label: ""})
+	m.Items = append(m.Items, MenuItem{Label: "Back"})
+}
+
 // buildPromptSettingsMenu builds the prompt settings menu
 func (m *Menu) buildPromptSettingsMenu() {
 	p := m.Config.Prompt
 	m.Items = []MenuItem{
-		{Label: "Show Path: " + boolStr(p.ShowPath)},
-		{Label: "Show Username: " + boolStr(p.ShowUsername)},
-		{Label: "Show Hostname: " + boolStr(p.ShowHostname)},
-		{Label: "Show Language: " + boolStr(p.ShowLanguage)},
-		{Label: "Show VCS: " + boolStr(p.ShowVCS)},
+		{Label: "Show Path", IsToggle: true, Toggled: p.ShowPath},
+		{Label: "Show Username", IsToggle: true, Toggled: p.ShowUsername},
+		{Label: "Show Hostname", IsToggle: true, Toggled: p.ShowHostname},
+		{Label: "Show Language", IsToggle: true, Toggled: p.ShowLanguage},
+		{Label: "Show VCS", IsToggle: true, Toggled: p.ShowVCS},
 		{Label: ""},
 		{Label: "Back"},
 	}
@@ -419,6 +502,38 @@ func (m *Menu) buildExportConfirmMenu() {
 	}
 }
 
+// buildDeleteConfirmMenu builds the delete confirmation menu
+func (m *Menu) buildDeleteConfirmMenu() {
+	var typeLabel, itemLabel string
+	switch m.DeleteType {
+	case "command":
+		typeLabel = "Command"
+		if m.DeleteIndex >= 0 && m.DeleteIndex < len(m.Config.Commands) {
+			cmd := m.Config.Commands[m.DeleteIndex]
+			itemLabel = cmd.Name + " = " + truncate(cmd.Command, 30)
+		}
+	case "alias":
+		typeLabel = "Alias"
+		if val, ok := m.Config.Aliases[m.DeleteTarget]; ok {
+			itemLabel = m.DeleteTarget + " = " + truncate(val, 30)
+		}
+	case "export":
+		typeLabel = "Export"
+		if val, ok := m.Config.Exports[m.DeleteTarget]; ok {
+			itemLabel = m.DeleteTarget + " = " + truncate(val, 30)
+		}
+	}
+
+	m.Items = []MenuItem{
+		{Label: "DELETE " + typeLabel + "?", IsHeader: true},
+		{Label: ""},
+		{Label: itemLabel, Disabled: true},
+		{Label: ""},
+		{Label: "Yes, Delete", Value: "delete"},
+		{Label: "Cancel", Value: "cancel"},
+	}
+}
+
 // MoveUp moves selection up
 func (m *Menu) MoveUp() {
 	if m.InputActive {
@@ -502,59 +617,78 @@ func (m *Menu) Select() {
 		m.handleAliasConfirmSelect()
 	case MenuConfirmExport:
 		m.handleExportConfirmSelect()
+	case MenuConfirmDelete:
+		m.handleDeleteConfirmSelect()
+	case MenuCursorStyle:
+		m.handleCursorStyleSelect(item)
 	}
 }
 
 func (m *Menu) handleMainSelect() {
+	// Menu indices after reorganization with category headers:
+	// 0: SHELL & ENVIRONMENT (header)
+	// 1: Shell, 2: Source RC, 3: Scripts, 4: Commands, 5: Aliases, 6: Exports
+	// 7: APPEARANCE (header)
+	// 8: Theme, 9: Font Size, 10: Cursor Style, 11: Cursor Blink, 12: Panel Width
+	// 13: Prompt Style, 14: Prompt Options
+	// 15: AI FEATURES (header)
+	// 16: Web Search, 17: Reader Proxy, 18: Ollama Chat, 19: Ollama URL, 20: Ollama Model
+	// 21: Test Ollama, 22: Refresh Models, 23: Ollama Models
+	// 24: ACTIONS (header)
+	// 25: Reload Config, 26: Save and Close, 27: Cancel
+
 	switch m.SelectedIndex {
-	case 0: // Shell
-		m.State = MenuShellSelect
-		m.SelectedIndex = 0
-		m.ScrollOffset = 0
-		m.buildShellMenu()
-	case 1: // Source RC
+	case 1: // Shell
+		m.navigateTo(MenuShellSelect, m.buildShellMenu)
+	case 2: // Source RC
 		m.Config.Shell.SourceRC = !m.Config.Shell.SourceRC
 		m.buildMainMenu()
 		m.StatusMessage = "Updated (restart tab to apply)"
-	case 2: // Theme
-		m.State = MenuThemeSelect
-		m.SelectedIndex = 0
-		m.ScrollOffset = 0
-		m.buildThemeMenu()
-	case 3: // Font Size
+	case 3: // Scripts
+		m.navigateTo(MenuScripts, m.buildScriptsMenu)
+	case 4: // Commands
+		m.navigateTo(MenuCommands, m.buildCommandsMenu)
+	case 5: // Aliases
+		m.navigateTo(MenuAliases, m.buildAliasesMenu)
+	case 6: // Exports
+		m.navigateTo(MenuExports, m.buildExportsMenu)
+	case 8: // Theme
+		m.navigateTo(MenuThemeSelect, m.buildThemeMenu)
+	case 9: // Font Size
 		m.startInputWithValue(InputFontSize, "Font size (8-32):", formatFloat(m.Config.FontSize))
-	case 4: // Prompt Style
-		m.State = MenuPromptStyle
-		m.SelectedIndex = 0
-		m.ScrollOffset = 0
-		m.buildPromptStyleMenu()
-	case 5: // Prompt Options
-		m.State = MenuPromptSettings
-		m.SelectedIndex = 0
-		m.ScrollOffset = 0
-		m.buildPromptSettingsMenu()
-	case 6: // Scripts
-		m.State = MenuScripts
-		m.SelectedIndex = 0
-		m.ScrollOffset = 0
-		m.buildScriptsMenu()
-	case 7: // Web Search
+	case 10: // Cursor Style
+		m.navigateTo(MenuCursorStyle, m.buildCursorStyleMenu)
+	case 11: // Cursor Blink
+		m.Config.Appearance.CursorBlink = !m.Config.Appearance.CursorBlink
+		m.buildMainMenu()
+		m.StatusMessage = "Updated (save to persist)"
+	case 12: // Panel Width
+		pw := m.Config.Appearance.PanelWidthPercent
+		if pw == 0 {
+			pw = 35.0
+		}
+		m.startInputWithValue(InputPanelWidth, "Panel width (25-50%):", formatFloat(pw))
+	case 13: // Prompt Style
+		m.navigateTo(MenuPromptStyle, m.buildPromptStyleMenu)
+	case 14: // Prompt Options
+		m.navigateTo(MenuPromptSettings, m.buildPromptSettingsMenu)
+	case 16: // Web Search
 		m.Config.WebSearch.Enabled = !m.Config.WebSearch.Enabled
 		m.buildMainMenu()
 		m.StatusMessage = "Updated (save to persist)"
-	case 8: // Web Search Reader Proxy
+	case 17: // Reader Proxy
 		m.Config.WebSearch.UseReaderProxy = !m.Config.WebSearch.UseReaderProxy
 		m.buildMainMenu()
 		m.StatusMessage = "Updated (save to persist)"
-	case 9: // Ollama Chat
+	case 18: // Ollama Chat
 		m.Config.Ollama.Enabled = !m.Config.Ollama.Enabled
 		m.buildMainMenu()
 		m.StatusMessage = "Updated (save to persist)"
-	case 10: // Ollama URL
+	case 19: // Ollama URL
 		m.startInputWithValue(InputOllamaURL, "Ollama base URL:", m.Config.Ollama.URL)
-	case 11: // Ollama Model
+	case 20: // Ollama Model
 		m.startInputWithValue(InputOllamaModel, "Ollama model name:", m.Config.Ollama.Model)
-	case 12: // Ollama Test Connection
+	case 21: // Test Ollama Connection
 		if m.OnOllamaTest == nil {
 			m.StatusMessage = "Ollama test unavailable"
 			return
@@ -564,7 +698,7 @@ func (m *Menu) handleMainSelect() {
 			return
 		}
 		m.StatusMessage = "Ollama connection OK"
-	case 13: // Ollama Refresh Models
+	case 22: // Refresh Ollama Models
 		if m.OnOllamaFetchModels == nil {
 			m.StatusMessage = "Ollama fetch unavailable"
 			return
@@ -580,27 +714,9 @@ func (m *Menu) handleMainSelect() {
 			return
 		}
 		m.StatusMessage = "Models loaded (" + itoa(len(models)) + ")"
-	case 14: // Ollama Models
-		m.State = MenuOllamaModels
-		m.SelectedIndex = 0
-		m.ScrollOffset = 0
-		m.buildOllamaModelsMenu()
-	case 15: // Commands
-		m.State = MenuCommands
-		m.SelectedIndex = 0
-		m.ScrollOffset = 0
-		m.buildCommandsMenu()
-	case 16: // Aliases
-		m.State = MenuAliases
-		m.SelectedIndex = 0
-		m.ScrollOffset = 0
-		m.buildAliasesMenu()
-	case 17: // Exports
-		m.State = MenuExports
-		m.SelectedIndex = 0
-		m.ScrollOffset = 0
-		m.buildExportsMenu()
-	case 18: // Reload Config
+	case 23: // Ollama Models
+		m.navigateTo(MenuOllamaModels, m.buildOllamaModelsMenu)
+	case 25: // Reload Config
 		cfg, err := config.Load()
 		if err != nil {
 			m.StatusMessage = "Failed to reload config"
@@ -621,7 +737,7 @@ func (m *Menu) handleMainSelect() {
 		if m.StatusMessage == "" {
 			m.StatusMessage = "Config reloaded"
 		}
-	case 20: // Save and Close
+	case 26: // Save and Close
 		if !m.saveConfigWithInitScript("Saved") {
 			m.buildMainMenu()
 			return
@@ -634,7 +750,7 @@ func (m *Menu) handleMainSelect() {
 			}
 		}
 		m.Close()
-	case 21: // Cancel
+	case 27: // Cancel
 		m.Config, _ = config.Load()
 		m.Close()
 	}
@@ -670,6 +786,18 @@ func (m *Menu) handlePromptStyleSelect(item MenuItem) {
 	if item.Value != "" {
 		m.Config.Prompt.Style = item.Value
 		m.StatusMessage = "Style updated (restart tab to apply)"
+	}
+	m.goBack()
+}
+
+func (m *Menu) handleCursorStyleSelect(item MenuItem) {
+	if item.Label == "Back" {
+		m.goBack()
+		return
+	}
+	if item.Value != "" {
+		m.Config.Appearance.CursorStyle = item.Value
+		m.StatusMessage = "Cursor style updated (save to persist)"
 	}
 	m.goBack()
 }
@@ -969,6 +1097,24 @@ func (m *Menu) HandleEnter() bool {
 		m.Config.FontSize = float32(parsed)
 		m.StatusMessage = "Font size updated (save to persist)"
 		m.buildMainMenu()
+
+	case InputPanelWidth:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 32)
+		if err != nil {
+			m.StatusMessage = "Invalid panel width"
+			m.buildMainMenu()
+			break
+		}
+		// Clamp to valid range
+		pw := float32(parsed)
+		if pw < 25 {
+			pw = 25
+		} else if pw > 50 {
+			pw = 50
+		}
+		m.Config.Appearance.PanelWidthPercent = pw
+		m.StatusMessage = "Panel width updated (save to persist)"
+		m.buildMainMenu()
 	}
 
 	if !m.InputActive {
@@ -1011,72 +1157,123 @@ func (m *Menu) HandleDelete() {
 	case MenuCommands:
 		if m.SelectedIndex > 0 && m.SelectedIndex <= len(m.Config.Commands) {
 			idx := m.SelectedIndex - 1 // Offset for "Add New" item
-			m.Config.RemoveCustomCommand(idx)
-			if m.saveConfig() {
-				m.StatusMessage = "Command deleted"
-			}
-			m.buildCommandsMenu()
-			if m.SelectedIndex >= len(m.Items) {
-				m.SelectedIndex = len(m.Items) - 1
-			}
+			m.DeleteType = "command"
+			m.DeleteIndex = idx
+			m.DeleteTarget = ""
+			m.savePosition()
+			m.State = MenuConfirmDelete
+			m.buildDeleteConfirmMenu()
+			m.SelectedIndex = m.firstSelectableIndex()
+			m.ScrollOffset = 0
 		}
 	case MenuAliases:
 		if m.SelectedIndex > 0 {
 			item := m.Items[m.SelectedIndex]
 			if item.Value != "" {
-				m.Config.RemoveAlias(item.Value)
-				_ = m.saveConfigWithInitScript("Alias deleted")
-				m.buildAliasesMenu()
-				if m.SelectedIndex >= len(m.Items) {
-					m.SelectedIndex = len(m.Items) - 1
-				}
+				m.DeleteType = "alias"
+				m.DeleteTarget = item.Value
+				m.DeleteIndex = -1
+				m.savePosition()
+				m.State = MenuConfirmDelete
+				m.buildDeleteConfirmMenu()
+				m.SelectedIndex = m.firstSelectableIndex()
+				m.ScrollOffset = 0
 			}
 		}
 	case MenuExports:
 		if m.SelectedIndex > 0 {
 			item := m.Items[m.SelectedIndex]
 			if item.Value != "" {
-				m.Config.RemoveExport(item.Value)
-				_ = m.saveConfigWithInitScript("Export deleted")
-				m.buildExportsMenu()
-				if m.SelectedIndex >= len(m.Items) {
-					m.SelectedIndex = len(m.Items) - 1
-				}
+				m.DeleteType = "export"
+				m.DeleteTarget = item.Value
+				m.DeleteIndex = -1
+				m.savePosition()
+				m.State = MenuConfirmDelete
+				m.buildDeleteConfirmMenu()
+				m.SelectedIndex = m.firstSelectableIndex()
+				m.ScrollOffset = 0
 			}
 		}
 	}
 }
 
+// handleDeleteConfirmSelect handles selection in delete confirmation menu
+func (m *Menu) handleDeleteConfirmSelect() {
+	item := m.Items[m.SelectedIndex]
+	switch item.Value {
+	case "delete":
+		// Actually perform the delete
+		switch m.DeleteType {
+		case "command":
+			m.Config.RemoveCustomCommand(m.DeleteIndex)
+			if m.saveConfig() {
+				m.StatusMessage = "Command deleted"
+			}
+			m.navigateTo(MenuCommands, m.buildCommandsMenu)
+		case "alias":
+			m.Config.RemoveAlias(m.DeleteTarget)
+			_ = m.saveConfigWithInitScript("Alias deleted")
+			m.navigateTo(MenuAliases, m.buildAliasesMenu)
+		case "export":
+			m.Config.RemoveExport(m.DeleteTarget)
+			_ = m.saveConfigWithInitScript("Export deleted")
+			m.navigateTo(MenuExports, m.buildExportsMenu)
+		}
+		// Adjust selection if needed
+		if m.SelectedIndex >= len(m.Items) {
+			m.SelectedIndex = len(m.Items) - 1
+		}
+	case "cancel":
+		// Go back without deleting
+		switch m.DeleteType {
+		case "command":
+			m.navigateTo(MenuCommands, m.buildCommandsMenu)
+		case "alias":
+			m.navigateTo(MenuAliases, m.buildAliasesMenu)
+		case "export":
+			m.navigateTo(MenuExports, m.buildExportsMenu)
+		}
+	}
+	// Clear delete tracking
+	m.DeleteType = ""
+	m.DeleteTarget = ""
+	m.DeleteIndex = -1
+}
+
 // goBack goes back to previous menu
 func (m *Menu) goBack() {
 	switch m.State {
-	case MenuShellSelect, MenuThemeSelect, MenuPromptStyle, MenuPromptSettings, MenuScripts, MenuOllamaModels, MenuCommands, MenuAliases, MenuExports:
-		m.State = MenuMain
-		m.SelectedIndex = 0
-		m.ScrollOffset = 0
-		m.buildMainMenu()
+	case MenuShellSelect, MenuThemeSelect, MenuPromptStyle, MenuPromptSettings, MenuScripts, MenuOllamaModels, MenuCommands, MenuAliases, MenuExports, MenuCursorStyle:
+		m.navigateTo(MenuMain, m.buildMainMenu)
 		m.debugf("go back to main")
 	case MenuConfirmCommand:
 		m.clearPendingCommand()
-		m.State = MenuCommands
-		m.SelectedIndex = 0
-		m.ScrollOffset = 0
-		m.buildCommandsMenu()
+		m.navigateTo(MenuCommands, m.buildCommandsMenu)
 		m.debugf("go back to commands")
 	case MenuConfirmAlias:
 		m.clearPendingAlias()
-		m.State = MenuAliases
-		m.SelectedIndex = 0
-		m.ScrollOffset = 0
-		m.buildAliasesMenu()
+		m.navigateTo(MenuAliases, m.buildAliasesMenu)
 		m.debugf("go back to aliases")
 	case MenuConfirmExport:
 		m.clearPendingExport()
-		m.State = MenuExports
-		m.SelectedIndex = 0
-		m.ScrollOffset = 0
-		m.buildExportsMenu()
+		m.navigateTo(MenuExports, m.buildExportsMenu)
 		m.debugf("go back to exports")
+	case MenuConfirmDelete:
+		// Go back to the appropriate menu based on delete type
+		switch m.DeleteType {
+		case "command":
+			m.navigateTo(MenuCommands, m.buildCommandsMenu)
+		case "alias":
+			m.navigateTo(MenuAliases, m.buildAliasesMenu)
+		case "export":
+			m.navigateTo(MenuExports, m.buildExportsMenu)
+		default:
+			m.navigateTo(MenuMain, m.buildMainMenu)
+		}
+		m.DeleteType = ""
+		m.DeleteTarget = ""
+		m.DeleteIndex = -1
+		m.debugf("go back from delete confirm")
 	default:
 		m.Close()
 	}
@@ -1111,6 +1308,10 @@ func (m *Menu) GetTitle() string {
 		return "Confirm Alias"
 	case MenuConfirmExport:
 		return "Confirm Export"
+	case MenuConfirmDelete:
+		return "Confirm Delete"
+	case MenuCursorStyle:
+		return "Cursor Style"
 	default:
 		return "Settings"
 	}
@@ -1135,16 +1336,10 @@ func (m *Menu) handleCommandConfirmSelect() {
 			}
 		}
 		m.clearPendingCommand()
-		m.State = MenuCommands
-		m.SelectedIndex = 0
-		m.ScrollOffset = 0
-		m.buildCommandsMenu()
+		m.navigateTo(MenuCommands, m.buildCommandsMenu)
 	case "cancel":
 		m.clearPendingCommand()
-		m.State = MenuCommands
-		m.SelectedIndex = 0
-		m.ScrollOffset = 0
-		m.buildCommandsMenu()
+		m.navigateTo(MenuCommands, m.buildCommandsMenu)
 	}
 }
 
@@ -1159,16 +1354,10 @@ func (m *Menu) handleAliasConfirmSelect() {
 		m.Config.SetAlias(m.PendingName, m.PendingAliasCmd)
 		_ = m.saveConfigWithInitScript("Alias saved")
 		m.clearPendingAlias()
-		m.State = MenuAliases
-		m.SelectedIndex = 0
-		m.ScrollOffset = 0
-		m.buildAliasesMenu()
+		m.navigateTo(MenuAliases, m.buildAliasesMenu)
 	case "cancel":
 		m.clearPendingAlias()
-		m.State = MenuAliases
-		m.SelectedIndex = 0
-		m.ScrollOffset = 0
-		m.buildAliasesMenu()
+		m.navigateTo(MenuAliases, m.buildAliasesMenu)
 	}
 }
 
@@ -1183,16 +1372,10 @@ func (m *Menu) handleExportConfirmSelect() {
 		m.Config.SetExport(m.PendingName, m.PendingExport)
 		_ = m.saveConfigWithInitScript("Export saved")
 		m.clearPendingExport()
-		m.State = MenuExports
-		m.SelectedIndex = 0
-		m.ScrollOffset = 0
-		m.buildExportsMenu()
+		m.navigateTo(MenuExports, m.buildExportsMenu)
 	case "cancel":
 		m.clearPendingExport()
-		m.State = MenuExports
-		m.SelectedIndex = 0
-		m.ScrollOffset = 0
-		m.buildExportsMenu()
+		m.navigateTo(MenuExports, m.buildExportsMenu)
 	}
 }
 
@@ -1253,7 +1436,7 @@ func (m *Menu) isSelectable(index int) bool {
 		return false
 	}
 	item := m.Items[index]
-	return item.Label != "" && !item.Disabled
+	return item.Label != "" && !item.Disabled && !item.IsHeader
 }
 
 func (m *Menu) isNavigable(index int) bool {
@@ -1261,7 +1444,8 @@ func (m *Menu) isNavigable(index int) bool {
 		return false
 	}
 	item := m.Items[index]
-	return item.Label != ""
+	// Headers are not navigable - skip them when moving cursor
+	return item.Label != "" && !item.IsHeader
 }
 
 func (m *Menu) firstSelectableIndex() int {
@@ -1310,6 +1494,10 @@ func (m *Menu) stateName() string {
 		return "confirm_alias"
 	case MenuConfirmExport:
 		return "confirm_export"
+	case MenuConfirmDelete:
+		return "confirm_delete"
+	case MenuCursorStyle:
+		return "cursor_style"
 	default:
 		return "unknown"
 	}
@@ -1347,6 +1535,8 @@ func (m *Menu) inputStateName() string {
 		return "ollama_model"
 	case InputFontSize:
 		return "font_size"
+	case InputPanelWidth:
+		return "panel_width"
 	default:
 		return "unknown"
 	}

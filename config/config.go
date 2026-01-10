@@ -64,18 +64,26 @@ type CustomCommand struct {
 	Description string `toml:"description"`
 }
 
+// AppearanceConfig holds visual settings
+type AppearanceConfig struct {
+	CursorStyle      string  `toml:"cursor_style"`       // "block", "underline", "bar"
+	CursorBlink      bool    `toml:"cursor_blink"`       // Whether cursor blinks
+	PanelWidthPercent float32 `toml:"panel_width_percent"` // Width of side panels (25-50)
+}
+
 // Config holds the terminal configuration
 type Config struct {
-	Shell     ShellConfig       `toml:"shell"`
-	Prompt    PromptConfig      `toml:"prompt"`
-	Scripts   ScriptsConfig     `toml:"scripts"`
-	WebSearch WebSearchConfig   `toml:"web_search"`
-	Ollama    OllamaConfig      `toml:"ollama"`
-	Commands  []CustomCommand   `toml:"commands"`
-	Aliases   map[string]string `toml:"aliases"`
-	Exports   map[string]string `toml:"exports"`
-	Theme     string            `toml:"theme"`
-	FontSize  float32           `toml:"font_size"`
+	Shell      ShellConfig       `toml:"shell"`
+	Prompt     PromptConfig      `toml:"prompt"`
+	Scripts    ScriptsConfig     `toml:"scripts"`
+	WebSearch  WebSearchConfig   `toml:"web_search"`
+	Ollama     OllamaConfig      `toml:"ollama"`
+	Appearance AppearanceConfig  `toml:"appearance"`
+	Commands   []CustomCommand   `toml:"commands"`
+	Aliases    map[string]string `toml:"aliases"`
+	Exports    map[string]string `toml:"exports"`
+	Theme      string            `toml:"theme"`
+	FontSize   float32           `toml:"font_size"`
 }
 
 const defaultVCSDetectLegacy = `# Detect VCS (Git + Ivaldi)
@@ -294,6 +302,11 @@ echo "None"
 			Enabled: false,
 			URL:     "http://localhost:11434",
 			Model:   "llama3",
+		},
+		Appearance: AppearanceConfig{
+			CursorStyle:       "block",
+			CursorBlink:       true,
+			PanelWidthPercent: 35.0,
 		},
 		Commands: []CustomCommand{},
 		Aliases: map[string]string{

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"strings"
@@ -12,6 +13,78 @@ import (
 
 	"golang.org/x/net/html"
 )
+
+// userAgents is a list of common user agents to rotate through
+var userAgents = []string{
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:121.0) Gecko/20100101 Firefox/121.0",
+	"Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0",
+}
+
+// getRandomUserAgent returns a random user agent string
+func getRandomUserAgent() string {
+	return userAgents[rand.Intn(len(userAgents))]
+}
+
+// retryConfig holds retry settings
+type retryConfig struct {
+	maxRetries int
+	baseDelay  time.Duration
+}
+
+var defaultRetryConfig = retryConfig{
+	maxRetries: 3,
+	baseDelay:  time.Second,
+}
+
+// doWithRetry executes an HTTP request with exponential backoff retry
+func doWithRetry(ctx context.Context, client *http.Client, req *http.Request) (*http.Response, error) {
+	var lastErr error
+	for attempt := 0; attempt < defaultRetryConfig.maxRetries; attempt++ {
+		if attempt > 0 {
+			// Exponential backoff: 1s, 2s, 4s
+			delay := defaultRetryConfig.baseDelay * time.Duration(1<<uint(attempt-1))
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(delay):
+			}
+			// Clone request for retry with new user agent
+			newReq, err := http.NewRequestWithContext(ctx, req.Method, req.URL.String(), nil)
+			if err != nil {
+				return nil, err
+			}
+			for k, v := range req.Header {
+				newReq.Header[k] = v
+			}
+			newReq.Header.Set("User-Agent", getRandomUserAgent())
+			req = newReq
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		// Retry on server errors (5xx) or rate limiting (429)
+		if resp.StatusCode >= 500 || resp.StatusCode == 429 {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("server returned %d", resp.StatusCode)
+			continue
+		}
+
+		return resp, nil
+	}
+
+	if lastErr != nil {
+		return nil, fmt.Errorf("request failed after %d retries: %w", defaultRetryConfig.maxRetries, lastErr)
+	}
+	return nil, errors.New("request failed: unknown error")
+}
 
 type Result struct {
 	Title   string
@@ -33,16 +106,18 @@ func SearchDuckDuckGo(ctx context.Context, query string, maxResults int) ([]Resu
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "RavenTerminal/1.0")
+	req.Header.Set("User-Agent", getRandomUserAgent())
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
 
-	client := &http.Client{Timeout: 8 * time.Second}
-	resp, err := client.Do(req)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := doWithRetry(ctx, client, req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("search request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, errors.New("search failed")
+		return nil, fmt.Errorf("search failed: server returned %d", resp.StatusCode)
 	}
 
 	doc, err := html.Parse(resp.Body)
@@ -93,6 +168,8 @@ func FetchText(ctx context.Context, pageURL string, maxChars int, useReaderProxy
 	}
 
 	var proxyErr string
+
+	// Try reader proxy first if enabled - it handles JS-rendered pages better
 	if useReaderProxy {
 		lines, err := fetchViaReaderProxy(ctx, pageURL, maxChars, proxyURLs)
 		if err == nil && len(lines) > 0 && !isEmptyReaderLines(lines) {
@@ -103,24 +180,58 @@ func FetchText(ctx context.Context, pageURL string, maxChars int, useReaderProxy
 		}
 	}
 
+	// Create client that follows redirects
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("too many redirects")
+			}
+			// Update user agent on redirect
+			req.Header.Set("User-Agent", getRandomUserAgent())
+			return nil
+		},
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
 	if err != nil {
 		return nil, "html", proxyErr, err
 	}
-	req.Header.Set("User-Agent", "RavenTerminal/1.0")
+	req.Header.Set("User-Agent", getRandomUserAgent())
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
+	req.Header.Set("Accept-Encoding", "identity") // Avoid compression issues
+	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := doWithRetry(ctx, client, req)
 	if err != nil {
-		return nil, "html", proxyErr, err
+		// If direct fetch fails and we haven't tried proxy yet, try it now
+		if !useReaderProxy {
+			lines, proxyErr2 := fetchViaReaderProxy(ctx, pageURL, maxChars, proxyURLs)
+			if proxyErr2 == nil && len(lines) > 0 && !isEmptyReaderLines(lines) {
+				return lines, "proxy", "", nil
+			}
+		}
+		return nil, "html", proxyErr, fmt.Errorf("fetch failed: %w", err)
 	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, "html", proxyErr, errors.New("preview failed")
+		// Try proxy as fallback on HTTP errors
+		if !useReaderProxy {
+			lines, _ := fetchViaReaderProxy(ctx, pageURL, maxChars, proxyURLs)
+			if len(lines) > 0 && !isEmptyReaderLines(lines) {
+				return lines, "proxy", "", nil
+			}
+		}
+		return nil, "html", proxyErr, fmt.Errorf("preview failed: server returned %d", resp.StatusCode)
 	}
 
 	limitReader := io.LimitReader(resp.Body, int64(maxChars*20))
 	contentType := resp.Header.Get("Content-Type")
+
+	// Handle plain text
 	if strings.Contains(contentType, "text/plain") {
 		body, err := io.ReadAll(limitReader)
 		if err != nil {
@@ -129,49 +240,131 @@ func FetchText(ctx context.Context, pageURL string, maxChars int, useReaderProxy
 		return splitLines(trimText(string(body), maxChars)), "html", proxyErr, nil
 	}
 
+	// Handle JSON (API responses)
+	if strings.Contains(contentType, "application/json") {
+		body, err := io.ReadAll(limitReader)
+		if err != nil {
+			return nil, "html", proxyErr, err
+		}
+		// Pretty format JSON for readability
+		text := string(body)
+		text = strings.ReplaceAll(text, ",", ",\n")
+		text = strings.ReplaceAll(text, "{", "{\n")
+		text = strings.ReplaceAll(text, "}", "\n}")
+		return splitLines(trimText(text, maxChars)), "json", proxyErr, nil
+	}
+
 	doc, err := html.Parse(limitReader)
 	if err != nil {
 		return nil, "html", proxyErr, err
 	}
 
-	text := extractText(doc, maxChars)
+	// Try to find main content first (article, main tags)
+	text := extractMainContent(doc, maxChars)
 	if strings.TrimSpace(text) == "" {
-		if useReaderProxy {
-			lines, err := fetchViaReaderProxy(ctx, pageURL, maxChars, proxyURLs)
-			if err == nil && len(lines) > 0 && !isEmptyReaderLines(lines) {
-				return lines, "proxy", "", nil
-			}
-			if err != nil {
-				proxyErr = err.Error()
-			}
+		// Fall back to full text extraction
+		text = extractText(doc, maxChars)
+	}
+
+	if strings.TrimSpace(text) == "" {
+		// Try proxy as last resort for JS-rendered pages
+		proxyLines, proxyErr2 := fetchViaReaderProxy(ctx, pageURL, maxChars, proxyURLs)
+		if proxyErr2 == nil && len(proxyLines) > 0 && !isEmptyReaderLines(proxyLines) {
+			return proxyLines, "proxy", "", nil
 		}
+		if proxyErr2 != nil && proxyErr == "" {
+			proxyErr = proxyErr2.Error()
+		}
+
 		title, desc := extractMeta(doc)
-		lines := []string{
+		fallbackLines := []string{
 			"(no readable text found; page may be JS-rendered)",
 		}
 		if title != "" {
-			lines = append(lines, "Title: "+title)
+			fallbackLines = append(fallbackLines, "Title: "+title)
 		}
 		if desc != "" {
-			lines = append(lines, "Description: "+desc)
+			fallbackLines = append(fallbackLines, "Description: "+desc)
 		}
-		return lines, "html", proxyErr, nil
+		return fallbackLines, "html", proxyErr, nil
 	}
 	return splitLines(text), "html", proxyErr, nil
 }
 
-func extractText(doc *html.Node, maxChars int) string {
+// extractMainContent tries to find and extract content from main/article elements
+func extractMainContent(doc *html.Node, maxChars int) string {
+	// Look for article or main content areas
+	var mainNode *html.Node
+	var findMain func(*html.Node)
+	findMain = func(n *html.Node) {
+		if mainNode != nil {
+			return
+		}
+		if n.Type == html.ElementNode {
+			// Priority: article > main > [role="main"] > .content/.post/.entry
+			if n.Data == "article" || n.Data == "main" {
+				mainNode = n
+				return
+			}
+			// Check for role="main" or common content classes
+			for _, a := range n.Attr {
+				if a.Key == "role" && a.Val == "main" {
+					mainNode = n
+					return
+				}
+				if a.Key == "class" || a.Key == "id" {
+					lower := strings.ToLower(a.Val)
+					if strings.Contains(lower, "article") ||
+						strings.Contains(lower, "post-content") ||
+						strings.Contains(lower, "entry-content") ||
+						strings.Contains(lower, "main-content") {
+						mainNode = n
+						return
+					}
+				}
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			findMain(c)
+		}
+	}
+	findMain(doc)
+
+	if mainNode == nil {
+		return ""
+	}
+
+	// Extract text from the main content node only
 	var sb strings.Builder
-	var walk func(*html.Node, bool)
-	walk = func(n *html.Node, inPre bool) {
+	var walk func(*html.Node, bool, int)
+	walk = func(n *html.Node, inPre bool, depth int) {
 		if n.Type == html.ElementNode {
 			switch n.Data {
-			case "script", "style", "noscript", "svg", "img", "video", "audio", "canvas":
+			case "script", "style", "noscript", "svg", "img", "video", "audio", "canvas", "iframe", "nav", "aside":
 				return
+			case "footer", "header":
+				if depth < 2 {
+					return
+				}
 			case "br":
 				sb.WriteString("\n")
-			case "p", "div", "section", "article", "header", "footer", "li", "ul", "ol", "pre", "code",
-				"h1", "h2", "h3", "h4", "h5", "h6", "table", "tr":
+			case "pre":
+				sb.WriteString("\n```\n")
+				for c := n.FirstChild; c != nil; c = c.NextSibling {
+					walk(c, true, depth+1)
+				}
+				sb.WriteString("\n```\n")
+				return
+			case "code":
+				if !inPre {
+					sb.WriteString("`")
+					for c := n.FirstChild; c != nil; c = c.NextSibling {
+						walk(c, true, depth+1)
+					}
+					sb.WriteString("`")
+					return
+				}
+			case "p", "div", "section", "li", "ul", "ol", "h1", "h2", "h3", "h4", "h5", "h6", "table", "tr", "blockquote":
 				sb.WriteString("\n")
 			}
 		}
@@ -190,14 +383,87 @@ func extractText(doc *html.Node, maxChars int) string {
 		}
 
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			nextInPre := inPre || (n.Type == html.ElementNode && (n.Data == "pre" || n.Data == "code"))
-			walk(c, nextInPre)
+			walk(c, inPre, depth+1)
 			if sb.Len() >= maxChars {
 				return
 			}
 		}
 	}
-	walk(doc, false)
+	walk(mainNode, false, 0)
+
+	return trimText(sb.String(), maxChars)
+}
+
+func extractText(doc *html.Node, maxChars int) string {
+	var sb strings.Builder
+	var walk func(*html.Node, bool, int)
+	walk = func(n *html.Node, inPre bool, depth int) {
+		if n.Type == html.ElementNode {
+			switch n.Data {
+			// Skip elements that don't contain useful content
+			case "script", "style", "noscript", "svg", "img", "video", "audio", "canvas", "iframe":
+				return
+			// Skip navigation and boilerplate elements (but only at top levels)
+			case "nav", "aside":
+				return
+			// Skip footer if it looks like site footer (not article footer)
+			case "footer":
+				if depth < 4 {
+					return
+				}
+			// Skip header if it looks like site header (not article header)
+			case "header":
+				if depth < 3 {
+					return
+				}
+			case "br":
+				sb.WriteString("\n")
+			// Code blocks get special markers
+			case "pre":
+				sb.WriteString("\n```\n")
+				for c := n.FirstChild; c != nil; c = c.NextSibling {
+					walk(c, true, depth+1)
+				}
+				sb.WriteString("\n```\n")
+				return
+			case "code":
+				if !inPre {
+					// Inline code
+					sb.WriteString("`")
+					for c := n.FirstChild; c != nil; c = c.NextSibling {
+						walk(c, true, depth+1)
+					}
+					sb.WriteString("`")
+					return
+				}
+			// Block elements get newlines
+			case "p", "div", "section", "article", "li", "ul", "ol",
+				"h1", "h2", "h3", "h4", "h5", "h6", "table", "tr", "blockquote":
+				sb.WriteString("\n")
+			}
+		}
+
+		if n.Type == html.TextNode {
+			text := n.Data
+			if !inPre {
+				text = strings.TrimSpace(text)
+			}
+			if text != "" {
+				sb.WriteString(text)
+				if !strings.HasSuffix(text, "\n") {
+					sb.WriteString(" ")
+				}
+			}
+		}
+
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c, inPre, depth+1)
+			if sb.Len() >= maxChars {
+				return
+			}
+		}
+	}
+	walk(doc, false, 0)
 
 	return trimText(sb.String(), maxChars)
 }
@@ -328,10 +594,14 @@ func fetchViaReaderProxy(ctx context.Context, pageURL string, maxChars int, prox
 	normalizedURL := normalizeReaderURL(pageURL)
 	proxies := proxyURLs
 	if len(proxies) == 0 {
-		proxies = []string{"https://r.jina.ai/"}
+		// Default reader proxies - jina.ai is most reliable
+		proxies = []string{
+			"https://r.jina.ai/",
+			"https://web.scraper.workers.dev/?url={url}&selector=body",
+		}
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: 15 * time.Second}
 	var lastErr error
 
 	for _, base := range proxies {
@@ -341,12 +611,13 @@ func fetchViaReaderProxy(ctx context.Context, pageURL string, maxChars int, prox
 			lastErr = fmt.Errorf("failed to create request for %s: %w", readerURL, err)
 			continue
 		}
-		req.Header.Set("User-Agent", "RavenTerminal/1.0")
-		req.Header.Set("Accept", "text/plain")
+		req.Header.Set("User-Agent", getRandomUserAgent())
+		req.Header.Set("Accept", "text/plain,text/html;q=0.9,*/*;q=0.8")
+		req.Header.Set("Accept-Language", "en-US,en;q=0.5")
 
-		resp, err := client.Do(req)
+		resp, err := doWithRetry(ctx, client, req)
 		if err != nil {
-			lastErr = err
+			lastErr = fmt.Errorf("proxy request failed: %w", err)
 			continue
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {

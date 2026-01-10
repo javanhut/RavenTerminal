@@ -507,8 +507,13 @@ func (r *Renderer) renderSearchPanel(panel *searchpanel.Panel, width, height int
 	r.drawText(layout.ContentX+8, layout.InputBoxY+layout.LineHeight*0.75, inputText+"_", r.theme.TabActive, proj)
 
 	status := panel.Status
-	if status == "" && panel.Loading {
-		status = "Loading..."
+	if panel.Loading {
+		spinner := panel.SpinnerFrame()
+		if status == "" || status == "Searching..." || status == "Loading preview..." {
+			status = spinner + " Loading..."
+		} else {
+			status = spinner + " " + status
+		}
 	}
 	if status != "" {
 		if len(status) > maxChars {
@@ -523,19 +528,14 @@ func (r *Renderer) renderSearchPanel(panel *searchpanel.Panel, width, height int
 		r.renderSearchResults(panel, layout, maxChars, proj)
 	}
 
-	footerText := "Enter: search/open | Esc: close | Up/Down: navigate | PgUp/PgDn: scroll"
+	footerText := "Enter: search | Up/Down: history | Ctrl+O: open in browser"
 	proxyState := "Proxy: off"
 	if panel.ProxyEnabled {
 		proxyState = "Proxy: on"
 	}
-	focusState := "Focus: terminal"
-	if panel.Focused {
-		focusState = "Focus: panel"
-	}
-	footerText = footerText + " | " + proxyState + " (Ctrl+Shift+R) | " + focusState + " (Ctrl+Shift+[ or ])"
+	footerText = footerText + " | " + proxyState
 	if panel.Mode == searchpanel.ModePreview {
-		footerText = "Esc/Left: back | Up/Down: scroll | PgUp/PgDn: page"
-		footerText = footerText + " | " + proxyState + " (Ctrl+Shift+R) | " + focusState + " (Ctrl+Shift+[ or ])"
+		footerText = "Esc: back | Ctrl+O: open | " + proxyState
 	}
 	if len(footerText) > maxChars {
 		footerText = footerText[:maxChars-3] + "..."
@@ -564,8 +564,13 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 	r.drawText(layout.ContentX, layout.HeaderY, "AI Chat", r.theme.TabActive, proj)
 
 	status := panel.Status
-	if status == "" && panel.Loading {
-		status = "Thinking..."
+	if panel.Loading {
+		spinner := panel.SpinnerFrame()
+		if status == "" || status == "Thinking..." || status == "Loading model..." {
+			status = spinner + " Thinking..."
+		} else {
+			status = spinner + " " + status
+		}
 	}
 	if status != "" {
 		if len(status) > maxChars {
@@ -610,20 +615,31 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 
 		startLine := panel.Scroll
 		lineY := layout.MessagesStart
+		codeColor := [4]float32{0.7, 0.8, 0.6, 1.0}   // Greenish for code
+		headerColor := [4]float32{0.9, 0.7, 0.4, 1.0} // Orange/gold for headers
+		bulletColor := [4]float32{0.7, 0.7, 0.9, 1.0} // Light blue for bullets
 		for i := 0; i < visibleLines && startLine+i < totalLines; i++ {
 			line := lines[startLine+i]
 			if strings.TrimSpace(line.Text) != "" {
 				color := r.theme.Foreground
-				switch line.Role {
-				case "user":
-					color = r.theme.TabActive
-				case "assistant":
-					color = r.theme.Foreground
-				case "error":
-					color = [4]float32{0.9, 0.3, 0.3, 1.0} // Red for errors
-				default:
-					if line.Role != "" {
-						color = r.theme.Cursor
+				if line.InCode {
+					color = codeColor
+				} else if line.IsHeader {
+					color = headerColor
+				} else if line.IsBullet {
+					color = bulletColor
+				} else {
+					switch line.Role {
+					case "user":
+						color = r.theme.TabActive
+					case "assistant":
+						color = r.theme.Foreground
+					case "error":
+						color = [4]float32{0.9, 0.3, 0.3, 1.0} // Red for errors
+					default:
+						if line.Role != "" {
+							color = r.theme.Cursor
+						}
 					}
 				}
 				r.drawText(layout.ContentX, lineY, line.Text, color, proj)
@@ -632,12 +648,7 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 		}
 	}
 
-	footerText := "Enter: send | Esc: close | Up/Down: scroll | PgUp/PgDn: page | Ctrl+U: clear"
-	focusState := "Focus: terminal"
-	if panel.Focused {
-		focusState = "Focus: panel"
-	}
-	footerText = footerText + " | " + focusState + " (Ctrl+Shift+[ or ])"
+	footerText := "Enter: send | Up/Down: scroll | Ctrl+C: copy | Ctrl+U: clear"
 	if len(footerText) > maxChars {
 		footerText = footerText[:maxChars-3] + "..."
 	}
@@ -736,10 +747,29 @@ func buildWrappedPreview(lines []string, maxChars int, theme Theme) []styledLine
 	out := []styledLine{}
 	inCode := false
 
+	codeColor := [4]float32{0.7, 0.8, 0.6, 1.0}   // Greenish for code
+	headerColor := [4]float32{0.9, 0.7, 0.4, 1.0} // Orange/gold for headers
+	bulletColor := [4]float32{0.7, 0.7, 0.9, 1.0} // Light blue for bullets
+	quoteColor := [4]float32{0.6, 0.7, 0.6, 1.0}  // Muted green for quotes
+
 	for _, raw := range lines {
 		trimmed := strings.TrimSpace(raw)
+
+		// Toggle code block state
 		if strings.HasPrefix(trimmed, "```") {
 			inCode = !inCode
+			continue
+		}
+
+		// Skip empty lines but add spacing
+		if trimmed == "" {
+			out = append(out, styledLine{text: "", color: theme.Foreground})
+			continue
+		}
+
+		// Skip table separators
+		if strings.HasPrefix(trimmed, "|--") || strings.HasPrefix(trimmed, "| --") ||
+			strings.HasPrefix(trimmed, "|:") || strings.HasPrefix(trimmed, "| :") {
 			continue
 		}
 
@@ -749,8 +779,16 @@ func buildWrappedPreview(lines []string, maxChars int, theme Theme) []styledLine
 		text := trimmed
 
 		if inCode {
-			color = theme.Cursor
-		} else if strings.HasPrefix(text, "#") {
+			// Code block - preserve as-is
+			if len(text) > maxChars {
+				text = text[:maxChars-3] + "..."
+			}
+			out = append(out, styledLine{text: text, color: codeColor})
+			continue
+		}
+
+		// Handle headers
+		if strings.HasPrefix(text, "#") {
 			level := 0
 			for level < len(text) && text[level] == '#' {
 				level++
@@ -763,17 +801,77 @@ func buildWrappedPreview(lines []string, maxChars int, theme Theme) []styledLine
 				level = 3
 			}
 			prefix = strings.Repeat("=", level) + " "
-			color = theme.TabActive
-		} else if strings.HasPrefix(text, "- ") || strings.HasPrefix(text, "* ") || strings.HasPrefix(text, "+ ") {
-			prefix = text[:2]
-			text = strings.TrimSpace(text[2:])
-			indent = "  "
-		} else if strings.HasPrefix(text, "> ") {
-			prefix = "> "
-			text = strings.TrimSpace(text[2:])
-			indent = "  "
+			text = stripInlineMarkdown(text)
+			wrapped := wrapText(text, maxChars, prefix, "   ")
+			for _, line := range wrapped {
+				out = append(out, styledLine{text: line, color: headerColor})
+			}
+			continue
 		}
 
+		// Handle bullet points
+		if strings.HasPrefix(text, "- ") || strings.HasPrefix(text, "* ") || strings.HasPrefix(text, "+ ") {
+			prefix = "• "
+			text = strings.TrimSpace(text[2:])
+			indent = "  "
+			text = stripInlineMarkdown(text)
+			wrapped := wrapText(text, maxChars, prefix, indent)
+			for _, line := range wrapped {
+				out = append(out, styledLine{text: line, color: bulletColor})
+			}
+			continue
+		}
+
+		// Handle numbered lists
+		if len(text) > 2 && text[0] >= '0' && text[0] <= '9' {
+			dotIdx := strings.Index(text, ".")
+			if dotIdx > 0 && dotIdx < 4 {
+				prefix = text[:dotIdx+1] + " "
+				text = strings.TrimSpace(text[dotIdx+1:])
+				indent = strings.Repeat(" ", len(prefix))
+				text = stripInlineMarkdown(text)
+				wrapped := wrapText(text, maxChars, prefix, indent)
+				for _, line := range wrapped {
+					out = append(out, styledLine{text: line, color: bulletColor})
+				}
+				continue
+			}
+		}
+
+		// Handle blockquotes
+		if strings.HasPrefix(text, "> ") {
+			prefix = "│ "
+			text = strings.TrimSpace(text[2:])
+			indent = "  "
+			text = stripInlineMarkdown(text)
+			wrapped := wrapText(text, maxChars, prefix, indent)
+			for _, line := range wrapped {
+				out = append(out, styledLine{text: line, color: quoteColor})
+			}
+			continue
+		}
+
+		// Handle table rows
+		if strings.HasPrefix(trimmed, "|") && strings.HasSuffix(trimmed, "|") {
+			cells := strings.Split(trimmed, "|")
+			var cellTexts []string
+			for _, cell := range cells {
+				cell = strings.TrimSpace(cell)
+				if cell != "" {
+					cellTexts = append(cellTexts, stripInlineMarkdown(cell))
+				}
+			}
+			if len(cellTexts) > 0 {
+				text = strings.Join(cellTexts, " | ")
+				wrapped := wrapText(text, maxChars, "", "")
+				for _, line := range wrapped {
+					out = append(out, styledLine{text: line, color: theme.Foreground})
+				}
+			}
+			continue
+		}
+
+		// Regular text
 		text = stripInlineMarkdown(text)
 		wrapped := wrapText(text, maxChars, prefix, indent)
 		for _, line := range wrapped {
@@ -784,11 +882,33 @@ func buildWrappedPreview(lines []string, maxChars int, theme Theme) []styledLine
 }
 
 func stripInlineMarkdown(text string) string {
-	text = strings.ReplaceAll(text, "`", "")
+	// Remove bold/italic markers
 	text = strings.ReplaceAll(text, "**", "")
 	text = strings.ReplaceAll(text, "__", "")
 	text = strings.ReplaceAll(text, "*", "")
 	text = strings.ReplaceAll(text, "_", "")
+	text = strings.ReplaceAll(text, "`", "")
+
+	// Convert links [text](url) to just text
+	for {
+		start := strings.Index(text, "[")
+		if start == -1 {
+			break
+		}
+		end := strings.Index(text[start:], "](")
+		if end == -1 {
+			break
+		}
+		end += start
+		urlEnd := strings.Index(text[end:], ")")
+		if urlEnd == -1 {
+			break
+		}
+		urlEnd += end
+		linkText := text[start+1 : end]
+		text = text[:start] + linkText + text[urlEnd+1:]
+	}
+
 	return strings.TrimSpace(text)
 }
 
@@ -1237,6 +1357,10 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 
 	// Draw menu items
 	itemIndex := 0
+	headerColor := [4]float32{0.5, 0.5, 0.6, 1.0}   // Dim color for headers
+	toggleOnColor := [4]float32{0.3, 0.8, 0.4, 1.0} // Green for enabled toggles
+	toggleOffColor := [4]float32{0.5, 0.5, 0.5, 1.0} // Gray for disabled toggles
+
 	for i, item := range m.Items {
 		if i < m.ScrollOffset {
 			continue
@@ -1253,8 +1377,24 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 			continue
 		}
 
-		// Truncate label to fit
+		// Section headers - styled differently, not selectable
+		if item.IsHeader {
+			r.drawText(contentX+5, y, item.Label, headerColor, proj)
+			itemIndex++
+			continue
+		}
+
+		// Build display label with toggle indicator if needed
 		label := item.Label
+		if item.IsToggle {
+			if item.Toggled {
+				label = "[x] " + label
+			} else {
+				label = "[ ] " + label
+			}
+		}
+
+		// Truncate label to fit
 		if len(label) > maxChars {
 			label = label[:maxChars-3] + "..."
 		}
@@ -1264,9 +1404,31 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 			highlightColor := [4]float32{0.15, 0.17, 0.25, 1.0}
 			r.drawRect(contentX, y-lineHeight+8, contentWidth, lineHeight, highlightColor, proj)
 			r.drawText(contentX+5, y, ">", r.theme.TabActive, proj)
-			r.drawText(contentX+r.cellWidth*2+5, y, label, r.theme.TabActive, proj)
+			if item.IsToggle {
+				// Color the checkbox based on state
+				checkColor := toggleOffColor
+				if item.Toggled {
+					checkColor = toggleOnColor
+				}
+				checkboxEnd := r.cellWidth*4 + 5
+				r.drawText(contentX+r.cellWidth*2+5, y, label[:4], checkColor, proj)
+				r.drawText(contentX+r.cellWidth*2+5+checkboxEnd, y, label[4:], r.theme.TabActive, proj)
+			} else {
+				r.drawText(contentX+r.cellWidth*2+5, y, label, r.theme.TabActive, proj)
+			}
 		} else {
-			r.drawText(contentX+r.cellWidth*2+5, y, label, r.theme.Foreground, proj)
+			if item.IsToggle {
+				// Color the checkbox based on state
+				checkColor := toggleOffColor
+				if item.Toggled {
+					checkColor = toggleOnColor
+				}
+				checkboxEnd := r.cellWidth*4 + 5
+				r.drawText(contentX+r.cellWidth*2+5, y, label[:4], checkColor, proj)
+				r.drawText(contentX+r.cellWidth*2+5+checkboxEnd, y, label[4:], r.theme.Foreground, proj)
+			} else {
+				r.drawText(contentX+r.cellWidth*2+5, y, label, r.theme.Foreground, proj)
+			}
 		}
 		itemIndex++
 	}
