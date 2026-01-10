@@ -156,8 +156,8 @@ func NewRenderer() (*Renderer, error) {
 		paddingBottom:   12.0,
 		tabBarWidth:     135.0,
 		currentFont:     fonts.DefaultFontName(),
-		glyphs:          make(map[rune]Glyph),
-		atlasSize:       512, // Larger atlas for Nerd Font icons
+		glyphs: make(map[rune]Glyph),
+		// atlasSize calculated dynamically in loadFontData based on glyph count
 	}
 
 	if err := r.initGL(); err != nil {
@@ -206,27 +206,25 @@ func (r *Renderer) loadFontData(fontData []byte) error {
 	advance, _ := face.GlyphAdvance('M')
 	r.cellWidth = float32(advance.Ceil())
 
-	// Create atlas image (RGBA for anti-aliasing)
-	atlas := image.NewRGBA(image.Rect(0, 0, r.atlasSize, r.atlasSize))
-	// Fill with transparent
-	draw.Draw(atlas, atlas.Bounds(), image.Transparent, image.Point{}, draw.Src)
-
-	// Drawer for rendering text
-	drawer := &font.Drawer{
-		Dst:  atlas,
-		Src:  image.White,
-		Face: face,
-	}
-
 	// Character ranges to render (ASCII + Extended + Nerd Font icons)
+	// Defined BEFORE atlas creation so we can calculate required size
 	charRanges := []struct{ start, end rune }{
 		{32, 126},        // Printable ASCII
 		{160, 255},       // Extended Latin-1
+		{0x2000, 0x206F}, // General Punctuation (includes various spaces, dashes, dots)
+		{0x2100, 0x214F}, // Letterlike Symbols
+		{0x2190, 0x21FF}, // Arrows
+		{0x2200, 0x22FF}, // Mathematical Operators
+		{0x2300, 0x23FF}, // Miscellaneous Technical
 		{0x2500, 0x257F}, // Box Drawing
 		{0x2580, 0x259F}, // Block Elements
 		{0x25A0, 0x25FF}, // Geometric Shapes
 		{0x2600, 0x26FF}, // Miscellaneous Symbols
 		{0x2700, 0x27BF}, // Dingbats
+		{0x27C0, 0x27EF}, // Miscellaneous Mathematical Symbols-A
+		{0x27F0, 0x27FF}, // Supplemental Arrows-A
+		{0x2900, 0x297F}, // Supplemental Arrows-B
+		{0x2B00, 0x2BFF}, // Miscellaneous Symbols and Arrows
 		{0xE0A0, 0xE0D4}, // Powerline symbols
 		{0xE200, 0xE2A9}, // Pomicons
 		{0xE5FA, 0xE6B5}, // Seti-UI + Custom
@@ -239,9 +237,38 @@ func (r *Renderer) loadFontData(fontData []byte) error {
 		{0xF500, 0xFD46}, // Material Design Icons
 	}
 
-	x, y := 0, metrics.Ascent.Ceil()
+	// Calculate required atlas size based on glyph count
 	charHeight := int(r.cellHeight)
 	charWidth := int(r.cellWidth)
+
+	totalGlyphs := 0
+	for _, cr := range charRanges {
+		totalGlyphs += int(cr.end - cr.start + 1)
+	}
+
+	// Calculate atlas dimensions to fit all glyphs
+	glyphsPerRow := 64 // reasonable row width for GPU
+	rowsNeeded := (totalGlyphs + glyphsPerRow - 1) / glyphsPerRow
+
+	atlasWidth := glyphsPerRow * charWidth
+	atlasHeight := rowsNeeded * charHeight
+
+	// Round to next power of 2 for GPU efficiency
+	r.atlasSize = nextPowerOf2(max(atlasWidth, atlasHeight))
+
+	// Create atlas image (RGBA for anti-aliasing)
+	atlas := image.NewRGBA(image.Rect(0, 0, r.atlasSize, r.atlasSize))
+	// Fill with transparent
+	draw.Draw(atlas, atlas.Bounds(), image.Transparent, image.Point{}, draw.Src)
+
+	// Drawer for rendering text
+	drawer := &font.Drawer{
+		Dst:  atlas,
+		Src:  image.White,
+		Face: face,
+	}
+
+	x, y := 0, metrics.Ascent.Ceil()
 
 	for _, cr := range charRanges {
 		for c := cr.start; c <= cr.end; c++ {
@@ -251,7 +278,9 @@ func (r *Renderer) loadFontData(fontData []byte) error {
 				y += charHeight
 			}
 			if y+charHeight > r.atlasSize {
-				break // Atlas full
+				// With dynamic sizing this shouldn't happen, but warn if it does
+				fmt.Printf("Warning: Atlas overflow at glyph U+%04X, atlas=%d\n", c, r.atlasSize)
+				continue
 			}
 
 			// Check if glyph exists in font
@@ -1623,6 +1652,20 @@ func clampInt(value, min, max int) int {
 	return value
 }
 
+// nextPowerOf2 returns the smallest power of 2 >= n
+func nextPowerOf2(n int) int {
+	if n <= 0 {
+		return 1
+	}
+	n--
+	n |= n >> 1
+	n |= n >> 2
+	n |= n >> 4
+	n |= n >> 8
+	n |= n >> 16
+	return n + 1
+}
+
 // renderTabBar renders the left tab bar
 func (r *Renderer) renderTabBar(tm *tab.TabManager, width, height int, proj [16]float32) {
 	// Draw tab bar background
@@ -1695,10 +1738,19 @@ func (r *Renderer) renderGridAt(g *grid.Grid, offsetX, offsetY, paneWidth, paneH
 				r.drawRect(x, y, r.cellWidth, r.cellHeight, r.theme.Selection, proj)
 			}
 
+			// Skip character and underline rendering for continuation cells (second half of wide char)
+			if cell.Width == grid.CellWidthContinuation {
+				continue
+			}
+
 			// Draw character
 			fgColor := r.colorToRGBA(cell.Fg, false)
 			if cell.Flags&grid.FlagInverse != 0 {
 				fgColor = r.colorToRGBA(cell.Bg, true)
+			}
+			// Apply dim effect (reduce alpha to 50%)
+			if cell.Flags&grid.FlagDim != 0 {
+				fgColor[3] = fgColor[3] / 2
 			}
 			if cell.Char != ' ' && cell.Char != 0 {
 				r.drawChar(x, y+r.cellHeight, cell.Char, fgColor, proj)
@@ -1814,14 +1866,31 @@ func (r *Renderer) drawRect(x, y, w, h float32, clr [4]float32, proj [16]float32
 	gl.BindVertexArray(0)
 }
 
+// boxDrawingFallbacks maps rounded corners and other box chars to simpler equivalents
+var boxDrawingFallbacks = map[rune]rune{
+	'╭': '┌', // U+256D -> U+250C (rounded to square corner)
+	'╮': '┐', // U+256E -> U+2510
+	'╯': '┘', // U+256F -> U+2518
+	'╰': '└', // U+2570 -> U+2514
+	'╱': '/', // U+2571 -> ASCII slash
+	'╲': '\\', // U+2572 -> ASCII backslash
+	'╳': 'X', // U+2573 -> ASCII X
+}
+
 // drawChar draws a single character using the font atlas
 func (r *Renderer) drawChar(x, y float32, char rune, clr [4]float32, proj [16]float32) {
 	glyph, ok := r.glyphs[char]
 	if !ok {
-		// Fallback to '?' for unknown characters
-		glyph, ok = r.glyphs['?']
+		// Try box-drawing fallbacks first
+		if fallback, hasFallback := boxDrawingFallbacks[char]; hasFallback {
+			glyph, ok = r.glyphs[fallback]
+		}
+		// If still not found, fallback to '?'
 		if !ok {
-			return
+			glyph, ok = r.glyphs['?']
+			if !ok {
+				return
+			}
 		}
 	}
 
@@ -1879,9 +1948,16 @@ func (r *Renderer) drawTextScaled(x, y float32, text string, clr [4]float32, pro
 func (r *Renderer) drawCharScaled(x, y float32, char rune, clr [4]float32, proj [16]float32, scale float32) {
 	glyph, ok := r.glyphs[char]
 	if !ok {
-		glyph, ok = r.glyphs['?']
+		// Try box-drawing fallbacks first
+		if fallback, hasFallback := boxDrawingFallbacks[char]; hasFallback {
+			glyph, ok = r.glyphs[fallback]
+		}
+		// If still not found, fallback to '?'
 		if !ok {
-			return
+			glyph, ok = r.glyphs['?']
+			if !ok {
+				return
+			}
 		}
 	}
 

@@ -1,7 +1,7 @@
 # Raven Terminal Makefile
 # Provides easy build, install, uninstall, and dependency management
 
-.PHONY: all build install install-global uninstall uninstall-global clean deps deps-check help
+.PHONY: all build install install-local uninstall uninstall-local clean deps deps-check help
 
 # Application info
 APP_NAME := raven-terminal
@@ -58,25 +58,27 @@ build:
 	@chmod +x $(APP_NAME)
 	@echo -e "$(GREEN)[OK]$(NC) Build successful: ./$(APP_NAME)"
 
-# Install for current user (default)
+# Install system-wide (clean install - uninstalls first)
 install: build
-	@echo -e "$(BLUE)[INFO]$(NC) Installing for current user..."
-	@$(SCRIPTS_DIR)/install.sh --user
-
-# Install system-wide
-install-global: build
-	@echo -e "$(BLUE)[INFO]$(NC) Installing system-wide..."
+	@echo -e "$(BLUE)[INFO]$(NC) Performing clean global install..."
+	@$(SCRIPTS_DIR)/uninstall.sh --all --force 2>/dev/null || true
 	@$(SCRIPTS_DIR)/install.sh --global
 
-# Uninstall user installation
+# Install for current user (clean install - uninstalls first)
+install-local: build
+	@echo -e "$(BLUE)[INFO]$(NC) Performing clean user install..."
+	@$(SCRIPTS_DIR)/uninstall.sh --all --force 2>/dev/null || true
+	@$(SCRIPTS_DIR)/install.sh --user
+
+# Uninstall all installations (clean uninstall)
 uninstall:
+	@echo -e "$(BLUE)[INFO]$(NC) Uninstalling all raven-terminal installations..."
+	@$(SCRIPTS_DIR)/uninstall.sh --all --force
+
+# Uninstall user installation
+uninstall-local:
 	@echo -e "$(BLUE)[INFO]$(NC) Uninstalling user installation..."
 	@$(SCRIPTS_DIR)/uninstall.sh --user --force
-
-# Uninstall global installation
-uninstall-global:
-	@echo -e "$(BLUE)[INFO]$(NC) Uninstalling global installation..."
-	@$(SCRIPTS_DIR)/uninstall.sh --global --force
 
 # Uninstall everything including config
 uninstall-all:
@@ -187,10 +189,10 @@ help:
 	@echo ""
 	@echo "Targets:"
 	@echo "  build           Build the application (default)"
-	@echo "  install         Install for current user (~/.local/bin)"
-	@echo "  install-global  Install system-wide (/usr/local/bin, requires sudo)"
-	@echo "  uninstall       Uninstall user installation"
-	@echo "  uninstall-global Uninstall global installation"
+	@echo "  install         Clean install system-wide (uninstalls first, requires sudo)"
+	@echo "  install-local   Clean install for current user (uninstalls first)"
+	@echo "  uninstall       Uninstall all installations (global + user)"
+	@echo "  uninstall-local Uninstall user installation only"
 	@echo "  uninstall-all   Uninstall everything including config files"
 	@echo "  clean           Remove build artifacts"
 	@echo "  deps            Install build dependencies for your OS"
@@ -204,7 +206,8 @@ help:
 	@echo "  Package Manager: $(PKG_MANAGER)"
 	@echo ""
 	@echo "Examples:"
-	@echo "  make deps       # Install dependencies"
-	@echo "  make            # Build the application"
-	@echo "  make install    # Install for current user"
+	@echo "  make deps         # Install dependencies"
+	@echo "  make              # Build the application"
+	@echo "  make install      # Clean install system-wide (requires sudo)"
+	@echo "  make uninstall    # Completely remove all installations"
 	@echo ""

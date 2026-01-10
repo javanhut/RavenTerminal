@@ -1,2 +1,11 @@
-*/raven-terminal
+# Binaries
+raven
 raven-terminal
+*/raven
+*/raven-terminal
+
+# Planning and tooling
+.planning/
+node_modules/
+bun.lock
+package.json
