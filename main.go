@@ -77,12 +77,13 @@ type previewResponse struct {
 }
 
 type aiResponse struct {
-	id      int
-	content string
-	err     error
-	loaded  bool
-	token   string // For streaming: incremental token
-	done    bool   // For streaming: indicates final response
+	id       int
+	content  string
+	thinking string // Thinking content from thinking models
+	err      error
+	loaded   bool
+	token    string // For streaming: incremental token
+	done     bool   // For streaming: indicates final response
 }
 
 type modelLoadResponse struct {
@@ -175,6 +176,8 @@ func main() {
 		}
 		searchPanel.SetEnabled(cfg.WebSearch.Enabled)
 		aiPanel.SetEnabled(cfg.Ollama.Enabled)
+		aiPanel.ShowThinking = cfg.Ollama.ShowThinking
+		aiPanel.ThinkingMode = cfg.Ollama.ThinkingMode
 		settingsMenu.OllamaModels = nil
 		if aiPanel.LoadedURL != cfg.Ollama.URL || aiPanel.LoadedModel != cfg.Ollama.Model {
 			aiPanel.ModelLoaded = false
@@ -220,7 +223,7 @@ func main() {
 		aiPanel.ModelLoaded = false
 		// Load model in background
 		go func(url, m string) {
-			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second) // 5 min for slow remote APIs
 			defer cancel()
 			client := ollama.NewClient(url, m)
 			err := client.LoadModel(ctx)
@@ -232,6 +235,8 @@ func main() {
 		currentTheme = settingsMenu.Config.Theme
 		searchPanel.SetEnabled(settingsMenu.Config.WebSearch.Enabled)
 		aiPanel.SetEnabled(settingsMenu.Config.Ollama.Enabled)
+		aiPanel.ShowThinking = settingsMenu.Config.Ollama.ShowThinking
+		aiPanel.ThinkingMode = settingsMenu.Config.Ollama.ThinkingMode
 		aiPanel.LoadedURL = settingsMenu.Config.Ollama.URL
 		aiPanel.LoadedModel = settingsMenu.Config.Ollama.Model
 		renderer.SetThemeByName(currentTheme)
@@ -315,11 +320,23 @@ func main() {
 			})
 		}
 
-		go func(id int, baseURL, model string, messages []ollama.Message, loadModel bool) {
-			ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+		// Configure timeout based on thinking mode
+		timeout := 180 * time.Second
+		if cfg.ThinkingMode && cfg.ExtendedTimeout > 0 {
+			timeout = time.Duration(cfg.ExtendedTimeout) * time.Second
+		}
+
+		go func(id int, baseURL, model string, messages []ollama.Message, loadModel bool, thinkingEnabled bool, thinkingBudget int) {
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
 
 			client := ollama.NewClient(baseURL, model)
+			// Configure thinking mode
+			client.Thinking = ollama.ThinkingOptions{
+				Enabled: thinkingEnabled,
+				Budget:  thinkingBudget,
+			}
+
 			loadSuccess := false
 			if loadModel {
 				aiResponses <- aiResponse{id: id, token: "", done: false} // Signal streaming start
@@ -330,12 +347,12 @@ func main() {
 				loadSuccess = true
 			}
 
-			// Use streaming chat
-			_, err := client.ChatStream(ctx, messages, func(token string) {
+			// Use streaming chat with thinking support
+			result, err := client.ChatStreamWithThinking(ctx, messages, func(token string) {
 				aiResponses <- aiResponse{id: id, token: token, done: false}
-			})
-			aiResponses <- aiResponse{id: id, err: err, done: true, loaded: loadSuccess}
-		}(requestID, cfg.URL, cfg.Model, messages, needLoad)
+			}, nil)
+			aiResponses <- aiResponse{id: id, thinking: result.Thinking, err: err, done: true, loaded: loadSuccess}
+		}(requestID, cfg.URL, cfg.Model, messages, needLoad, cfg.ThinkingMode, cfg.ThinkingBudget)
 	}
 
 	win.GLFW().SetKeyCallback(func(w *glfw.Window, key glfw.Key, scancode int, action glfw.Action, mods glfw.ModifierKey) {
@@ -483,7 +500,7 @@ func main() {
 			if maxChars < 10 {
 				maxChars = 10
 			}
-			wrapped := aipanel.BuildWrappedLines(aiPanel.Messages, maxChars)
+			wrapped := aipanel.BuildWrappedLinesWithThinking(aiPanel.Messages, maxChars, aiPanel.ShowThinking, aiPanel.ThinkingExpanded)
 			totalLines := len(wrapped)
 			visibleLines := layout.VisibleLines
 			maxScroll := totalLines - visibleLines
@@ -503,24 +520,48 @@ func main() {
 				return
 			}
 
+			// Ctrl+T: toggle thinking expansion
+			if mods&glfw.ModControl != 0 && key == glfw.KeyT {
+				if aipanel.HasThinkingContent(aiPanel.Messages) {
+					aiPanel.ToggleThinkingExpanded()
+				}
+				return
+			}
+
+			// Ctrl+Enter: send message
+			if mods&glfw.ModControl != 0 && (key == glfw.KeyEnter || key == glfw.KeyKPEnter) {
+				if aiPanel.Loading {
+					return
+				}
+				startAIChat(aiPanel.Input)
+				return
+			}
+
 			switch key {
 			case glfw.KeyEscape:
 				aiPanel.Open = false
 				aiPanel.Reset()
 				return
 			case glfw.KeyEnter, glfw.KeyKPEnter:
-				if aiPanel.Loading {
+				// Regular Enter or Shift+Enter: add newline
+				if action == glfw.Repeat {
 					return
 				}
-				startAIChat(aiPanel.Input)
+				aiPanel.AppendNewline()
 				return
 			case glfw.KeyUp:
-				if aiPanel.Scroll > 0 {
+				// Scroll input if multiline, otherwise scroll messages
+				if len(aiPanel.InputLines) > layout.InputLines {
+					aiPanel.ScrollInputUp()
+				} else if aiPanel.Scroll > 0 {
 					aiPanel.Scroll--
 				}
 				return
 			case glfw.KeyDown:
-				if aiPanel.Scroll < maxScroll {
+				// Scroll input if multiline, otherwise scroll messages
+				if len(aiPanel.InputLines) > layout.InputLines {
+					aiPanel.ScrollInputDown(layout.InputLines)
+				} else if aiPanel.Scroll < maxScroll {
 					aiPanel.Scroll++
 				}
 				return
@@ -537,10 +578,14 @@ func main() {
 				}
 				return
 			case glfw.KeyHome:
-				aiPanel.Scroll = 0
+				if mods&glfw.ModControl != 0 {
+					aiPanel.Scroll = 0
+				}
 				return
 			case glfw.KeyEnd:
-				aiPanel.Scroll = maxScroll
+				if mods&glfw.ModControl != 0 {
+					aiPanel.Scroll = maxScroll
+				}
 				return
 			case glfw.KeyBackspace:
 				aiPanel.Backspace()
@@ -1101,7 +1146,7 @@ func main() {
 			if maxChars < 10 {
 				maxChars = 10
 			}
-			totalLines := len(aipanel.BuildWrappedLines(aiPanel.Messages, maxChars))
+			totalLines := len(aipanel.BuildWrappedLinesWithThinking(aiPanel.Messages, maxChars, aiPanel.ShowThinking, aiPanel.ThinkingExpanded))
 			visibleLines := layout.VisibleLines
 			maxScroll := totalLines - visibleLines
 			if maxScroll < 0 {
@@ -1450,6 +1495,15 @@ func main() {
 					break
 				}
 				aiPanel.Status = ""
+
+				// Add thinking content to the last assistant message if present
+				if resp.thinking != "" && len(aiPanel.Messages) > 0 {
+					lastIdx := len(aiPanel.Messages) - 1
+					if aiPanel.Messages[lastIdx].Role == "assistant" {
+						aiPanel.Messages[lastIdx].Thinking = resp.thinking
+					}
+				}
+
 				aiPanel.TrimMessages(maxChatMessages)
 				if resp.loaded {
 					if settingsMenu.Config != nil {

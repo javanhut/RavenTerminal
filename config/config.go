@@ -42,9 +42,13 @@ type WebSearchConfig struct {
 
 // OllamaConfig holds local AI chat settings.
 type OllamaConfig struct {
-	Enabled bool   `toml:"enabled"`
-	URL     string `toml:"url"`
-	Model   string `toml:"model"`
+	Enabled        bool   `toml:"enabled"`
+	URL            string `toml:"url"`
+	Model          string `toml:"model"`
+	ThinkingMode   bool   `toml:"thinking_mode"`    // Enable thinking/reasoning mode for supported models
+	ThinkingBudget int    `toml:"thinking_budget"`  // Max tokens for thinking (0 = no limit)
+	ShowThinking   bool   `toml:"show_thinking"`    // Show thinking content in UI (collapsible)
+	ExtendedTimeout int   `toml:"extended_timeout"` // Extended timeout in seconds for thinking models (0 = default 300s)
 }
 
 // ShellConfig holds shell-specific settings
@@ -299,9 +303,13 @@ echo "None"
 			},
 		},
 		Ollama: OllamaConfig{
-			Enabled: false,
-			URL:     "http://localhost:11434",
-			Model:   "llama3",
+			Enabled:         false,
+			URL:             "http://localhost:11434",
+			Model:           "llama3",
+			ThinkingMode:    false,
+			ThinkingBudget:  0,     // No limit
+			ShowThinking:    true,  // Show thinking by default
+			ExtendedTimeout: 600,   // 10 minutes for thinking models
 		},
 		Appearance: AppearanceConfig{
 			CursorStyle:       "block",

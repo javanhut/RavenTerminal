@@ -579,17 +579,51 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 		r.drawText(layout.ContentX, layout.StatusY, status, r.theme.Cursor, proj)
 	}
 
-	r.drawText(layout.ContentX, layout.InputLabelY, "Ask", r.theme.Foreground, proj)
+	r.drawText(layout.ContentX, layout.InputLabelY, "Ask (Shift+Enter: newline)", r.theme.Foreground, proj)
 	inputBoxColor := [4]float32{0.03, 0.03, 0.05, 1.0}
-	r.drawRect(layout.ContentX, layout.InputBoxY, layout.ContentWidth, layout.LineHeight, inputBoxColor, proj)
+	r.drawRect(layout.ContentX, layout.InputBoxY, layout.ContentWidth, layout.InputBoxH, inputBoxColor, proj)
 
-	inputText := panel.Input
-	if len(inputText) > maxChars {
-		inputText = "..." + inputText[len(inputText)-maxChars+3:]
+	// Draw border around input box
+	inputBorderColor := [4]float32{0.2, 0.2, 0.3, 1.0}
+	r.drawRect(layout.ContentX, layout.InputBoxY, layout.ContentWidth, 1, inputBorderColor, proj)
+	r.drawRect(layout.ContentX, layout.InputBoxY+layout.InputBoxH-1, layout.ContentWidth, 1, inputBorderColor, proj)
+	r.drawRect(layout.ContentX, layout.InputBoxY, 1, layout.InputBoxH, inputBorderColor, proj)
+	r.drawRect(layout.ContentX+layout.ContentWidth-1, layout.InputBoxY, 1, layout.InputBoxH, inputBorderColor, proj)
+
+	// Wrap input text for multiline display
+	inputLines := panel.WrapInput(maxChars - 2)
+	panel.EnsureInputCursorVisible(layout.InputLines)
+
+	// Draw visible input lines
+	inputY := layout.InputBoxY + layout.LineHeight*0.75
+	visibleInputLines := layout.InputLines
+	inputStartLine := panel.InputScroll
+
+	for i := 0; i < visibleInputLines && inputStartLine+i < len(inputLines); i++ {
+		lineText := inputLines[inputStartLine+i]
+		// Add cursor on the last line
+		isLastLine := inputStartLine+i == len(inputLines)-1
+		if isLastLine {
+			lineText += "_"
+		}
+		r.drawText(layout.ContentX+8, inputY, lineText, r.theme.TabActive, proj)
+		inputY += layout.LineHeight
 	}
-	r.drawText(layout.ContentX+8, layout.InputBoxY+layout.LineHeight*0.75, inputText+"_", r.theme.TabActive, proj)
 
-	lines := aipanel.BuildWrappedLines(panel.Messages, maxChars)
+	// If no input, show cursor on first line
+	if len(inputLines) == 0 || (len(inputLines) == 1 && inputLines[0] == "") {
+		r.drawText(layout.ContentX+8, layout.InputBoxY+layout.LineHeight*0.75, "_", r.theme.TabActive, proj)
+	}
+
+	// Show scroll indicator if input has more lines
+	if len(inputLines) > visibleInputLines {
+		scrollIndicator := fmt.Sprintf("↕ %d/%d", panel.InputScroll+1, len(inputLines)-visibleInputLines+1)
+		r.drawText(layout.ContentX+layout.ContentWidth-float32(len(scrollIndicator))*r.cellWidth-8,
+			layout.InputBoxY+layout.InputBoxH-layout.LineHeight*0.3,
+			scrollIndicator, [4]float32{0.5, 0.5, 0.5, 1.0}, proj)
+	}
+
+	lines := aipanel.BuildWrappedLinesWithThinking(panel.Messages, maxChars, panel.ShowThinking, panel.ThinkingExpanded)
 	panel.WrapChars = maxChars
 	panel.WrappedLines = lines
 
@@ -615,14 +649,23 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 
 		startLine := panel.Scroll
 		lineY := layout.MessagesStart
-		codeColor := [4]float32{0.7, 0.8, 0.6, 1.0}   // Greenish for code
-		headerColor := [4]float32{0.9, 0.7, 0.4, 1.0} // Orange/gold for headers
-		bulletColor := [4]float32{0.7, 0.7, 0.9, 1.0} // Light blue for bullets
+		codeColor := [4]float32{0.7, 0.8, 0.6, 1.0}       // Greenish for code
+		headerColor := [4]float32{0.9, 0.7, 0.4, 1.0}     // Orange/gold for headers
+		bulletColor := [4]float32{0.7, 0.7, 0.9, 1.0}     // Light blue for bullets
+		thinkingColor := [4]float32{0.6, 0.5, 0.7, 0.85}  // Purple/dim for thinking
+		thinkingHeaderColor := [4]float32{0.7, 0.5, 0.8, 1.0} // Brighter purple for thinking header
 		for i := 0; i < visibleLines && startLine+i < totalLines; i++ {
 			line := lines[startLine+i]
 			if strings.TrimSpace(line.Text) != "" {
 				color := r.theme.Foreground
-				if line.InCode {
+				if line.IsThinking {
+					// Thinking content uses purple/dim colors
+					if line.IsHeader {
+						color = thinkingHeaderColor
+					} else {
+						color = thinkingColor
+					}
+				} else if line.InCode {
 					color = codeColor
 				} else if line.IsHeader {
 					color = headerColor
@@ -648,7 +691,10 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 		}
 	}
 
-	footerText := "Enter: send | Up/Down: scroll | Ctrl+C: copy | Ctrl+U: clear"
+	footerText := "Ctrl+Enter: send | Ctrl+C: copy"
+	if aipanel.HasThinkingContent(panel.Messages) {
+		footerText += " | Ctrl+T: thinking"
+	}
 	if len(footerText) > maxChars {
 		footerText = footerText[:maxChars-3] + "..."
 	}

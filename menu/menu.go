@@ -291,6 +291,8 @@ func (m *Menu) buildMainMenu() {
 		{Label: "Test Ollama Connection"},
 		{Label: "Refresh Ollama Models"},
 		{Label: "Ollama Models..."},
+		{Label: "Thinking Mode", IsToggle: true, Toggled: m.Config.Ollama.ThinkingMode},
+		{Label: "Show Thinking", IsToggle: true, Toggled: m.Config.Ollama.ShowThinking},
 		// Actions
 		{Label: "ACTIONS", IsHeader: true},
 		{Label: "Reload Config"},
@@ -716,7 +718,15 @@ func (m *Menu) handleMainSelect() {
 		m.StatusMessage = "Models loaded (" + itoa(len(models)) + ")"
 	case 23: // Ollama Models
 		m.navigateTo(MenuOllamaModels, m.buildOllamaModelsMenu)
-	case 25: // Reload Config
+	case 24: // Thinking Mode
+		m.Config.Ollama.ThinkingMode = !m.Config.Ollama.ThinkingMode
+		m.buildMainMenu()
+		m.StatusMessage = "Updated (save to persist)"
+	case 25: // Show Thinking
+		m.Config.Ollama.ShowThinking = !m.Config.Ollama.ShowThinking
+		m.buildMainMenu()
+		m.StatusMessage = "Updated (save to persist)"
+	case 27: // Reload Config
 		cfg, err := config.Load()
 		if err != nil {
 			m.StatusMessage = "Failed to reload config"
@@ -737,7 +747,7 @@ func (m *Menu) handleMainSelect() {
 		if m.StatusMessage == "" {
 			m.StatusMessage = "Config reloaded"
 		}
-	case 26: // Save and Close
+	case 28: // Save and Close
 		if !m.saveConfigWithInitScript("Saved") {
 			m.buildMainMenu()
 			return
@@ -750,7 +760,7 @@ func (m *Menu) handleMainSelect() {
 			}
 		}
 		m.Close()
-	case 27: // Cancel
+	case 29: // Cancel
 		m.Config, _ = config.Load()
 		m.Close()
 	}
