@@ -59,6 +59,10 @@ func NewWindow(config Config) (*Window, error) {
 	glfw.WindowHint(glfw.Resizable, glfw.True)
 	glfw.WindowHint(glfw.DoubleBuffer, glfw.True)
 
+	// Set X11 window class for proper WM integration (Hyprland, i3, etc.)
+	glfw.WindowHintString(glfw.X11ClassName, "raven-terminal")
+	glfw.WindowHintString(glfw.X11InstanceName, "raven-terminal")
+
 	window, err := glfw.CreateWindow(config.Width, config.Height, config.Title, nil, nil)
 	if err != nil {
 		glfw.Terminate()
