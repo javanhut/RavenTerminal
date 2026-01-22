@@ -18,66 +18,46 @@ A GPU-accelerated terminal emulator written in Go using OpenGL for rendering. Ra
 - OpenGL 4.1 compatible graphics driver
 - Linux (X11/Wayland)
 
-### System Dependencies
-
-On Debian/Ubuntu:
-
-```bash
-sudo apt install libgl1-mesa-dev libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libxxf86vm-dev
-```
-
-On Fedora:
-
-```bash
-sudo dnf install mesa-libGL-devel libX11-devel libXcursor-devel libXrandr-devel libXinerama-devel libXi-devel libXxf86vm-devel
-```
-
-On Arch Linux:
-
-```bash
-sudo pacman -S mesa libx11 libxcursor libxrandr libxinerama libxi libxxf86vm
-```
-
 ## Installation
 
-### Quick Install (User)
+### One-liner Install (from GitHub)
+
+```bash
+curl -sSL https://raw.githubusercontent.com/javanhut/RavenTerminal/main/scripts/remote-install.sh | bash
+```
+
+For system-wide install:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/javanhut/RavenTerminal/main/scripts/remote-install.sh | bash -s -- --global
+```
+
+### From Source
 
 ```bash
 git clone https://github.com/javanhut/RavenTerminal.git
 cd RavenTerminal
-./scripts/install.sh
-```
-
-This builds and installs Raven Terminal to `~/.local/bin/` with desktop integration.
-
-### System-wide Install
-
-```bash
-./scripts/install.sh --global
-```
-
-Installs to `/usr/local/bin/` (requires sudo).
-
-### Build Only
-
-```bash
-go build -o raven-terminal .
-./raven-terminal
+make deps           # Install system dependencies
+make                # Build
+make install-local  # Install to ~/.local/bin/
 ```
 
 See [Installation Guide](docs/installation.md) for detailed instructions.
 
 ## Uninstallation
 
+### One-liner Uninstall
+
 ```bash
-# Remove user installation
-./scripts/uninstall.sh --user
+curl -sSL https://raw.githubusercontent.com/javanhut/RavenTerminal/main/scripts/remote-uninstall.sh | bash
+```
 
-# Remove global installation
-./scripts/uninstall.sh --global
+### Local Uninstall
 
-# Remove everything including config
-./scripts/uninstall.sh --all --config
+```bash
+./scripts/uninstall.sh --user      # Remove user installation
+./scripts/uninstall.sh --global    # Remove system-wide installation
+./scripts/uninstall.sh --all --config  # Remove everything including config
 ```
 
 ## Usage
@@ -167,28 +147,11 @@ Command aliases:
 - `jetbrainsmono` - JetBrains Mono Nerd Font
 - `ubuntumono` - Ubuntu Mono Nerd Font
 
-## Project Structure
-
-```
-RavenTerminal/
-├── main.go              # Application entry point
-├── assets/              # Embedded assets (icons)
-├── commands/            # Built-in terminal commands
-├── docs/                # Documentation
-├── fonts/               # Embedded fonts
-├── grid/                # Terminal grid/buffer
-├── keybindings/         # Keyboard input handling
-├── parser/              # ANSI escape sequence parser
-├── render/              # OpenGL renderer
-├── shell/               # PTY handling
-├── tab/                 # Tab management
-└── window/              # GLFW window management
-```
-
 ## Documentation
 
 Additional documentation is available in the [docs/](docs/) directory:
 
+- [Architecture](docs/ARCHITECTURE.md) - Project structure and internal architecture
 - [Installation](docs/installation.md) - Installation and uninstallation guide
 - [Keybindings](docs/keybindings.md) - Complete keybinding reference
 - [Split Panes](docs/splits.md) - Split pane usage
