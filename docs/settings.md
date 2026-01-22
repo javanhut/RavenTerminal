@@ -1,5 +1,26 @@
 # Raven Terminal Settings
 
+## Built-in Commands
+
+Raven Terminal includes several built-in commands:
+
+| Command              | Description                |
+|----------------------|----------------------------|
+| `keybindings`        | Show keybinding help       |
+| `list-fonts`         | List available fonts       |
+| `change-font <name>` | Change to specified font   |
+
+**Command aliases:**
+- `raven-keybindings` - Alias for `keybindings`
+- `fonts` - Alias for `list-fonts`
+
+### Available Fonts
+
+- `firacode` - FiraCode Nerd Font
+- `hack` - Hack Nerd Font
+- `jetbrainsmono` - JetBrains Mono Nerd Font
+- `ubuntumono` - Ubuntu Mono Nerd Font
+
 ## Opening Settings
 
 Press `Ctrl+Shift+P` to open the settings menu.
