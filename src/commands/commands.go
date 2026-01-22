@@ -2,7 +2,7 @@ package commands
 
 import (
 	"fmt"
-	"github.com/javanhut/RavenTerminal/fonts"
+	"github.com/javanhut/RavenTerminal/src/assets/fonts"
 	"strings"
 )
 

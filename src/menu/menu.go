@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/javanhut/RavenTerminal/config"
+	"github.com/javanhut/RavenTerminal/src/config"
 )
 
 var debugMenu = os.Getenv("RAVEN_DEBUG_MENU") == "1"

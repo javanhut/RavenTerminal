@@ -275,9 +275,9 @@ build_application() {
     cd "$REPO_DIR"
     
     if [ "$VERBOSE" = true ]; then
-        go build -v -o "$APP_NAME" .
+        go build -v -o "$APP_NAME" ./src
     else
-        go build -o "$APP_NAME" . 2>&1
+        go build -o "$APP_NAME" ./src 2>&1
     fi
     
     if [ -f "$REPO_DIR/$APP_NAME" ]; then
@@ -334,13 +334,13 @@ install_user() {
     print_success "Launcher wrapper installed"
     
     # Install icon
-    if [ -f "$REPO_DIR/assets/raven_terminal_icon.svg" ]; then
-        cp "$REPO_DIR/assets/raven_terminal_icon.svg" "$USER_ICON_DIR/$APP_NAME.svg"
+    if [ -f "$REPO_DIR/src/assets/raven_terminal_icon.svg" ]; then
+        cp "$REPO_DIR/src/assets/raven_terminal_icon.svg" "$USER_ICON_DIR/$APP_NAME.svg"
         print_success "Icon installed to $USER_ICON_DIR/$APP_NAME.svg"
-        
+
         # Also install to pixmaps for better compatibility
         mkdir -p "$HOME/.local/share/pixmaps"
-        cp "$REPO_DIR/assets/raven_terminal_icon.svg" "$HOME/.local/share/pixmaps/$APP_NAME.svg"
+        cp "$REPO_DIR/src/assets/raven_terminal_icon.svg" "$HOME/.local/share/pixmaps/$APP_NAME.svg"
     else
         print_warning "Icon file not found, using default terminal icon"
     fi
@@ -403,14 +403,14 @@ install_global() {
     print_success "Launcher wrapper installed"
     
     # Install icon
-    if [ -f "$REPO_DIR/assets/raven_terminal_icon.svg" ]; then
+    if [ -f "$REPO_DIR/src/assets/raven_terminal_icon.svg" ]; then
         sudo mkdir -p "$GLOBAL_ICON_DIR"
-        sudo cp "$REPO_DIR/assets/raven_terminal_icon.svg" "$GLOBAL_ICON_DIR/$APP_NAME.svg"
+        sudo cp "$REPO_DIR/src/assets/raven_terminal_icon.svg" "$GLOBAL_ICON_DIR/$APP_NAME.svg"
         print_success "Icon installed to $GLOBAL_ICON_DIR/$APP_NAME.svg"
-        
+
         # Also install to pixmaps for better compatibility
         sudo mkdir -p /usr/share/pixmaps
-        sudo cp "$REPO_DIR/assets/raven_terminal_icon.svg" "/usr/share/pixmaps/$APP_NAME.svg"
+        sudo cp "$REPO_DIR/src/assets/raven_terminal_icon.svg" "/usr/share/pixmaps/$APP_NAME.svg"
     else
         print_warning "Icon file not found, using default terminal icon"
     fi

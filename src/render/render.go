@@ -2,12 +2,12 @@ package render
 
 import (
 	"fmt"
-	"github.com/javanhut/RavenTerminal/aipanel"
-	"github.com/javanhut/RavenTerminal/fonts"
-	"github.com/javanhut/RavenTerminal/grid"
-	"github.com/javanhut/RavenTerminal/menu"
-	"github.com/javanhut/RavenTerminal/searchpanel"
-	"github.com/javanhut/RavenTerminal/tab"
+	"github.com/javanhut/RavenTerminal/src/aipanel"
+	"github.com/javanhut/RavenTerminal/src/assets/fonts"
+	"github.com/javanhut/RavenTerminal/src/grid"
+	"github.com/javanhut/RavenTerminal/src/menu"
+	"github.com/javanhut/RavenTerminal/src/searchpanel"
+	"github.com/javanhut/RavenTerminal/src/tab"
 	"image"
 	"image/color"
 	"image/draw"
