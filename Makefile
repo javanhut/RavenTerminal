@@ -54,7 +54,7 @@ all: build
 # Build the application
 build:
 	@echo -e "$(BLUE)[INFO]$(NC) Building $(APP_NAME)..."
-	@go build -o $(APP_NAME) .
+	@go build -o $(APP_NAME) ./src
 	@chmod +x $(APP_NAME)
 	@echo -e "$(GREEN)[OK]$(NC) Build successful: ./$(APP_NAME)"
 
@@ -178,7 +178,7 @@ endif
 # Run tests
 test:
 	@echo -e "$(BLUE)[INFO]$(NC) Running tests..."
-	@go test ./...
+	@go test ./src/...
 
 # Show help
 help:

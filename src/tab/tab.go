@@ -1,8 +1,8 @@
 package tab
 
 import (
-	"github.com/javanhut/RavenTerminal/parser"
-	"github.com/javanhut/RavenTerminal/shell"
+	"github.com/javanhut/RavenTerminal/src/parser"
+	"github.com/javanhut/RavenTerminal/src/shell"
 	"sync"
 )
 

@@ -12,7 +12,7 @@ import (
 	"syscall"
 
 	"github.com/creack/pty"
-	"github.com/javanhut/RavenTerminal/config"
+	"github.com/javanhut/RavenTerminal/src/config"
 )
 
 // PtySession manages a pseudo-terminal connection to a shell

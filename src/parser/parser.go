@@ -2,7 +2,7 @@ package parser
 
 import (
 	"fmt"
-	"github.com/javanhut/RavenTerminal/grid"
+	"github.com/javanhut/RavenTerminal/src/grid"
 	"net/url"
 	"strconv"
 	"strings"
