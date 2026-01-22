@@ -1,6 +1,6 @@
 module github.com/javanhut/RavenTerminal
 
-go 1.21
+go 1.24.0
 
 require (
 	github.com/creack/pty v1.1.24
@@ -14,5 +14,5 @@ require (
 require (
 	github.com/BurntSushi/toml v1.6.0 // indirect
 	golang.org/x/net v0.0.0-20211118161319-6a13c67c3ce4 // indirect
-	golang.org/x/text v0.16.0 // indirect
+	golang.org/x/text v0.33.0 // indirect
 )

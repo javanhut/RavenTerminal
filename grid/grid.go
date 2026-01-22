@@ -14,6 +14,7 @@ type CellFlags uint8
 
 const (
 	FlagBold CellFlags = 1 << iota
+	FlagDim
 	FlagItalic
 	FlagUnderline
 	FlagInverse
@@ -57,12 +58,20 @@ func RGBColor(r, g, b uint8) Color {
 	return Color{Type: ColorRGB, R: r, G: g, B: b}
 }
 
+// Cell width constants
+const (
+	CellWidthContinuation uint8 = 0 // Second cell of a wide character (placeholder)
+	CellWidthNormal       uint8 = 1 // Normal single-width character
+	CellWidthWide         uint8 = 2 // First cell of a wide character
+)
+
 // Cell represents a single terminal cell
 type Cell struct {
 	Char  rune
 	Fg    Color
 	Bg    Color
 	Flags CellFlags
+	Width uint8 // 0=continuation cell, 1=normal width, 2=wide cell start
 }
 
 // NewCell creates an empty cell
@@ -72,6 +81,7 @@ func NewCell() Cell {
 		Fg:    DefaultFg(),
 		Bg:    DefaultBg(),
 		Flags: 0,
+		Width: CellWidthNormal,
 	}
 }
 
@@ -85,10 +95,6 @@ type Grid struct {
 	scrollback   [][]Cell
 	scrollOffset int
 	mu           sync.RWMutex
-
-	// Saved cursor state
-	savedCursorCol int
-	savedCursorRow int
 
 	// Scroll region (1-based, inclusive)
 	scrollTop    int
@@ -107,6 +113,9 @@ type Grid struct {
 	selectionEndCol       int
 	selectionEndRow       int
 	selectionScrollOffset int
+
+	// Auto-wrap mode (DECAWM ?7) - default true
+	autoWrap bool
 }
 
 // NewGrid creates a new grid with the given dimensions
@@ -126,6 +135,7 @@ func NewGrid(cols, rows int) *Grid {
 		scrollTop:    1,
 		scrollBottom: rows,
 		lastChar:     ' ',
+		autoWrap:     true, // DECAWM ?7 default on
 	}
 }
 
@@ -159,18 +169,65 @@ func (g *Grid) WriteChar(c rune, fg, bg Color, flags CellFlags) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
+	// Handle auto-wrap if at end of line
 	if g.CursorCol >= g.Cols {
-		g.cursorNewline()
+		if g.autoWrap {
+			g.cursorNewline()
+		} else {
+			// No auto-wrap: stay at last column, overwrite
+			g.CursorCol = g.Cols - 1
+		}
 	}
 
+	// Get character width
+	charWidth := RuneWidth(c)
+	if charWidth == 0 {
+		// Zero-width character (combining mark) - ignore for now
+		// Future: could append to previous cell's char
+		return
+	}
+
+	// Check if wide character fits on current line
+	if charWidth == 2 && g.CursorCol >= g.Cols-1 {
+		if g.autoWrap {
+			// Wide char at last column - fill with space and wrap
+			idx := g.index(g.CursorCol, g.CursorRow)
+			g.cells[idx] = Cell{
+				Char:  ' ',
+				Fg:    g.lastFg,
+				Bg:    g.lastBg,
+				Width: CellWidthNormal,
+			}
+			g.cursorNewline()
+		} else {
+			// No auto-wrap: treat wide char as single width at last column
+			charWidth = 1
+		}
+	}
+
+	// Write the character to current cell
 	idx := g.index(g.CursorCol, g.CursorRow)
 	g.cells[idx] = Cell{
 		Char:  c,
 		Fg:    fg,
 		Bg:    bg,
 		Flags: flags,
+		Width: uint8(charWidth),
 	}
 	g.CursorCol++
+
+	// If wide character, write continuation cell
+	if charWidth == 2 && g.CursorCol < g.Cols {
+		contIdx := g.index(g.CursorCol, g.CursorRow)
+		g.cells[contIdx] = Cell{
+			Char:  ' ', // Placeholder for continuation
+			Fg:    fg,
+			Bg:    bg,
+			Flags: flags,
+			Width: CellWidthContinuation,
+		}
+		g.CursorCol++
+	}
 
 	// Save for REP sequence
 	g.lastChar = c
@@ -230,12 +287,19 @@ func (g *Grid) CarriageReturn() {
 	g.CursorCol = 0
 }
 
-// Backspace moves cursor back one position
+// Backspace moves cursor back one position, skipping continuation cells
 func (g *Grid) Backspace() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.CursorCol > 0 {
 		g.CursorCol--
+		// If we landed on a continuation cell, move back one more
+		if g.CursorCol > 0 {
+			idx := g.index(g.CursorCol, g.CursorRow)
+			if g.cells[idx].Width == CellWidthContinuation {
+				g.CursorCol--
+			}
+		}
 	}
 }
 
@@ -247,13 +311,47 @@ func (g *Grid) Tab() {
 	if g.CursorCol >= g.Cols {
 		g.CursorCol = g.Cols - 1
 	}
+	// Check if we landed on a continuation cell
+	if g.CursorCol > 0 {
+		idx := g.index(g.CursorCol, g.CursorRow)
+		if g.cells[idx].Width == CellWidthContinuation {
+			g.CursorCol--
+		}
+	}
 }
 
-// MoveCursor moves the cursor by the given delta
+// MoveCursor moves the cursor by the given delta, handling wide cells
 func (g *Grid) MoveCursor(dCol, dRow int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.CursorCol += dCol
+
+	// Handle horizontal movement with wide cell awareness
+	if dCol < 0 {
+		// Moving left - skip continuation cells
+		for i := 0; i > dCol && g.CursorCol > 0; i-- {
+			g.CursorCol--
+			// If we landed on a continuation cell, move back one more
+			if g.CursorCol > 0 {
+				idx := g.index(g.CursorCol, g.CursorRow)
+				if g.cells[idx].Width == CellWidthContinuation {
+					g.CursorCol--
+				}
+			}
+		}
+	} else if dCol > 0 {
+		// Moving right - skip over wide characters properly
+		for i := 0; i < dCol && g.CursorCol < g.Cols-1; i++ {
+			idx := g.index(g.CursorCol, g.CursorRow)
+			if g.cells[idx].Width == CellWidthWide {
+				// Wide char - move by 2
+				g.CursorCol += 2
+			} else {
+				g.CursorCol++
+			}
+		}
+	}
+
+	// Handle vertical movement
 	g.CursorRow += dRow
 
 	// Clamp to bounds
@@ -290,6 +388,15 @@ func (g *Grid) SetCursorPos(col, row int) {
 	}
 	if g.CursorRow >= g.Rows {
 		g.CursorRow = g.Rows - 1
+	}
+
+	// After clamping, check if we landed on a continuation cell
+	// If so, move left to the wide character start
+	if g.CursorCol > 0 {
+		idx := g.index(g.CursorCol, g.CursorRow)
+		if g.cells[idx].Width == CellWidthContinuation {
+			g.CursorCol--
+		}
 	}
 }
 
@@ -627,6 +734,29 @@ func (g *Grid) ClearLineToStart() {
 func (g *Grid) DeleteChars(n int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+
+	// If cursor is on a continuation cell, clear the wide char first
+	if g.CursorCol > 0 {
+		idx := g.index(g.CursorCol, g.CursorRow)
+		if g.cells[idx].Width == CellWidthContinuation {
+			// Clear the wide character (both cells)
+			g.cells[g.index(g.CursorCol-1, g.CursorRow)] = NewCell()
+			g.cells[idx] = NewCell()
+		}
+	}
+
+	// Check if the end of deletion range would break a wide character
+	endPos := g.CursorCol + n
+	if endPos < g.Cols {
+		idx := g.index(endPos, g.CursorRow)
+		if g.cells[idx].Width == CellWidthContinuation {
+			// Would break a wide char - clear it first
+			g.cells[g.index(endPos-1, g.CursorRow)] = NewCell()
+			g.cells[idx] = NewCell()
+		}
+	}
+
+	// Now perform the shift
 	for col := g.CursorCol; col < g.Cols-n; col++ {
 		g.cells[g.index(col, g.CursorRow)] = g.cells[g.index(col+n, g.CursorRow)]
 	}
@@ -639,9 +769,30 @@ func (g *Grid) DeleteChars(n int) {
 func (g *Grid) InsertChars(n int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+
+	// If cursor is on a continuation cell, clear the wide char first
+	if g.CursorCol > 0 {
+		idx := g.index(g.CursorCol, g.CursorRow)
+		if g.cells[idx].Width == CellWidthContinuation {
+			g.cells[g.index(g.CursorCol-1, g.CursorRow)] = NewCell()
+			g.cells[idx] = NewCell()
+		}
+	}
+
+	// Check if shifting would break a wide character at the end
+	// If the last cell that would be kept is a wide char start, it would lose its continuation
+	if g.Cols-n >= 0 && g.Cols-n < g.Cols {
+		idx := g.index(g.Cols-n, g.CursorRow)
+		if idx >= 0 && idx < len(g.cells) && g.cells[idx].Width == CellWidthWide {
+			g.cells[idx] = NewCell()
+		}
+	}
+
+	// Shift right
 	for col := g.Cols - 1; col >= g.CursorCol+n; col-- {
 		g.cells[g.index(col, g.CursorRow)] = g.cells[g.index(col-n, g.CursorRow)]
 	}
+	// Clear inserted positions
 	for col := g.CursorCol; col < g.CursorCol+n && col < g.Cols; col++ {
 		g.cells[g.index(col, g.CursorRow)] = NewCell()
 	}
@@ -677,22 +828,6 @@ func (g *Grid) InsertLines(n int) {
 			g.cells[g.index(col, row)] = NewCell()
 		}
 	}
-}
-
-// SaveCursor saves the current cursor position
-func (g *Grid) SaveCursor() {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.savedCursorCol = g.CursorCol
-	g.savedCursorRow = g.CursorRow
-}
-
-// RestoreCursor restores the saved cursor position
-func (g *Grid) RestoreCursor() {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.CursorCol = g.savedCursorCol
-	g.CursorRow = g.savedCursorRow
 }
 
 // Resize resizes the grid
@@ -747,8 +882,32 @@ func min(a, b int) int {
 func (g *Grid) EraseChars(n int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for i := 0; i < n && g.CursorCol+i < g.Cols; i++ {
-		g.cells[g.index(g.CursorCol+i, g.CursorRow)] = NewCell()
+
+	startCol := g.CursorCol
+	endCol := g.CursorCol + n
+	if endCol > g.Cols {
+		endCol = g.Cols
+	}
+
+	// If we start on a continuation cell, include the wide char start
+	if startCol > 0 {
+		idx := g.index(startCol, g.CursorRow)
+		if g.cells[idx].Width == CellWidthContinuation {
+			startCol--
+		}
+	}
+
+	// If we end on a wide char start, include the continuation cell
+	if endCol < g.Cols && endCol > 0 {
+		idx := g.index(endCol-1, g.CursorRow)
+		if g.cells[idx].Width == CellWidthWide {
+			endCol++
+		}
+	}
+
+	// Erase the range
+	for col := startCol; col < endCol && col < g.Cols; col++ {
+		g.cells[g.index(col, g.CursorRow)] = NewCell()
 	}
 }
 
@@ -766,6 +925,7 @@ func (g *Grid) RepeatChar(n int) {
 			Fg:    g.lastFg,
 			Bg:    g.lastBg,
 			Flags: g.lastFlags,
+			Width: CellWidthNormal,
 		}
 		g.CursorCol++
 	}
@@ -795,4 +955,18 @@ func (g *Grid) GetScrollRegion() (top, bottom int) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	return g.scrollTop, g.scrollBottom
+}
+
+// SetAutoWrap sets the auto-wrap mode (DECAWM ?7)
+func (g *Grid) SetAutoWrap(enabled bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.autoWrap = enabled
+}
+
+// GetAutoWrap returns the current auto-wrap mode
+func (g *Grid) GetAutoWrap() bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.autoWrap
 }

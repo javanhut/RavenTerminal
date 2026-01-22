@@ -90,22 +90,22 @@ After installation, launch from:
 
 ### General
 
-| Keybinding     | Action                  |
-|----------------|-------------------------|
-| Ctrl+Q         | Exit terminal           |
-| Ctrl+C         | Copy visible screen     |
-| Ctrl+P         | Paste clipboard         |
-| Shift+Enter    | Toggle fullscreen mode  |
-| Ctrl+Shift+K   | Show/hide help panel    |
-| Ctrl+Shift+P   | Open settings menu      |
+| Keybinding       | Action                  |
+|------------------|-------------------------|
+| Ctrl+Q           | Exit terminal           |
+| Ctrl+Shift+C     | Copy selection          |
+| Ctrl+Shift+P     | Paste clipboard         |
+| Shift+Enter      | Toggle fullscreen mode  |
+| Ctrl+Shift+K     | Show/hide help panel    |
+| Ctrl+Shift+S     | Open settings menu      |
 
 ### Zoom
 
-| Keybinding     | Action              |
-|----------------|---------------------|
-| Ctrl+Shift++   | Zoom in             |
-| Ctrl+Shift+-   | Zoom out            |
-| Ctrl+Shift+0   | Reset zoom          |
+| Keybinding       | Action              |
+|------------------|---------------------|
+| Ctrl+Shift++     | Zoom in             |
+| Ctrl+Shift+-     | Zoom out            |
+| Ctrl+Shift+0     | Reset zoom          |
 
 ### Tab Management
 
@@ -123,7 +123,10 @@ After installation, launch from:
 | Ctrl+Shift+V     | Split vertical            |
 | Ctrl+Shift+H     | Split horizontal          |
 | Ctrl+Shift+W     | Close current pane        |
+| Ctrl+Shift+]     | Next pane                 |
+| Ctrl+Shift+[     | Previous pane             |
 | Shift+Tab        | Cycle panes               |
+| Ctrl+R           | Toggle resize mode        |
 
 ### Scrolling
 
@@ -138,8 +141,8 @@ After installation, launch from:
 
 ### Mouse
 
-| Action           | Behavior                         |
-|------------------|----------------------------------|
+| Action           | Behavior                          |
+|------------------|-----------------------------------|
 | Left-click drag  | Select text and copy to clipboard |
 | Right-click      | Copy selection or paste clipboard |
 

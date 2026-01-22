@@ -109,6 +109,8 @@ func NewPtySession(cols, rows uint16, startDir string) (*PtySession, error) {
 	env = replaceEnv(env, "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:"+os.Getenv("PATH"))
 	env = replaceEnv(env, "TERM", "xterm-256color")
 	env = replaceEnv(env, "COLORTERM", "truecolor")
+	env = replaceEnv(env, "TERM_PROGRAM", "RavenTerminal")
+	env = replaceEnv(env, "TERM_PROGRAM_VERSION", "1.0")
 	env = replaceEnv(env, "RAVEN_TERMINAL", "1")
 	env = replaceEnv(env, "HOME", currentUser.HomeDir)
 	env = replaceEnv(env, "USER", currentUser.Username)

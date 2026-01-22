@@ -112,7 +112,7 @@ fix_stale_desktop_entry() {
     local create_launcher="$4"
     local exec_path
 
-    exec_path="$(desktop_exec_path "$desktop_file")"
+    exec_path="$(desktop_exec_path "$desktop_file")" || exec_path=""
     if [ -z "$exec_path" ]; then
         return 0
     fi
@@ -323,6 +323,10 @@ install_user() {
     cp "$REPO_DIR/$APP_NAME" "$USER_BIN_DIR/"
     chmod +x "$USER_BIN_DIR/$APP_NAME"
     print_success "Binary installed to $USER_BIN_DIR/$APP_NAME"
+
+    # Clean up build artifact immediately after copying
+    rm -f "$REPO_DIR/$APP_NAME"
+    print_info "Cleaned up build artifact from source directory"
     
     # Install launcher wrapper
     cp "$SCRIPT_DIR/raven-terminal-wrapper.sh" "$USER_BIN_DIR/raven-terminal-launcher"
@@ -388,6 +392,10 @@ install_global() {
     sudo cp "$REPO_DIR/$APP_NAME" "$GLOBAL_BIN_DIR/"
     sudo chmod +x "$GLOBAL_BIN_DIR/$APP_NAME"
     print_success "Binary installed to $GLOBAL_BIN_DIR/$APP_NAME"
+
+    # Clean up build artifact immediately after copying
+    rm -f "$REPO_DIR/$APP_NAME"
+    print_info "Cleaned up build artifact from source directory"
     
     # Install launcher wrapper
     sudo cp "$SCRIPT_DIR/raven-terminal-wrapper.sh" "$GLOBAL_BIN_DIR/raven-terminal-launcher"
@@ -434,12 +442,6 @@ install_global() {
     fi
 }
 
-cleanup_build() {
-    if [ "$BUILD_ONLY" = false ] && [ -f "$REPO_DIR/$APP_NAME" ]; then
-        rm -f "$REPO_DIR/$APP_NAME"
-        print_info "Cleaned up build artifacts"
-    fi
-}
 
 print_completion() {
     echo ""
@@ -497,8 +499,7 @@ main() {
             fix_stale_desktop_entry "$USER_APP_DIR/$APP_NAME.desktop" "$USER_BIN_DIR/raven-terminal-launcher" "$GLOBAL_BIN_DIR/raven-terminal-launcher" true
             ;;
     esac
-    
-    cleanup_build
+
     print_completion
 }
 

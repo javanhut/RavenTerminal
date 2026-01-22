@@ -2,9 +2,11 @@ package render
 
 import (
 	"fmt"
+	"github.com/javanhut/RavenTerminal/aipanel"
 	"github.com/javanhut/RavenTerminal/fonts"
 	"github.com/javanhut/RavenTerminal/grid"
 	"github.com/javanhut/RavenTerminal/menu"
+	"github.com/javanhut/RavenTerminal/searchpanel"
 	"github.com/javanhut/RavenTerminal/tab"
 	"image"
 	"image/color"
@@ -154,8 +156,8 @@ func NewRenderer() (*Renderer, error) {
 		paddingBottom:   12.0,
 		tabBarWidth:     135.0,
 		currentFont:     fonts.DefaultFontName(),
-		glyphs:          make(map[rune]Glyph),
-		atlasSize:       512, // Larger atlas for Nerd Font icons
+		glyphs: make(map[rune]Glyph),
+		// atlasSize calculated dynamically in loadFontData based on glyph count
 	}
 
 	if err := r.initGL(); err != nil {
@@ -204,27 +206,25 @@ func (r *Renderer) loadFontData(fontData []byte) error {
 	advance, _ := face.GlyphAdvance('M')
 	r.cellWidth = float32(advance.Ceil())
 
-	// Create atlas image (RGBA for anti-aliasing)
-	atlas := image.NewRGBA(image.Rect(0, 0, r.atlasSize, r.atlasSize))
-	// Fill with transparent
-	draw.Draw(atlas, atlas.Bounds(), image.Transparent, image.Point{}, draw.Src)
-
-	// Drawer for rendering text
-	drawer := &font.Drawer{
-		Dst:  atlas,
-		Src:  image.White,
-		Face: face,
-	}
-
 	// Character ranges to render (ASCII + Extended + Nerd Font icons)
+	// Defined BEFORE atlas creation so we can calculate required size
 	charRanges := []struct{ start, end rune }{
 		{32, 126},        // Printable ASCII
 		{160, 255},       // Extended Latin-1
+		{0x2000, 0x206F}, // General Punctuation (includes various spaces, dashes, dots)
+		{0x2100, 0x214F}, // Letterlike Symbols
+		{0x2190, 0x21FF}, // Arrows
+		{0x2200, 0x22FF}, // Mathematical Operators
+		{0x2300, 0x23FF}, // Miscellaneous Technical
 		{0x2500, 0x257F}, // Box Drawing
 		{0x2580, 0x259F}, // Block Elements
 		{0x25A0, 0x25FF}, // Geometric Shapes
 		{0x2600, 0x26FF}, // Miscellaneous Symbols
 		{0x2700, 0x27BF}, // Dingbats
+		{0x27C0, 0x27EF}, // Miscellaneous Mathematical Symbols-A
+		{0x27F0, 0x27FF}, // Supplemental Arrows-A
+		{0x2900, 0x297F}, // Supplemental Arrows-B
+		{0x2B00, 0x2BFF}, // Miscellaneous Symbols and Arrows
 		{0xE0A0, 0xE0D4}, // Powerline symbols
 		{0xE200, 0xE2A9}, // Pomicons
 		{0xE5FA, 0xE6B5}, // Seti-UI + Custom
@@ -237,9 +237,38 @@ func (r *Renderer) loadFontData(fontData []byte) error {
 		{0xF500, 0xFD46}, // Material Design Icons
 	}
 
-	x, y := 0, metrics.Ascent.Ceil()
+	// Calculate required atlas size based on glyph count
 	charHeight := int(r.cellHeight)
 	charWidth := int(r.cellWidth)
+
+	totalGlyphs := 0
+	for _, cr := range charRanges {
+		totalGlyphs += int(cr.end - cr.start + 1)
+	}
+
+	// Calculate atlas dimensions to fit all glyphs
+	glyphsPerRow := 64 // reasonable row width for GPU
+	rowsNeeded := (totalGlyphs + glyphsPerRow - 1) / glyphsPerRow
+
+	atlasWidth := glyphsPerRow * charWidth
+	atlasHeight := rowsNeeded * charHeight
+
+	// Round to next power of 2 for GPU efficiency
+	r.atlasSize = nextPowerOf2(max(atlasWidth, atlasHeight))
+
+	// Create atlas image (RGBA for anti-aliasing)
+	atlas := image.NewRGBA(image.Rect(0, 0, r.atlasSize, r.atlasSize))
+	// Fill with transparent
+	draw.Draw(atlas, atlas.Bounds(), image.Transparent, image.Point{}, draw.Src)
+
+	// Drawer for rendering text
+	drawer := &font.Drawer{
+		Dst:  atlas,
+		Src:  image.White,
+		Face: face,
+	}
+
+	x, y := 0, metrics.Ascent.Ceil()
 
 	for _, cr := range charRanges {
 		for c := cr.start; c <= cr.end; c++ {
@@ -249,7 +278,9 @@ func (r *Renderer) loadFontData(fontData []byte) error {
 				y += charHeight
 			}
 			if y+charHeight > r.atlasSize {
-				break // Atlas full
+				// With dynamic sizing this shouldn't happen, but warn if it does
+				fmt.Printf("Warning: Atlas overflow at glyph U+%04X, atlas=%d\n", c, r.atlasSize)
+				continue
 			}
 
 			// Check if glyph exists in font
@@ -416,6 +447,577 @@ func (r *Renderer) RenderWithHelp(tm *tab.TabManager, width, height int, cursorV
 	}
 }
 
+// RenderWithHelpAndPanels renders the terminal with optional help and overlay panels.
+func (r *Renderer) RenderWithHelpAndPanels(tm *tab.TabManager, width, height int, cursorVisible bool, showHelp bool, searchPanel *searchpanel.Panel, aiPanel *aipanel.Panel) {
+	proj := orthoMatrix(0, float32(width), float32(height), 0, -1, 1)
+
+	// Clear background
+	gl.ClearColor(r.theme.Background[0], r.theme.Background[1], r.theme.Background[2], r.theme.Background[3])
+	gl.Clear(gl.COLOR_BUFFER_BIT)
+
+	// Render tab bar
+	r.renderTabBar(tm, width, height, proj)
+
+	// Render terminal content with split pane support
+	activeTab := tm.ActiveTab()
+	if activeTab != nil {
+		r.renderPanes(activeTab, width, height, proj, cursorVisible)
+	}
+
+	if searchPanel != nil && searchPanel.Open {
+		r.renderSearchPanel(searchPanel, width, height, proj)
+	}
+	if aiPanel != nil && aiPanel.Open {
+		r.renderAIPanel(aiPanel, width, height, proj)
+	}
+
+	if showHelp {
+		r.renderHelpPanel(width, height, proj)
+	}
+}
+
+func (r *Renderer) renderSearchPanel(panel *searchpanel.Panel, width, height int, proj [16]float32) {
+	layout := panel.Layout(width, height, r.cellWidth, r.cellHeight)
+
+	panelBg := [4]float32{0.05, 0.06, 0.08, 0.95}
+	borderColor := r.theme.TabActive
+	borderWidth := float32(2)
+
+	r.drawRect(layout.PanelX, layout.PanelY, layout.PanelWidth, layout.PanelHeight, panelBg, proj)
+	r.drawRect(layout.PanelX, layout.PanelY, layout.PanelWidth, borderWidth, borderColor, proj)
+	r.drawRect(layout.PanelX, layout.PanelY+layout.PanelHeight-borderWidth, layout.PanelWidth, borderWidth, borderColor, proj)
+	r.drawRect(layout.PanelX, layout.PanelY, borderWidth, layout.PanelHeight, borderColor, proj)
+	r.drawRect(layout.PanelX+layout.PanelWidth-borderWidth, layout.PanelY, borderWidth, layout.PanelHeight, borderColor, proj)
+
+	maxChars := int(layout.ContentWidth/r.cellWidth) - 2
+	if maxChars < 10 {
+		maxChars = 10
+	}
+
+	r.drawText(layout.ContentX, layout.HeaderY, "Web Search", r.theme.TabActive, proj)
+
+	r.drawText(layout.ContentX, layout.InputLabelY, "Query", r.theme.Foreground, proj)
+	inputBoxColor := [4]float32{0.03, 0.03, 0.05, 1.0}
+	r.drawRect(layout.ContentX, layout.InputBoxY, layout.ContentWidth, layout.LineHeight, inputBoxColor, proj)
+
+	inputText := panel.Query
+	if len(inputText) > maxChars {
+		inputText = "..." + inputText[len(inputText)-maxChars+3:]
+	}
+	r.drawText(layout.ContentX+8, layout.InputBoxY+layout.LineHeight*0.75, inputText+"_", r.theme.TabActive, proj)
+
+	status := panel.Status
+	if panel.Loading {
+		spinner := panel.SpinnerFrame()
+		if status == "" || status == "Searching..." || status == "Loading preview..." {
+			status = spinner + " Loading..."
+		} else {
+			status = spinner + " " + status
+		}
+	}
+	if status != "" {
+		if len(status) > maxChars {
+			status = status[:maxChars-3] + "..."
+		}
+		r.drawText(layout.ContentX, layout.StatusY, status, r.theme.Cursor, proj)
+	}
+
+	if panel.Mode == searchpanel.ModePreview {
+		r.renderSearchPreview(panel, layout, maxChars, proj)
+	} else {
+		r.renderSearchResults(panel, layout, maxChars, proj)
+	}
+
+	footerText := "Enter: search | Up/Down: history | Ctrl+O: open in browser"
+	proxyState := "Proxy: off"
+	if panel.ProxyEnabled {
+		proxyState = "Proxy: on"
+	}
+	footerText = footerText + " | " + proxyState
+	if panel.Mode == searchpanel.ModePreview {
+		footerText = "Esc: back | Ctrl+O: open | " + proxyState
+	}
+	if len(footerText) > maxChars {
+		footerText = footerText[:maxChars-3] + "..."
+	}
+	r.drawText(layout.ContentX, layout.FooterY, footerText, [4]float32{0.6, 0.6, 0.6, 1.0}, proj)
+}
+
+func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [16]float32) {
+	layout := panel.Layout(width, height, r.cellWidth, r.cellHeight)
+
+	panelBg := [4]float32{0.05, 0.06, 0.08, 0.95}
+	borderColor := r.theme.TabActive
+	borderWidth := float32(2)
+
+	r.drawRect(layout.PanelX, layout.PanelY, layout.PanelWidth, layout.PanelHeight, panelBg, proj)
+	r.drawRect(layout.PanelX, layout.PanelY, layout.PanelWidth, borderWidth, borderColor, proj)
+	r.drawRect(layout.PanelX, layout.PanelY+layout.PanelHeight-borderWidth, layout.PanelWidth, borderWidth, borderColor, proj)
+	r.drawRect(layout.PanelX, layout.PanelY, borderWidth, layout.PanelHeight, borderColor, proj)
+	r.drawRect(layout.PanelX+layout.PanelWidth-borderWidth, layout.PanelY, borderWidth, layout.PanelHeight, borderColor, proj)
+
+	maxChars := int(layout.ContentWidth/r.cellWidth) - 2
+	if maxChars < 10 {
+		maxChars = 10
+	}
+
+	r.drawText(layout.ContentX, layout.HeaderY, "AI Chat", r.theme.TabActive, proj)
+
+	status := panel.Status
+	if panel.Loading {
+		spinner := panel.SpinnerFrame()
+		if status == "" || status == "Thinking..." || status == "Loading model..." {
+			status = spinner + " Thinking..."
+		} else {
+			status = spinner + " " + status
+		}
+	}
+	if status != "" {
+		if len(status) > maxChars {
+			status = status[:maxChars-3] + "..."
+		}
+		r.drawText(layout.ContentX, layout.StatusY, status, r.theme.Cursor, proj)
+	}
+
+	r.drawText(layout.ContentX, layout.InputLabelY, "Ask (Shift+Enter: newline)", r.theme.Foreground, proj)
+	inputBoxColor := [4]float32{0.03, 0.03, 0.05, 1.0}
+	r.drawRect(layout.ContentX, layout.InputBoxY, layout.ContentWidth, layout.InputBoxH, inputBoxColor, proj)
+
+	// Draw border around input box
+	inputBorderColor := [4]float32{0.2, 0.2, 0.3, 1.0}
+	r.drawRect(layout.ContentX, layout.InputBoxY, layout.ContentWidth, 1, inputBorderColor, proj)
+	r.drawRect(layout.ContentX, layout.InputBoxY+layout.InputBoxH-1, layout.ContentWidth, 1, inputBorderColor, proj)
+	r.drawRect(layout.ContentX, layout.InputBoxY, 1, layout.InputBoxH, inputBorderColor, proj)
+	r.drawRect(layout.ContentX+layout.ContentWidth-1, layout.InputBoxY, 1, layout.InputBoxH, inputBorderColor, proj)
+
+	// Wrap input text for multiline display
+	inputLines := panel.WrapInput(maxChars - 2)
+	panel.EnsureInputCursorVisible(layout.InputLines)
+
+	// Draw visible input lines
+	inputY := layout.InputBoxY + layout.LineHeight*0.75
+	visibleInputLines := layout.InputLines
+	inputStartLine := panel.InputScroll
+
+	for i := 0; i < visibleInputLines && inputStartLine+i < len(inputLines); i++ {
+		lineText := inputLines[inputStartLine+i]
+		// Add cursor on the last line
+		isLastLine := inputStartLine+i == len(inputLines)-1
+		if isLastLine {
+			lineText += "_"
+		}
+		r.drawText(layout.ContentX+8, inputY, lineText, r.theme.TabActive, proj)
+		inputY += layout.LineHeight
+	}
+
+	// If no input, show cursor on first line
+	if len(inputLines) == 0 || (len(inputLines) == 1 && inputLines[0] == "") {
+		r.drawText(layout.ContentX+8, layout.InputBoxY+layout.LineHeight*0.75, "_", r.theme.TabActive, proj)
+	}
+
+	// Show scroll indicator if input has more lines
+	if len(inputLines) > visibleInputLines {
+		scrollIndicator := fmt.Sprintf("↕ %d/%d", panel.InputScroll+1, len(inputLines)-visibleInputLines+1)
+		r.drawText(layout.ContentX+layout.ContentWidth-float32(len(scrollIndicator))*r.cellWidth-8,
+			layout.InputBoxY+layout.InputBoxH-layout.LineHeight*0.3,
+			scrollIndicator, [4]float32{0.5, 0.5, 0.5, 1.0}, proj)
+	}
+
+	lines := aipanel.BuildWrappedLinesWithThinking(panel.Messages, maxChars, panel.ShowThinking, panel.ThinkingExpanded)
+	panel.WrapChars = maxChars
+	panel.WrappedLines = lines
+
+	if len(lines) == 0 && !panel.Loading {
+		r.drawText(layout.ContentX, layout.MessagesStart, "Ask a quick question to begin.", [4]float32{0.6, 0.6, 0.6, 1.0}, proj)
+	} else {
+		visibleLines := layout.VisibleLines
+		totalLines := len(lines)
+		maxScroll := totalLines - visibleLines
+		if maxScroll < 0 {
+			maxScroll = 0
+		}
+		if panel.AutoScroll {
+			panel.Scroll = maxScroll
+			panel.AutoScroll = false
+		}
+		if panel.Scroll > maxScroll {
+			panel.Scroll = maxScroll
+		}
+		if panel.Scroll < 0 {
+			panel.Scroll = 0
+		}
+
+		startLine := panel.Scroll
+		lineY := layout.MessagesStart
+		codeColor := [4]float32{0.7, 0.8, 0.6, 1.0}       // Greenish for code
+		headerColor := [4]float32{0.9, 0.7, 0.4, 1.0}     // Orange/gold for headers
+		bulletColor := [4]float32{0.7, 0.7, 0.9, 1.0}     // Light blue for bullets
+		thinkingColor := [4]float32{0.6, 0.5, 0.7, 0.85}  // Purple/dim for thinking
+		thinkingHeaderColor := [4]float32{0.7, 0.5, 0.8, 1.0} // Brighter purple for thinking header
+		for i := 0; i < visibleLines && startLine+i < totalLines; i++ {
+			line := lines[startLine+i]
+			if strings.TrimSpace(line.Text) != "" {
+				color := r.theme.Foreground
+				if line.IsThinking {
+					// Thinking content uses purple/dim colors
+					if line.IsHeader {
+						color = thinkingHeaderColor
+					} else {
+						color = thinkingColor
+					}
+				} else if line.InCode {
+					color = codeColor
+				} else if line.IsHeader {
+					color = headerColor
+				} else if line.IsBullet {
+					color = bulletColor
+				} else {
+					switch line.Role {
+					case "user":
+						color = r.theme.TabActive
+					case "assistant":
+						color = r.theme.Foreground
+					case "error":
+						color = [4]float32{0.9, 0.3, 0.3, 1.0} // Red for errors
+					default:
+						if line.Role != "" {
+							color = r.theme.Cursor
+						}
+					}
+				}
+				r.drawText(layout.ContentX, lineY, line.Text, color, proj)
+			}
+			lineY += layout.LineHeight
+		}
+	}
+
+	footerText := "Ctrl+Enter: send | Ctrl+C: copy"
+	if aipanel.HasThinkingContent(panel.Messages) {
+		footerText += " | Ctrl+T: thinking"
+	}
+	if len(footerText) > maxChars {
+		footerText = footerText[:maxChars-3] + "..."
+	}
+	r.drawText(layout.ContentX, layout.FooterY, footerText, [4]float32{0.6, 0.6, 0.6, 1.0}, proj)
+}
+
+func (r *Renderer) renderSearchResults(panel *searchpanel.Panel, layout searchpanel.Layout, maxChars int, proj [16]float32) {
+	if len(panel.Results) == 0 {
+		if !panel.Loading && strings.TrimSpace(panel.Query) != "" {
+			r.drawText(layout.ContentX, layout.ResultsStart, "No results.", [4]float32{0.6, 0.6, 0.6, 1.0}, proj)
+		}
+		return
+	}
+
+	linesPerResult := panel.LinesPerResult()
+	visibleLines := layout.VisibleLines
+
+	for i, result := range panel.Results {
+		startLine := i * linesPerResult
+		if startLine+linesPerResult <= panel.ResultsScroll {
+			continue
+		}
+		if startLine >= panel.ResultsScroll+visibleLines {
+			break
+		}
+
+		drawLine := startLine - panel.ResultsScroll
+		drawY := layout.ResultsStart + float32(drawLine)*layout.LineHeight
+
+		if i == panel.Selected {
+			highlightColor := [4]float32{0.12, 0.14, 0.22, 1.0}
+			r.drawRect(layout.ContentX, drawY-layout.LineHeight+6, layout.ContentWidth, layout.LineHeight*2.2, highlightColor, proj)
+		}
+
+		title := strings.TrimSpace(result.Title)
+		if len(title) > maxChars {
+			title = title[:maxChars-3] + "..."
+		}
+		r.drawText(layout.ContentX, drawY, title, r.theme.TabActive, proj)
+
+		subLine := strings.TrimSpace(result.Snippet)
+		if subLine == "" {
+			subLine = strings.TrimSpace(result.URL)
+		}
+		if len(subLine) > maxChars {
+			subLine = subLine[:maxChars-3] + "..."
+		}
+		r.drawText(layout.ContentX+12, drawY+layout.LineHeight, subLine, r.theme.Foreground, proj)
+	}
+}
+
+func (r *Renderer) renderSearchPreview(panel *searchpanel.Panel, layout searchpanel.Layout, maxChars int, proj [16]float32) {
+	header := "Preview"
+	if panel.PreviewTitle != "" {
+		header = "Preview: " + panel.PreviewTitle
+	}
+	if len(header) > maxChars {
+		header = header[:maxChars-3] + "..."
+	}
+	r.drawText(layout.ContentX, layout.ResultsStart, header, r.theme.TabActive, proj)
+
+	wrappedLines := buildWrappedPreview(panel.PreviewLines, maxChars, r.theme)
+	panel.PreviewWrapped = nil
+	panel.PreviewWrapChars = maxChars
+	for _, line := range wrappedLines {
+		panel.PreviewWrapped = append(panel.PreviewWrapped, line.text)
+	}
+
+	visibleLines := layout.VisibleLines - 1
+	if visibleLines < 1 {
+		visibleLines = 1
+	}
+	startLine := panel.PreviewScroll
+	maxScroll := len(wrappedLines) - visibleLines
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if startLine > maxScroll {
+		startLine = maxScroll
+	}
+
+	lineY := layout.ResultsStart + layout.LineHeight
+	for i := 0; i < visibleLines && startLine+i < len(wrappedLines); i++ {
+		line := wrappedLines[startLine+i]
+		r.drawText(layout.ContentX, lineY, line.text, line.color, proj)
+		lineY += layout.LineHeight
+	}
+}
+
+type styledLine struct {
+	text  string
+	color [4]float32
+}
+
+func buildWrappedPreview(lines []string, maxChars int, theme Theme) []styledLine {
+	out := []styledLine{}
+	inCode := false
+
+	codeColor := [4]float32{0.7, 0.8, 0.6, 1.0}   // Greenish for code
+	headerColor := [4]float32{0.9, 0.7, 0.4, 1.0} // Orange/gold for headers
+	bulletColor := [4]float32{0.7, 0.7, 0.9, 1.0} // Light blue for bullets
+	quoteColor := [4]float32{0.6, 0.7, 0.6, 1.0}  // Muted green for quotes
+
+	for _, raw := range lines {
+		trimmed := strings.TrimSpace(raw)
+
+		// Toggle code block state
+		if strings.HasPrefix(trimmed, "```") {
+			inCode = !inCode
+			continue
+		}
+
+		// Skip empty lines but add spacing
+		if trimmed == "" {
+			out = append(out, styledLine{text: "", color: theme.Foreground})
+			continue
+		}
+
+		// Skip table separators
+		if strings.HasPrefix(trimmed, "|--") || strings.HasPrefix(trimmed, "| --") ||
+			strings.HasPrefix(trimmed, "|:") || strings.HasPrefix(trimmed, "| :") {
+			continue
+		}
+
+		color := theme.Foreground
+		prefix := ""
+		indent := ""
+		text := trimmed
+
+		if inCode {
+			// Code block - preserve as-is
+			if len(text) > maxChars {
+				text = text[:maxChars-3] + "..."
+			}
+			out = append(out, styledLine{text: text, color: codeColor})
+			continue
+		}
+
+		// Handle headers
+		if strings.HasPrefix(text, "#") {
+			level := 0
+			for level < len(text) && text[level] == '#' {
+				level++
+			}
+			text = strings.TrimSpace(text[level:])
+			if text == "" {
+				continue
+			}
+			if level > 3 {
+				level = 3
+			}
+			prefix = strings.Repeat("=", level) + " "
+			text = stripInlineMarkdown(text)
+			wrapped := wrapText(text, maxChars, prefix, "   ")
+			for _, line := range wrapped {
+				out = append(out, styledLine{text: line, color: headerColor})
+			}
+			continue
+		}
+
+		// Handle bullet points
+		if strings.HasPrefix(text, "- ") || strings.HasPrefix(text, "* ") || strings.HasPrefix(text, "+ ") {
+			prefix = "• "
+			text = strings.TrimSpace(text[2:])
+			indent = "  "
+			text = stripInlineMarkdown(text)
+			wrapped := wrapText(text, maxChars, prefix, indent)
+			for _, line := range wrapped {
+				out = append(out, styledLine{text: line, color: bulletColor})
+			}
+			continue
+		}
+
+		// Handle numbered lists
+		if len(text) > 2 && text[0] >= '0' && text[0] <= '9' {
+			dotIdx := strings.Index(text, ".")
+			if dotIdx > 0 && dotIdx < 4 {
+				prefix = text[:dotIdx+1] + " "
+				text = strings.TrimSpace(text[dotIdx+1:])
+				indent = strings.Repeat(" ", len(prefix))
+				text = stripInlineMarkdown(text)
+				wrapped := wrapText(text, maxChars, prefix, indent)
+				for _, line := range wrapped {
+					out = append(out, styledLine{text: line, color: bulletColor})
+				}
+				continue
+			}
+		}
+
+		// Handle blockquotes
+		if strings.HasPrefix(text, "> ") {
+			prefix = "│ "
+			text = strings.TrimSpace(text[2:])
+			indent = "  "
+			text = stripInlineMarkdown(text)
+			wrapped := wrapText(text, maxChars, prefix, indent)
+			for _, line := range wrapped {
+				out = append(out, styledLine{text: line, color: quoteColor})
+			}
+			continue
+		}
+
+		// Handle table rows
+		if strings.HasPrefix(trimmed, "|") && strings.HasSuffix(trimmed, "|") {
+			cells := strings.Split(trimmed, "|")
+			var cellTexts []string
+			for _, cell := range cells {
+				cell = strings.TrimSpace(cell)
+				if cell != "" {
+					cellTexts = append(cellTexts, stripInlineMarkdown(cell))
+				}
+			}
+			if len(cellTexts) > 0 {
+				text = strings.Join(cellTexts, " | ")
+				wrapped := wrapText(text, maxChars, "", "")
+				for _, line := range wrapped {
+					out = append(out, styledLine{text: line, color: theme.Foreground})
+				}
+			}
+			continue
+		}
+
+		// Regular text
+		text = stripInlineMarkdown(text)
+		wrapped := wrapText(text, maxChars, prefix, indent)
+		for _, line := range wrapped {
+			out = append(out, styledLine{text: line, color: color})
+		}
+	}
+	return out
+}
+
+func stripInlineMarkdown(text string) string {
+	// Remove bold/italic markers
+	text = strings.ReplaceAll(text, "**", "")
+	text = strings.ReplaceAll(text, "__", "")
+	text = strings.ReplaceAll(text, "*", "")
+	text = strings.ReplaceAll(text, "_", "")
+	text = strings.ReplaceAll(text, "`", "")
+
+	// Convert links [text](url) to just text
+	for {
+		start := strings.Index(text, "[")
+		if start == -1 {
+			break
+		}
+		end := strings.Index(text[start:], "](")
+		if end == -1 {
+			break
+		}
+		end += start
+		urlEnd := strings.Index(text[end:], ")")
+		if urlEnd == -1 {
+			break
+		}
+		urlEnd += end
+		linkText := text[start+1 : end]
+		text = text[:start] + linkText + text[urlEnd+1:]
+	}
+
+	return strings.TrimSpace(text)
+}
+
+func wrapText(text string, maxChars int, prefix, indent string) []string {
+	if maxChars <= 0 {
+		return []string{prefix + text}
+	}
+	if prefix == "" && indent == "" && len(text) <= maxChars {
+		return []string{text}
+	}
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return []string{strings.TrimRight(prefix, " ")}
+	}
+
+	lines := []string{}
+	line := prefix
+	lineLimit := maxChars
+	if lineLimit < 4 {
+		lineLimit = 4
+	}
+
+	for _, word := range words {
+		if line == "" {
+			line = prefix
+		}
+		next := line
+		if next != "" && !strings.HasSuffix(next, " ") {
+			next += " "
+		}
+		next += word
+
+		if len(next) <= lineLimit {
+			line = next
+			continue
+		}
+
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, strings.TrimRight(line, " "))
+			line = indent + word
+			continue
+		}
+
+		// Hard wrap long word
+		for len(word) > 0 {
+			limit := lineLimit
+			if len(word) <= limit {
+				lines = append(lines, indent+word)
+				word = ""
+				break
+			}
+			lines = append(lines, indent+word[:limit])
+			word = word[limit:]
+		}
+		line = ""
+	}
+
+	if strings.TrimSpace(line) != "" {
+		lines = append(lines, strings.TrimRight(line, " "))
+	}
+	return lines
+}
+
 // getHelpSections returns all keybinding sections for the help panel
 func (r *Renderer) getHelpSections() []struct {
 	title    string
@@ -434,6 +1036,8 @@ func (r *Renderer) getHelpSections() []struct {
 				{"Shift+Enter", "Toggle fullscreen"},
 				{"Ctrl+Shift+K", "Show/hide help"},
 				{"Ctrl+Shift+S", "Open settings"},
+				{"Ctrl+Shift+F", "Toggle web search"},
+				{"Ctrl+Shift+A", "Toggle AI chat"},
 				{"Ctrl+Shift++", "Zoom in"},
 				{"Ctrl+Shift+-", "Zoom out"},
 				{"Ctrl+Shift+0", "Reset zoom"},
@@ -457,6 +1061,7 @@ func (r *Renderer) getHelpSections() []struct {
 				{"Shift+Tab", "Cycle panes"},
 				{"Ctrl+Shift+]", "Next pane"},
 				{"Ctrl+Shift+[", "Previous pane"},
+				{"Ctrl+Shift+[ or ]", "Cycle overlay panel (when open)"},
 				{"Ctrl+R", "Toggle resize mode"},
 				{"Arrow Keys", "Resize active pane"},
 			},
@@ -798,6 +1403,10 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 
 	// Draw menu items
 	itemIndex := 0
+	headerColor := [4]float32{0.5, 0.5, 0.6, 1.0}   // Dim color for headers
+	toggleOnColor := [4]float32{0.3, 0.8, 0.4, 1.0} // Green for enabled toggles
+	toggleOffColor := [4]float32{0.5, 0.5, 0.5, 1.0} // Gray for disabled toggles
+
 	for i, item := range m.Items {
 		if i < m.ScrollOffset {
 			continue
@@ -814,8 +1423,24 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 			continue
 		}
 
-		// Truncate label to fit
+		// Section headers - styled differently, not selectable
+		if item.IsHeader {
+			r.drawText(contentX+5, y, item.Label, headerColor, proj)
+			itemIndex++
+			continue
+		}
+
+		// Build display label with toggle indicator if needed
 		label := item.Label
+		if item.IsToggle {
+			if item.Toggled {
+				label = "[x] " + label
+			} else {
+				label = "[ ] " + label
+			}
+		}
+
+		// Truncate label to fit
 		if len(label) > maxChars {
 			label = label[:maxChars-3] + "..."
 		}
@@ -825,9 +1450,31 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 			highlightColor := [4]float32{0.15, 0.17, 0.25, 1.0}
 			r.drawRect(contentX, y-lineHeight+8, contentWidth, lineHeight, highlightColor, proj)
 			r.drawText(contentX+5, y, ">", r.theme.TabActive, proj)
-			r.drawText(contentX+r.cellWidth*2+5, y, label, r.theme.TabActive, proj)
+			if item.IsToggle {
+				// Color the checkbox based on state
+				checkColor := toggleOffColor
+				if item.Toggled {
+					checkColor = toggleOnColor
+				}
+				checkboxEnd := r.cellWidth*4 + 5
+				r.drawText(contentX+r.cellWidth*2+5, y, label[:4], checkColor, proj)
+				r.drawText(contentX+r.cellWidth*2+5+checkboxEnd, y, label[4:], r.theme.TabActive, proj)
+			} else {
+				r.drawText(contentX+r.cellWidth*2+5, y, label, r.theme.TabActive, proj)
+			}
 		} else {
-			r.drawText(contentX+r.cellWidth*2+5, y, label, r.theme.Foreground, proj)
+			if item.IsToggle {
+				// Color the checkbox based on state
+				checkColor := toggleOffColor
+				if item.Toggled {
+					checkColor = toggleOnColor
+				}
+				checkboxEnd := r.cellWidth*4 + 5
+				r.drawText(contentX+r.cellWidth*2+5, y, label[:4], checkColor, proj)
+				r.drawText(contentX+r.cellWidth*2+5+checkboxEnd, y, label[4:], r.theme.Foreground, proj)
+			} else {
+				r.drawText(contentX+r.cellWidth*2+5, y, label, r.theme.Foreground, proj)
+			}
 		}
 		itemIndex++
 	}
@@ -1213,6 +1860,20 @@ func clampInt(value, min, max int) int {
 	return value
 }
 
+// nextPowerOf2 returns the smallest power of 2 >= n
+func nextPowerOf2(n int) int {
+	if n <= 0 {
+		return 1
+	}
+	n--
+	n |= n >> 1
+	n |= n >> 2
+	n |= n >> 4
+	n |= n >> 8
+	n |= n >> 16
+	return n + 1
+}
+
 // renderTabBar renders the left tab bar
 func (r *Renderer) renderTabBar(tm *tab.TabManager, width, height int, proj [16]float32) {
 	// Draw tab bar background
@@ -1285,10 +1946,19 @@ func (r *Renderer) renderGridAt(g *grid.Grid, offsetX, offsetY, paneWidth, paneH
 				r.drawRect(x, y, r.cellWidth, r.cellHeight, r.theme.Selection, proj)
 			}
 
+			// Skip character and underline rendering for continuation cells (second half of wide char)
+			if cell.Width == grid.CellWidthContinuation {
+				continue
+			}
+
 			// Draw character
 			fgColor := r.colorToRGBA(cell.Fg, false)
 			if cell.Flags&grid.FlagInverse != 0 {
 				fgColor = r.colorToRGBA(cell.Bg, true)
+			}
+			// Apply dim effect (reduce alpha to 50%)
+			if cell.Flags&grid.FlagDim != 0 {
+				fgColor[3] = fgColor[3] / 2
 			}
 			if cell.Char != ' ' && cell.Char != 0 {
 				r.drawChar(x, y+r.cellHeight, cell.Char, fgColor, proj)
@@ -1404,14 +2074,31 @@ func (r *Renderer) drawRect(x, y, w, h float32, clr [4]float32, proj [16]float32
 	gl.BindVertexArray(0)
 }
 
+// boxDrawingFallbacks maps rounded corners and other box chars to simpler equivalents
+var boxDrawingFallbacks = map[rune]rune{
+	'╭': '┌', // U+256D -> U+250C (rounded to square corner)
+	'╮': '┐', // U+256E -> U+2510
+	'╯': '┘', // U+256F -> U+2518
+	'╰': '└', // U+2570 -> U+2514
+	'╱': '/', // U+2571 -> ASCII slash
+	'╲': '\\', // U+2572 -> ASCII backslash
+	'╳': 'X', // U+2573 -> ASCII X
+}
+
 // drawChar draws a single character using the font atlas
 func (r *Renderer) drawChar(x, y float32, char rune, clr [4]float32, proj [16]float32) {
 	glyph, ok := r.glyphs[char]
 	if !ok {
-		// Fallback to '?' for unknown characters
-		glyph, ok = r.glyphs['?']
+		// Try box-drawing fallbacks first
+		if fallback, hasFallback := boxDrawingFallbacks[char]; hasFallback {
+			glyph, ok = r.glyphs[fallback]
+		}
+		// If still not found, fallback to '?'
 		if !ok {
-			return
+			glyph, ok = r.glyphs['?']
+			if !ok {
+				return
+			}
 		}
 	}
 
@@ -1469,9 +2156,16 @@ func (r *Renderer) drawTextScaled(x, y float32, text string, clr [4]float32, pro
 func (r *Renderer) drawCharScaled(x, y float32, char rune, clr [4]float32, proj [16]float32, scale float32) {
 	glyph, ok := r.glyphs[char]
 	if !ok {
-		glyph, ok = r.glyphs['?']
+		// Try box-drawing fallbacks first
+		if fallback, hasFallback := boxDrawingFallbacks[char]; hasFallback {
+			glyph, ok = r.glyphs[fallback]
+		}
+		// If still not found, fallback to '?'
 		if !ok {
-			return
+			glyph, ok = r.glyphs['?']
+			if !ok {
+				return
+			}
 		}
 	}
 

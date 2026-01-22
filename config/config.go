@@ -31,6 +31,26 @@ type ScriptsConfig struct {
 	VCSDetect string `toml:"vcs_detect"`
 }
 
+// WebSearchConfig holds web search settings
+type WebSearchConfig struct {
+	Enabled bool `toml:"enabled"`
+	// UseReaderProxy enables a text-only proxy fallback for JS-heavy pages.
+	UseReaderProxy bool `toml:"use_reader_proxy"`
+	// ReaderProxyURLs lists proxy base URLs to try for text extraction.
+	ReaderProxyURLs []string `toml:"reader_proxy_urls"`
+}
+
+// OllamaConfig holds local AI chat settings.
+type OllamaConfig struct {
+	Enabled        bool   `toml:"enabled"`
+	URL            string `toml:"url"`
+	Model          string `toml:"model"`
+	ThinkingMode   bool   `toml:"thinking_mode"`    // Enable thinking/reasoning mode for supported models
+	ThinkingBudget int    `toml:"thinking_budget"`  // Max tokens for thinking (0 = no limit)
+	ShowThinking   bool   `toml:"show_thinking"`    // Show thinking content in UI (collapsible)
+	ExtendedTimeout int   `toml:"extended_timeout"` // Extended timeout in seconds for thinking models (0 = default 300s)
+}
+
 // ShellConfig holds shell-specific settings
 type ShellConfig struct {
 	// Path to shell binary (empty = system default)
@@ -48,53 +68,29 @@ type CustomCommand struct {
 	Description string `toml:"description"`
 }
 
-// Config holds the terminal configuration
-type Config struct {
-	Shell    ShellConfig       `toml:"shell"`
-	Prompt   PromptConfig      `toml:"prompt"`
-	Scripts  ScriptsConfig     `toml:"scripts"`
-	Commands []CustomCommand   `toml:"commands"`
-	Aliases  map[string]string `toml:"aliases"`
-	Exports  map[string]string `toml:"exports"`
-	Theme    string            `toml:"theme"`
-	FontSize float32           `toml:"font_size"`
+// AppearanceConfig holds visual settings
+type AppearanceConfig struct {
+	CursorStyle      string  `toml:"cursor_style"`       // "block", "underline", "bar"
+	CursorBlink      bool    `toml:"cursor_blink"`       // Whether cursor blinks
+	PanelWidthPercent float32 `toml:"panel_width_percent"` // Width of side panels (25-50)
 }
 
-// DefaultConfig returns the default configuration
-func DefaultConfig() *Config {
-	return &Config{
-		Shell: ShellConfig{
-			Path:          "",
-			SourceRC:      true,
-			AdditionalEnv: map[string]string{},
-		},
-		Prompt: PromptConfig{
-			Style:        "full",
-			ShowPath:     true,
-			ShowUsername: true,
-			ShowHostname: true,
-			ShowLanguage: true,
-			ShowVCS:      true,
-		},
-		Scripts: ScriptsConfig{
-			Init:      "",
-			PrePrompt: "",
-			LanguageDetect: `# Detect project language
-[ -f go.mod ] && echo "Go" && return 0
-[ -f Cargo.toml ] && echo "Rust" && return 0
-[ -f package.json ] && echo "JavaScript" && return 0
-[ -f pyproject.toml ] && echo "Python" && return 0
-[ -f requirements.txt ] && echo "Python" && return 0
-[ -f Pipfile ] && echo "Python" && return 0
-[ -f Gemfile ] && echo "Ruby" && return 0
-[ -f pom.xml ] && echo "Java" && return 0
-[ -f build.gradle ] && echo "Java" && return 0
-[ -f CMakeLists.txt ] && echo "C/C++" && return 0
-[ -f Makefile ] && echo "C/C++" && return 0
-ls *.crl >/dev/null 2>&1 && echo "Carrion" && return 0
-echo "None"
-`,
-			VCSDetect: `# Detect VCS (Git + Ivaldi)
+// Config holds the terminal configuration
+type Config struct {
+	Shell      ShellConfig       `toml:"shell"`
+	Prompt     PromptConfig      `toml:"prompt"`
+	Scripts    ScriptsConfig     `toml:"scripts"`
+	WebSearch  WebSearchConfig   `toml:"web_search"`
+	Ollama     OllamaConfig      `toml:"ollama"`
+	Appearance AppearanceConfig  `toml:"appearance"`
+	Commands   []CustomCommand   `toml:"commands"`
+	Aliases    map[string]string `toml:"aliases"`
+	Exports    map[string]string `toml:"exports"`
+	Theme      string            `toml:"theme"`
+	FontSize   float32           `toml:"font_size"`
+}
+
+const defaultVCSDetectLegacy = `# Detect VCS (Git + Ivaldi)
 _vcs=""
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     _branch=$(git branch --show-current 2>/dev/null || echo "?")
@@ -174,7 +170,151 @@ fi
 
 [ -z "$_vcs" ] && _vcs="None"
 echo "$_vcs"
+`
+
+const defaultVCSDetect = `# Detect VCS (Git + Ivaldi)
+_vcs=""
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    _branch=$(git branch --show-current 2>/dev/null || echo "?")
+
+    _ahead=0
+    _behind=0
+    if git rev-parse --abbrev-ref @{upstream} >/dev/null 2>&1; then
+        _counts=$(git rev-list --left-right --count HEAD...@{upstream} 2>/dev/null)
+        read -r _behind _ahead <<<"$_counts"
+        case "$_behind" in
+            (''|*[!0-9]*) _behind=0 ;;
+        esac
+        case "$_ahead" in
+            (''|*[!0-9]*) _ahead=0 ;;
+        esac
+    fi
+
+    _staged=0
+    _unstaged=0
+    _untracked=0
+    while IFS= read -r _line; do
+        case "${_line:0:2}" in
+            "??") _untracked=$((_untracked + 1)) ;;
+            *) 
+                [ "${_line:0:1}" != " " ] && _staged=$((_staged + 1))
+                [ "${_line:1:1}" != " " ] && _unstaged=$((_unstaged + 1))
+                ;;
+        esac
+    done < <(git status --porcelain 2>/dev/null)
+
+    _state=""
+    [ "$_ahead" -gt 0 ] && _state="$_state ^$_ahead"
+    [ "$_behind" -gt 0 ] && _state="$_state v$_behind"
+    [ "$_staged" -gt 0 ] && _state="$_state +$_staged"
+    [ "$_unstaged" -gt 0 ] && _state="$_state ~$_unstaged"
+    [ "$_untracked" -gt 0 ] && _state="$_state ?$_untracked"
+
+    if [ -n "$_state" ]; then
+        _vcs="Git($_branch$_state)"
+    else
+        _vcs="Git($_branch)"
+    fi
+fi
+
+_ivaldi_tl=""
+_ivaldi_present=""
+if command -v ivaldi >/dev/null 2>&1; then
+    _ivaldi_raw="$(ivaldi whereami 2>/dev/null)"
+    if [ -z "$_ivaldi_raw" ]; then
+        _ivaldi_raw="$(ivaldi wai 2>/dev/null)"
+    fi
+    if [ -n "$_ivaldi_raw" ]; then
+        _ivaldi_present="1"
+    fi
+    _ivaldi_tl=$(printf "%s\n" "$_ivaldi_raw" | awk -F: 'tolower($1) ~ /^[[:space:]]*timeline[[:space:]]*$/ {sub(/^[[:space:]]+/, "", $2); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}')
+fi
+if [ -z "$_ivaldi_tl" ] && [ -f .ivaldi ]; then
+    _ivaldi_present="1"
+    _ivaldi_tl=$(awk -F: 'tolower($1) ~ /^[[:space:]]*timeline[[:space:]]*$/ {sub(/^[[:space:]]+/, "", $2); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit} NF{print; exit}' .ivaldi 2>/dev/null)
+fi
+if [ -z "$_ivaldi_tl" ] && [ -d .ivaldi ]; then
+    _ivaldi_present="1"
+    for _ivaldi_file in .ivaldi/timeline .ivaldi/whereami .ivaldi/wai; do
+        if [ -f "$_ivaldi_file" ]; then
+            _ivaldi_tl=$(awk -F: 'tolower($1) ~ /^[[:space:]]*timeline[[:space:]]*$/ {sub(/^[[:space:]]+/, "", $2); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit} NF{print; exit}' "$_ivaldi_file" 2>/dev/null)
+            [ -n "$_ivaldi_tl" ] && break
+        fi
+    done
+fi
+if [ -n "$_ivaldi_tl" ] || [ -n "$_ivaldi_present" ]; then
+    if [ -n "$_ivaldi_tl" ]; then
+        _ivaldi_display="Ivaldi (tl: $_ivaldi_tl)"
+    else
+        _ivaldi_display="Ivaldi"
+    fi
+    if [ -n "$_vcs" ]; then
+        _vcs="$_vcs | $_ivaldi_display"
+    else
+        _vcs="$_ivaldi_display"
+    fi
+fi
+
+[ -z "$_vcs" ] && _vcs="None"
+echo "$_vcs"
+`
+
+// DefaultConfig returns the default configuration
+func DefaultConfig() *Config {
+	return &Config{
+		Shell: ShellConfig{
+			Path:          "",
+			SourceRC:      true,
+			AdditionalEnv: map[string]string{},
+		},
+		Prompt: PromptConfig{
+			Style:        "full",
+			ShowPath:     true,
+			ShowUsername: true,
+			ShowHostname: true,
+			ShowLanguage: true,
+			ShowVCS:      true,
+		},
+		Scripts: ScriptsConfig{
+			Init:      "",
+			PrePrompt: "",
+			LanguageDetect: `# Detect project language
+[ -f go.mod ] && echo "Go" && return 0
+[ -f Cargo.toml ] && echo "Rust" && return 0
+[ -f package.json ] && echo "JavaScript" && return 0
+[ -f pyproject.toml ] && echo "Python" && return 0
+[ -f requirements.txt ] && echo "Python" && return 0
+[ -f Pipfile ] && echo "Python" && return 0
+[ -f Gemfile ] && echo "Ruby" && return 0
+[ -f pom.xml ] && echo "Java" && return 0
+[ -f build.gradle ] && echo "Java" && return 0
+[ -f CMakeLists.txt ] && echo "C/C++" && return 0
+[ -f Makefile ] && echo "C/C++" && return 0
+ls *.crl >/dev/null 2>&1 && echo "Carrion" && return 0
+echo "None"
 `,
+			VCSDetect: defaultVCSDetect,
+		},
+		WebSearch: WebSearchConfig{
+			Enabled:        false,
+			UseReaderProxy: false,
+			ReaderProxyURLs: []string{
+				"https://r.jina.ai/",
+			},
+		},
+		Ollama: OllamaConfig{
+			Enabled:         false,
+			URL:             "http://localhost:11434",
+			Model:           "llama3",
+			ThinkingMode:    false,
+			ThinkingBudget:  0,     // No limit
+			ShowThinking:    true,  // Show thinking by default
+			ExtendedTimeout: 600,   // 10 minutes for thinking models
+		},
+		Appearance: AppearanceConfig{
+			CursorStyle:       "block",
+			CursorBlink:       true,
+			PanelWidthPercent: 35.0,
 		},
 		Commands: []CustomCommand{},
 		Aliases: map[string]string{
@@ -229,6 +369,9 @@ func Load() (*Config, error) {
 	cfg := DefaultConfig()
 	if _, err := toml.DecodeFile(configPath, cfg); err != nil {
 		return nil, err
+	}
+	if cfg.Scripts.VCSDetect == defaultVCSDetectLegacy {
+		cfg.Scripts.VCSDetect = defaultVCSDetect
 	}
 
 	return cfg, nil
@@ -427,6 +570,9 @@ func (c *Config) buildPromptFunction() string {
 		fallthrough
 	default:
 		script += `    local _status=$?` + "\n"
+		script += `    case "$_status" in` + "\n"
+		script += `        (''|*[!0-9]*) _status=0 ;;` + "\n"
+		script += `    esac` + "\n"
 		// Build line 1
 		script += `    local _line1=""` + "\n"
 		if c.Prompt.ShowPath {

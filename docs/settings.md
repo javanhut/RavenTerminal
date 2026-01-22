@@ -24,6 +24,14 @@ The settings menu is organized into the following sections:
 - **Prompt Style**: Select prompt style (minimal, simple, full, custom)
 - **Prompt Options**: Toggle individual prompt elements
 - **Scripts**: Edit initialization and detection scripts
+- **Web Search**: Toggle built-in web search panel (off by default)
+- **Web Search Reader Proxy**: Toggle text-only proxy for search previews
+- **Ollama Chat**: Toggle local AI chat panel (off by default)
+- **Ollama URL**: Set the Ollama base URL (e.g., http://localhost:11434)
+- **Ollama Model**: Set the Ollama model name (e.g., llama3)
+- **Ollama Test Connection**: Verify the Ollama URL is reachable
+- **Ollama Refresh Models**: Pull the available model list from `/api/tags`
+- **Ollama Models**: Pick a model from the fetched list
 - **Commands**: Add/edit/delete custom commands
 - **Aliases**: Add/edit/delete shell aliases
 - **Reload Config**: Reload settings from config.toml
@@ -157,6 +165,32 @@ echo "$_vcs"
 '''
 ```
 
+### Web Search
+
+```toml
+[web_search]
+enabled = false
+use_reader_proxy = false
+reader_proxy_urls = ["https://r.jina.ai/"]
+```
+
+- **enabled**: Allow Raven Terminal to make outbound web requests for the search panel
+- **use_reader_proxy**: Use a text-only proxy fallback for JS-heavy pages
+- **reader_proxy_urls**: Proxy base URLs to try in order (target URL appended)
+
+### Ollama Chat
+
+```toml
+[ollama]
+enabled = false
+url = "http://localhost:11434"
+model = "llama3"
+```
+
+- **enabled**: Show the AI chat panel and allow local Ollama requests
+- **url**: Base URL for the Ollama server
+- **model**: Model name to load for quick questions
+
 ### Custom Commands
 
 ```toml
@@ -220,6 +254,16 @@ git rev-parse --is-inside-work-tree >/dev/null 2>&1 && _vcs="Git($(git branch --
 [ -z "$_vcs" ] && _vcs="None"
 echo "$_vcs"
 '''
+
+[web_search]
+enabled = false
+use_reader_proxy = false
+reader_proxy_urls = ["https://r.jina.ai/"]
+
+[ollama]
+enabled = false
+url = "http://localhost:11434"
+model = "llama3"
 
 [[commands]]
 name = "dev"
