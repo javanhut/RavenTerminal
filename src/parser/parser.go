@@ -223,14 +223,20 @@ func (t *Terminal) processEscape(b byte) {
 	case 'c': // RIS - Reset
 		t.reset()
 		t.state = StateGround
-	case 'D': // IND - Index (down)
-		t.Grid.MoveCursor(0, 1)
+	case 'D': // IND - Index (down, respects scroll region, with BCE)
+		_, row := t.Grid.GetCursor()
+		_, bottom := t.Grid.GetScrollRegion()
+		if row == bottom-1 { // At bottom of scroll region (0-based vs 1-based)
+			t.Grid.ScrollUpWithBg(1, t.currentBg)
+		} else {
+			t.Grid.MoveCursor(0, 1)
+		}
 		t.state = StateGround
-	case 'M': // RI - Reverse index (up, respects scroll region)
+	case 'M': // RI - Reverse index (up, respects scroll region, with BCE)
 		_, row := t.Grid.GetCursor()
 		top, _ := t.Grid.GetScrollRegion()
 		if row == top-1 { // At top of scroll region (0-based vs 1-based)
-			t.Grid.ScrollDown(1)
+			t.Grid.ScrollDownWithBg(1, t.currentBg)
 		} else if row > 0 {
 			t.Grid.MoveCursor(0, -1)
 		}
@@ -324,24 +330,24 @@ func (t *Terminal) executeCSI(final byte) {
 		case 2:
 			t.Grid.ClearLineWithBg(t.currentBg)
 		}
-	case 'L': // IL - Insert lines
+	case 'L': // IL - Insert lines (with BCE support)
 		n := t.getParam(params, 0, 1)
-		t.Grid.InsertLines(n)
-	case 'M': // DL - Delete lines
+		t.Grid.InsertLinesWithBg(n, t.currentBg)
+	case 'M': // DL - Delete lines (with BCE support)
 		n := t.getParam(params, 0, 1)
-		t.Grid.DeleteLines(n)
+		t.Grid.DeleteLinesWithBg(n, t.currentBg)
 	case 'P': // DCH - Delete characters
 		n := t.getParam(params, 0, 1)
 		t.Grid.DeleteChars(n)
 	case '@': // ICH - Insert characters
 		n := t.getParam(params, 0, 1)
 		t.Grid.InsertChars(n)
-	case 'S': // SU - Scroll up
+	case 'S': // SU - Scroll up (with BCE support)
 		n := t.getParam(params, 0, 1)
-		t.Grid.ScrollUp(n)
-	case 'T': // SD - Scroll down
+		t.Grid.ScrollUpWithBg(n, t.currentBg)
+	case 'T': // SD - Scroll down (with BCE support)
 		n := t.getParam(params, 0, 1)
-		t.Grid.ScrollDown(n)
+		t.Grid.ScrollDownWithBg(n, t.currentBg)
 	case 'X': // ECH - Erase character (erase n chars at cursor without moving)
 		n := t.getParam(params, 0, 1)
 		t.Grid.EraseChars(n)
@@ -455,6 +461,8 @@ func (t *Terminal) executeSGR(params []int) {
 		}
 		i++
 	}
+	// Sync BCE erase background with current background
+	t.Grid.SetEraseBackground(t.currentBg)
 }
 
 // setMode handles setting/resetting terminal modes
@@ -798,6 +806,7 @@ func (t *Terminal) reset() {
 	t.currentFg = grid.DefaultFg()
 	t.currentBg = grid.DefaultBg()
 	t.currentFlags = 0
+	t.Grid.SetEraseBackground(grid.DefaultBg())
 	t.appCursorKeys = false
 	t.cursorVisible = true
 	t.exitAlternateScreen()
