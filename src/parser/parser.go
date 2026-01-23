@@ -226,14 +226,14 @@ func (t *Terminal) processEscape(b byte) {
 	case 'D': // IND - Index (down)
 		t.Grid.MoveCursor(0, 1)
 		t.state = StateGround
-	case 'M': // RI - Reverse index (up)
-		col, row := t.Grid.GetCursor()
-		if row == 0 {
+	case 'M': // RI - Reverse index (up, respects scroll region)
+		_, row := t.Grid.GetCursor()
+		top, _ := t.Grid.GetScrollRegion()
+		if row == top-1 { // At top of scroll region (0-based vs 1-based)
 			t.Grid.ScrollDown(1)
-		} else {
+		} else if row > 0 {
 			t.Grid.MoveCursor(0, -1)
 		}
-		_ = col
 		t.state = StateGround
 	case 'E': // NEL - Next line
 		t.Grid.CarriageReturn()
@@ -304,25 +304,25 @@ func (t *Terminal) executeCSI(final byte) {
 		row := t.getParam(params, 0, 1)
 		col := t.getParam(params, 1, 1)
 		t.Grid.SetCursorPos(col, row)
-	case 'J': // ED - Erase in display
+	case 'J': // ED - Erase in display (with BCE support)
 		n := t.getParam(params, 0, 0)
 		switch n {
 		case 0:
-			t.Grid.ClearToEnd()
+			t.Grid.ClearToEndWithBg(t.currentBg)
 		case 1:
-			t.Grid.ClearToStart()
+			t.Grid.ClearToStartWithBg(t.currentBg)
 		case 2, 3:
-			t.Grid.ClearAll()
+			t.Grid.ClearAllWithBg(t.currentBg)
 		}
-	case 'K': // EL - Erase in line
+	case 'K': // EL - Erase in line (with BCE support)
 		n := t.getParam(params, 0, 0)
 		switch n {
 		case 0:
-			t.Grid.ClearLineToEnd()
+			t.Grid.ClearLineToEndWithBg(t.currentBg)
 		case 1:
-			t.Grid.ClearLineToStart()
+			t.Grid.ClearLineToStartWithBg(t.currentBg)
 		case 2:
-			t.Grid.ClearLine()
+			t.Grid.ClearLineWithBg(t.currentBg)
 		}
 	case 'L': // IL - Insert lines
 		n := t.getParam(params, 0, 1)
