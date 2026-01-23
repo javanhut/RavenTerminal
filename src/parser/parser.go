@@ -152,7 +152,7 @@ func (t *Terminal) processGround(b byte) {
 		t.Grid.Tab()
 	case 0x0a, 0x0b, 0x0c: // LF, VT, FF
 		t.Grid.Newline()
-		t.Grid.ResetScrollOffset()
+		// Scroll position preserved - reset happens on user input instead
 	case 0x0d: // CR
 		t.Grid.CarriageReturn()
 	default:

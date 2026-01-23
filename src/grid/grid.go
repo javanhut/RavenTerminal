@@ -279,6 +279,17 @@ func (g *Grid) scrollUpRegionWithBg(bg Color) {
 	top := g.scrollTop - 1 // Convert to 0-based
 	bottom := g.scrollBottom - 1
 
+	// If scroll region starts at top, save row to scrollback
+	if top == 0 {
+		topRow := make([]Cell, g.Cols)
+		copy(topRow, g.cells[0:g.Cols])
+		g.scrollback = append(g.scrollback, topRow)
+
+		if len(g.scrollback) > MaxScrollback {
+			g.scrollback = g.scrollback[1:]
+		}
+	}
+
 	// Shift rows up within region
 	for row := top; row < bottom; row++ {
 		for col := 0; col < g.Cols; col++ {
@@ -776,6 +787,31 @@ func (g *Grid) ClearLineToStart() {
 func (g *Grid) ClearAllWithBg(bg Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+
+	// Save non-empty rows to scrollback before clearing
+	for row := 0; row < g.Rows; row++ {
+		hasContent := false
+		for col := 0; col < g.Cols; col++ {
+			cell := g.cells[g.index(col, row)]
+			if cell.Char != ' ' && cell.Char != 0 {
+				hasContent = true
+				break
+			}
+		}
+
+		if hasContent {
+			rowCopy := make([]Cell, g.Cols)
+			copy(rowCopy, g.cells[row*g.Cols:(row+1)*g.Cols])
+			g.scrollback = append(g.scrollback, rowCopy)
+		}
+	}
+
+	// Trim scrollback if too large
+	if len(g.scrollback) > MaxScrollback {
+		g.scrollback = g.scrollback[len(g.scrollback)-MaxScrollback:]
+	}
+
+	// Now clear the grid
 	for i := range g.cells {
 		g.cells[i] = NewCellWithBg(bg)
 	}
