@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -259,6 +260,16 @@ fi
 echo "$_vcs"
 `
 
+// getDefaultLsAlias returns a platform-appropriate ls alias
+func getDefaultLsAlias() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "ls -GC" // BSD ls: -G for color, -C for columns
+	default:
+		return "ls --color=auto --group-directories-first -C" // GNU ls
+	}
+}
+
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
 	return &Config{
@@ -318,7 +329,7 @@ echo "None"
 		},
 		Commands: []CustomCommand{},
 		Aliases: map[string]string{
-			"ls": "ls --color=auto --group-directories-first -C",
+			"ls": getDefaultLsAlias(),
 		},
 		Exports:  map[string]string{},
 		Theme:    "raven-blue",
