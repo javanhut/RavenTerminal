@@ -385,6 +385,13 @@ func Load() (*Config, error) {
 		cfg.Scripts.VCSDetect = defaultVCSDetect
 	}
 
+	// Migrate ls alias to platform-appropriate default if it's the old GNU-specific value
+	if lsAlias, ok := cfg.Aliases["ls"]; ok {
+		if lsAlias == "ls --color=auto --group-directories-first -C" && runtime.GOOS == "darwin" {
+			cfg.Aliases["ls"] = getDefaultLsAlias()
+		}
+	}
+
 	return cfg, nil
 }
 
