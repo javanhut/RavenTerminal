@@ -640,7 +640,7 @@ func main() {
 
 			switch result.Action {
 			case keybindings.ActionCopy:
-				g := activeTab.Terminal.Grid
+				g := activeTab.Terminal.GetGrid()
 				text := g.SelectedText()
 				if text == "" {
 					text = g.VisibleText()
@@ -656,7 +656,7 @@ func main() {
 					clip = strings.ReplaceAll(clip, "\r\n", "\n")
 					clip = strings.ReplaceAll(clip, "\n", "\r")
 					activeTab.Write([]byte(clip))
-					activeTab.Terminal.Grid.ResetScrollOffset()
+					activeTab.Terminal.GetGrid().ResetScrollOffset()
 					showToast("Pasted from clipboard")
 				}
 				return
@@ -894,19 +894,19 @@ func main() {
 				lineBuf.clear()
 			}
 			activeTab.Write(result.Data)
-			activeTab.Terminal.Grid.ResetScrollOffset()
+			activeTab.Terminal.GetGrid().ResetScrollOffset()
 		case keybindings.ActionScrollUp:
-			activeTab.Terminal.Grid.ScrollViewUp(5)
+			activeTab.Terminal.GetGrid().ScrollViewUp(5)
 		case keybindings.ActionScrollDown:
-			activeTab.Terminal.Grid.ScrollViewDown(5)
+			activeTab.Terminal.GetGrid().ScrollViewDown(5)
 		case keybindings.ActionScrollUpLine:
-			activeTab.Terminal.Grid.ScrollViewUp(1)
+			activeTab.Terminal.GetGrid().ScrollViewUp(1)
 		case keybindings.ActionScrollDownLine:
-			activeTab.Terminal.Grid.ScrollViewDown(1)
+			activeTab.Terminal.GetGrid().ScrollViewDown(1)
 		case keybindings.ActionToggleFullscreen:
 			win.ToggleFullscreen()
 		case keybindings.ActionCopy:
-			g := activeTab.Terminal.Grid
+			g := activeTab.Terminal.GetGrid()
 			text := g.SelectedText()
 			if text == "" {
 				text = g.VisibleText()
@@ -921,7 +921,7 @@ func main() {
 				clip = strings.ReplaceAll(clip, "\r\n", "\n")
 				clip = strings.ReplaceAll(clip, "\n", "\r")
 				activeTab.Write([]byte(clip))
-				activeTab.Terminal.Grid.ResetScrollOffset()
+				activeTab.Terminal.GetGrid().ResetScrollOffset()
 				showToast("Pasted from clipboard")
 			}
 		case keybindings.ActionNewTab:
@@ -1052,7 +1052,7 @@ func main() {
 
 		data := keybindings.TranslateChar(char, currentMods)
 		activeTab.Write(data)
-		activeTab.Terminal.Grid.ResetScrollOffset()
+		activeTab.Terminal.GetGrid().ResetScrollOffset()
 	})
 
 	win.GLFW().SetFramebufferSizeCallback(func(w *glfw.Window, width, height int) {
@@ -1090,7 +1090,7 @@ func main() {
 
 		if selection.active && selection.pane != nil {
 			pane := selection.pane
-			g := pane.Terminal.Grid
+			g := pane.Terminal.GetGrid()
 			steps := int(math.Abs(yoff))
 			if steps == 0 {
 				steps = 1
@@ -1201,9 +1201,9 @@ func main() {
 		}
 
 		if yoff > 0 {
-			activeTab.Terminal.Grid.ScrollViewUp(3)
+			activeTab.Terminal.GetGrid().ScrollViewUp(3)
 		} else if yoff < 0 {
-			activeTab.Terminal.Grid.ScrollViewDown(3)
+			activeTab.Terminal.GetGrid().ScrollViewDown(3)
 		}
 	})
 
@@ -1227,7 +1227,7 @@ func main() {
 				pane, col, row, ok := renderer.HitTestPane(activeTab, x, y, width, height)
 				if !ok || pane == nil {
 					if selection.pane != nil {
-						selection.pane.Terminal.Grid.ClearSelection()
+						selection.pane.Terminal.GetGrid().ClearSelection()
 					}
 					selection.active = false
 					selection.pane = nil
@@ -1235,11 +1235,11 @@ func main() {
 				}
 
 				if selection.pane != nil && selection.pane != pane {
-					selection.pane.Terminal.Grid.ClearSelection()
+					selection.pane.Terminal.GetGrid().ClearSelection()
 				}
 
 				if mods&glfw.ModControl != 0 {
-					if urlText, _, _ := urlAtCellRange(pane.Terminal.Grid, col, row); urlText != "" {
+					if urlText, _, _ := urlAtCellRange(pane.Terminal.GetGrid(), col, row); urlText != "" {
 						if err := openURL(urlText); err != nil {
 							log.Printf("failed to open url %q: %v", urlText, err)
 						}
@@ -1251,7 +1251,7 @@ func main() {
 				selection.pane = pane
 				selection.startCol = col
 				selection.startRow = row
-				pane.Terminal.Grid.SetSelection(col, row, col, row)
+				pane.Terminal.GetGrid().SetSelection(col, row, col, row)
 				activeTab.SetActivePane(pane)
 			case glfw.Release:
 				if !selection.active || selection.pane == nil {
@@ -1281,7 +1281,7 @@ func main() {
 				cellW, cellH := renderer.CellSize()
 				col := int((fx - rectX) / cellW)
 				row := int((fy - rectY) / cellH)
-				g := pane.Terminal.Grid
+				g := pane.Terminal.GetGrid()
 				col = clampInt(col, 0, g.Cols-1)
 				row = clampInt(row, 0, g.Rows-1)
 
@@ -1309,7 +1309,7 @@ func main() {
 			}
 
 			activeTab.SetActivePane(pane)
-			g := pane.Terminal.Grid
+			g := pane.Terminal.GetGrid()
 
 			if mods&glfw.ModControl != 0 {
 				if urlText, _, _ := urlAtCellRange(g, col, row); urlText != "" {
@@ -1378,7 +1378,7 @@ func main() {
 			cellW, cellH := renderer.CellSize()
 			col := int((fx - rectX) / cellW)
 			row := int((fy - rectY) / cellH)
-			g := selection.pane.Terminal.Grid
+			g := selection.pane.Terminal.GetGrid()
 			col = clampInt(col, 0, g.Cols-1)
 			row = clampInt(row, 0, g.Rows-1)
 
@@ -1394,8 +1394,8 @@ func main() {
 			return
 		}
 
-		if _, startCol, endCol := urlAtCellRange(pane.Terminal.Grid, col, row); startCol <= endCol {
-			renderer.SetHoverURL(pane.Terminal.Grid, row, startCol, endCol)
+		if _, startCol, endCol := urlAtCellRange(pane.Terminal.GetGrid(), col, row); startCol <= endCol {
+			renderer.SetHoverURL(pane.Terminal.GetGrid(), row, startCol, endCol)
 			return
 		}
 		renderer.ClearHoverURL()
@@ -1561,7 +1561,7 @@ func main() {
 							dir = 1
 						}
 						if dir != 0 {
-							g := selection.pane.Terminal.Grid
+							g := selection.pane.Terminal.GetGrid()
 							prevOffset := g.GetScrollOffset()
 							if dir < 0 {
 								g.ScrollViewUp(1)
@@ -1606,10 +1606,14 @@ func main() {
 		// Render
 		width, height := win.GetFramebufferSize()
 		win.SetViewport(width, height)
+		drawCursor := cursorVisible
+		if activeTab := tabManager.ActiveTab(); activeTab != nil && activeTab.Terminal != nil {
+			drawCursor = drawCursor && activeTab.Terminal.IsCursorVisible()
+		}
 		if settingsMenu.IsOpen() {
-			renderer.RenderWithMenu(tabManager, width, height, cursorVisible, settingsMenu)
+			renderer.RenderWithMenu(tabManager, width, height, drawCursor, settingsMenu)
 		} else {
-			renderer.RenderWithHelpAndPanels(tabManager, width, height, cursorVisible, showHelp, searchPanel, aiPanel)
+			renderer.RenderWithHelpAndPanels(tabManager, width, height, drawCursor, showHelp, searchPanel, aiPanel)
 		}
 		if now.Before(toast.expiresAt) {
 			renderer.DrawToast(toast.message, width, height)

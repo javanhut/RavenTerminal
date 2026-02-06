@@ -6,6 +6,7 @@ import (
 	"github.com/javanhut/RavenTerminal/src/assets/fonts"
 	"github.com/javanhut/RavenTerminal/src/grid"
 	"github.com/javanhut/RavenTerminal/src/menu"
+	"github.com/javanhut/RavenTerminal/src/parser"
 	"github.com/javanhut/RavenTerminal/src/searchpanel"
 	"github.com/javanhut/RavenTerminal/src/tab"
 	"image"
@@ -1667,7 +1668,11 @@ func (r *Renderer) renderPanes(t *tab.Tab, width, height int, proj [16]float32, 
 
 		// Render the pane's grid
 		showCursor := cursorVisible && isActive
-		r.renderGridAt(layout.Pane.Terminal.Grid, offsetX, offsetY, paneWidth, paneHeight, proj, showCursor)
+		cursorStyle := parser.CursorStyleBlock
+		if layout.Pane != nil && layout.Pane.Terminal != nil {
+			cursorStyle = layout.Pane.Terminal.CursorStyle()
+		}
+		r.renderGridAt(layout.Pane.Terminal.GetGrid(), offsetX, offsetY, paneWidth, paneHeight, proj, showCursor, cursorStyle)
 	}
 }
 
@@ -1730,7 +1735,7 @@ func (r *Renderer) HitTestPane(t *tab.Tab, x, y float64, width, height int) (*ta
 		if fx < rect.x || fx >= rect.x+rect.width || fy < rect.y || fy >= rect.y+rect.height {
 			continue
 		}
-		g := rect.pane.Terminal.Grid
+		g := rect.pane.Terminal.GetGrid()
 		col := int((fx - rect.x) / r.cellWidth)
 		row := int((fy - rect.y) / r.cellHeight)
 		col = clampInt(col, 0, g.Cols-1)
@@ -1907,16 +1912,16 @@ func (r *Renderer) renderTabBar(tm *tab.TabManager, width, height int, proj [16]
 }
 
 // renderGrid renders the terminal grid (backward compatible wrapper)
-func (r *Renderer) renderGrid(g *grid.Grid, width, height int, proj [16]float32, cursorVisible bool) {
+func (r *Renderer) renderGrid(g *grid.Grid, width, height int, proj [16]float32, cursorVisible bool, cursorStyle parser.CursorStyle) {
 	offsetX := r.tabBarWidth + 5
 	offsetY := r.paddingTop
 	availableWidth := float32(width) - r.tabBarWidth - 10
 	availableHeight := float32(height) - r.paddingTop - r.paddingBottom
-	r.renderGridAt(g, offsetX, offsetY, availableWidth, availableHeight, proj, cursorVisible)
+	r.renderGridAt(g, offsetX, offsetY, availableWidth, availableHeight, proj, cursorVisible, cursorStyle)
 }
 
 // renderGridAt renders the terminal grid at a specific position
-func (r *Renderer) renderGridAt(g *grid.Grid, offsetX, offsetY, paneWidth, paneHeight float32, proj [16]float32, cursorVisible bool) {
+func (r *Renderer) renderGridAt(g *grid.Grid, offsetX, offsetY, paneWidth, paneHeight float32, proj [16]float32, cursorVisible bool, cursorStyle parser.CursorStyle) {
 	cols := g.Cols
 	rows := g.Rows
 
@@ -1938,12 +1943,13 @@ func (r *Renderer) renderGridAt(g *grid.Grid, offsetX, offsetY, paneWidth, paneH
 				bgColor, _ = r.colorToRGBA(cell.Fg, false), r.colorToRGBA(cell.Bg, true)
 			}
 			if bgColor != r.theme.Background {
-				r.drawRect(x, y, r.cellWidth, r.cellHeight, bgColor, proj)
+				// +0.5 horizontal overlap eliminates sub-pixel gaps between adjacent cells
+				r.drawRect(x, y, r.cellWidth+0.5, r.cellHeight, bgColor, proj)
 			}
 
 			// Draw selection highlight
 			if g.IsSelected(col, row) {
-				r.drawRect(x, y, r.cellWidth, r.cellHeight, r.theme.Selection, proj)
+				r.drawRect(x, y, r.cellWidth+0.5, r.cellHeight, r.theme.Selection, proj)
 			}
 
 			// Skip character and underline rendering for continuation cells (second half of wide char)
@@ -1960,8 +1966,11 @@ func (r *Renderer) renderGridAt(g *grid.Grid, offsetX, offsetY, paneWidth, paneH
 			if cell.Flags&grid.FlagDim != 0 {
 				fgColor[3] = fgColor[3] / 2
 			}
-			if cell.Char != ' ' && cell.Char != 0 {
-				r.drawChar(x, y+r.cellHeight, cell.Char, fgColor, proj)
+			hidden := cell.Flags&grid.FlagHidden != 0
+			if !hidden && cell.Char != ' ' && cell.Char != 0 {
+				if !r.drawBlockElement(x, y, cell.Char, fgColor, proj) {
+					r.drawChar(x, y+r.cellHeight, cell.Char, fgColor, proj)
+				}
 			}
 
 			// Draw underline for ANSI styling or hovered URL
@@ -1969,9 +1978,13 @@ func (r *Renderer) renderGridAt(g *grid.Grid, offsetX, offsetY, paneWidth, paneH
 			if r.hoverActive && r.hoverGrid == g && row == r.hoverRow && col >= r.hoverStartCol && col <= r.hoverEndCol {
 				drawUnderline = true
 			}
-			if drawUnderline && cell.Char != ' ' && cell.Char != 0 {
+			if drawUnderline && !hidden {
 				underlineY := y + r.cellHeight - 1
 				r.drawRect(x, underlineY, r.cellWidth, 1, fgColor, proj)
+			}
+			if cell.Flags&grid.FlagStrikethrough != 0 && !hidden {
+				strikeY := y + r.cellHeight/2
+				r.drawRect(x, strikeY, r.cellWidth, 1, fgColor, proj)
 			}
 		}
 	}
@@ -1984,12 +1997,28 @@ func (r *Renderer) renderGridAt(g *grid.Grid, offsetX, offsetY, paneWidth, paneH
 
 		// Only draw cursor if within pane bounds
 		if cursorX+r.cellWidth <= offsetX+paneWidth && cursorY+r.cellHeight <= offsetY+paneHeight {
-			r.drawRect(cursorX, cursorY, r.cellWidth, r.cellHeight, r.theme.Cursor, proj)
-
-			// Redraw character under cursor in inverse
 			cell := g.DisplayCell(cursorCol, cursorRow)
-			if cell.Char != ' ' && cell.Char != 0 {
-				r.drawChar(cursorX, cursorY+r.cellHeight, cell.Char, r.theme.Background, proj)
+			switch cursorStyle {
+			case parser.CursorStyleUnderline:
+				h := r.cellHeight / 6
+				if h < 1 {
+					h = 1
+				}
+				r.drawRect(cursorX, cursorY+r.cellHeight-h, r.cellWidth, h, r.theme.Cursor, proj)
+			case parser.CursorStyleBar:
+				w := r.cellWidth / 6
+				if w < 1 {
+					w = 1
+				}
+				r.drawRect(cursorX, cursorY, w, r.cellHeight, r.theme.Cursor, proj)
+			default:
+				r.drawRect(cursorX, cursorY, r.cellWidth, r.cellHeight, r.theme.Cursor, proj)
+				// Redraw character under cursor in inverse
+				if cell.Char != ' ' && cell.Char != 0 && cell.Flags&grid.FlagHidden == 0 {
+					if !r.drawBlockElement(cursorX, cursorY, cell.Char, r.theme.Background, proj) {
+						r.drawChar(cursorX, cursorY+r.cellHeight, cell.Char, r.theme.Background, proj)
+					}
+				}
 			}
 		}
 	}
@@ -2083,6 +2112,94 @@ var boxDrawingFallbacks = map[rune]rune{
 	'╱': '/', // U+2571 -> ASCII slash
 	'╲': '\\', // U+2572 -> ASCII backslash
 	'╳': 'X', // U+2573 -> ASCII X
+}
+
+var quadrantBlockMasks = map[rune]uint8{
+	'\u2596': 0b0100, // Quadrant lower left
+	'\u2597': 0b1000, // Quadrant lower right
+	'\u2598': 0b0001, // Quadrant upper left
+	'\u2599': 0b1101, // Quadrant upper left and lower left and lower right
+	'\u259A': 0b1001, // Quadrant upper left and lower right
+	'\u259B': 0b0111, // Quadrant upper left and upper right and lower left
+	'\u259C': 0b1011, // Quadrant upper left and upper right and lower right
+	'\u259D': 0b0010, // Quadrant upper right
+	'\u259E': 0b0110, // Quadrant upper right and lower left
+	'\u259F': 0b1110, // Quadrant upper right and lower left and lower right
+}
+
+// drawBlockElement renders block element characters as geometry to avoid seams.
+func (r *Renderer) drawBlockElement(x, y float32, char rune, clr [4]float32, proj [16]float32) bool {
+	switch char {
+	case '\u2588': // Full block
+		r.drawRect(x, y, r.cellWidth, r.cellHeight, clr, proj)
+		return true
+	case '\u2580': // Upper half block
+		r.drawRect(x, y, r.cellWidth, r.cellHeight/2, clr, proj)
+		return true
+	case '\u2584': // Lower half block
+		r.drawRect(x, y+r.cellHeight/2, r.cellWidth, r.cellHeight/2, clr, proj)
+		return true
+	case '\u258C': // Left half block
+		r.drawRect(x, y, r.cellWidth/2, r.cellHeight, clr, proj)
+		return true
+	case '\u2590': // Right half block
+		r.drawRect(x+r.cellWidth/2, y, r.cellWidth/2, r.cellHeight, clr, proj)
+		return true
+	case '\u2591', '\u2592', '\u2593': // Light/medium/dark shade
+		shade := clr
+		switch char {
+		case '\u2591':
+			shade[3] *= 0.25
+		case '\u2592':
+			shade[3] *= 0.5
+		case '\u2593':
+			shade[3] *= 0.75
+		}
+		r.drawRect(x, y, r.cellWidth, r.cellHeight, shade, proj)
+		return true
+	case '\u2594': // Upper one eighth block
+		r.drawRect(x, y, r.cellWidth, r.cellHeight/8, clr, proj)
+		return true
+	case '\u2595': // Right one eighth block
+		r.drawRect(x+r.cellWidth*7/8, y, r.cellWidth/8, r.cellHeight, clr, proj)
+		return true
+	}
+
+	if char >= '\u2581' && char <= '\u2587' {
+		// Lower 1/8..7/8 blocks
+		n := float32(char - '\u2580')
+		h := r.cellHeight * n / 8
+		r.drawRect(x, y+r.cellHeight-h, r.cellWidth, h, clr, proj)
+		return true
+	}
+
+	if char >= '\u2589' && char <= '\u258F' {
+		// Left 7/8..1/8 blocks
+		n := float32('\u2590' - char)
+		w := r.cellWidth * n / 8
+		r.drawRect(x, y, w, r.cellHeight, clr, proj)
+		return true
+	}
+
+	if mask, ok := quadrantBlockMasks[char]; ok {
+		hw := r.cellWidth / 2
+		hh := r.cellHeight / 2
+		if mask&0b0001 != 0 {
+			r.drawRect(x, y, hw, hh, clr, proj)
+		}
+		if mask&0b0010 != 0 {
+			r.drawRect(x+hw, y, hw, hh, clr, proj)
+		}
+		if mask&0b0100 != 0 {
+			r.drawRect(x, y+hh, hw, hh, clr, proj)
+		}
+		if mask&0b1000 != 0 {
+			r.drawRect(x+hw, y+hh, hw, hh, clr, proj)
+		}
+		return true
+	}
+
+	return false
 }
 
 // drawChar draws a single character using the font atlas

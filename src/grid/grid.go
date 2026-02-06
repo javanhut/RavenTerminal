@@ -110,6 +110,7 @@ type Grid struct {
 	// Scroll region (1-based, inclusive)
 	scrollTop    int
 	scrollBottom int
+	wrapPending  bool
 
 	// Last written character for REP sequence
 	lastChar  rune
@@ -148,6 +149,7 @@ func NewGrid(cols, rows int) *Grid {
 		scrollOffset: 0,
 		scrollTop:    1,
 		scrollBottom: rows,
+		wrapPending:  false,
 		lastChar:     ' ',
 		autoWrap:     true, // DECAWM ?7 default on
 	}
@@ -182,6 +184,13 @@ func (g *Grid) SetCell(col, row int, cell Cell) {
 func (g *Grid) WriteChar(c rune, fg, bg Color, flags CellFlags) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+
+	if g.wrapPending {
+		if g.autoWrap {
+			g.cursorNewline()
+		}
+		g.wrapPending = false
+	}
 
 	// Handle auto-wrap if at end of line
 	if g.CursorCol >= g.Cols {
@@ -243,6 +252,14 @@ func (g *Grid) WriteChar(c rune, fg, bg Color, flags CellFlags) {
 		g.CursorCol++
 	}
 
+	// If we advanced past the last column, set wrap pending (DECAWM behavior)
+	if g.CursorCol >= g.Cols {
+		if g.autoWrap {
+			g.wrapPending = true
+		}
+		g.CursorCol = g.Cols - 1
+	}
+
 	// Save for REP sequence
 	g.lastChar = c
 	g.lastFg = fg
@@ -252,6 +269,7 @@ func (g *Grid) WriteChar(c rune, fg, bg Color, flags CellFlags) {
 
 // cursorNewline moves cursor to next line (internal, no lock)
 func (g *Grid) cursorNewline() {
+	g.wrapPending = false
 	g.CursorCol = 0
 	g.CursorRow++
 	// Check if we're at the bottom of the scroll region
@@ -314,6 +332,7 @@ func (g *Grid) Newline() {
 func (g *Grid) CarriageReturn() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.wrapPending = false
 	g.CursorCol = 0
 }
 
@@ -321,6 +340,7 @@ func (g *Grid) CarriageReturn() {
 func (g *Grid) Backspace() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.wrapPending = false
 	if g.CursorCol > 0 {
 		g.CursorCol--
 		// If we landed on a continuation cell, move back one more
@@ -337,6 +357,7 @@ func (g *Grid) Backspace() {
 func (g *Grid) Tab() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.wrapPending = false
 	g.CursorCol = ((g.CursorCol / 8) + 1) * 8
 	if g.CursorCol >= g.Cols {
 		g.CursorCol = g.Cols - 1
@@ -354,6 +375,7 @@ func (g *Grid) Tab() {
 func (g *Grid) MoveCursor(dCol, dRow int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.wrapPending = false
 
 	// Handle horizontal movement with wide cell awareness
 	if dCol < 0 {
@@ -403,6 +425,7 @@ func (g *Grid) MoveCursor(dCol, dRow int) {
 func (g *Grid) SetCursorPos(col, row int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.wrapPending = false
 	g.CursorCol = col - 1
 	g.CursorRow = row - 1
 
@@ -1024,6 +1047,7 @@ func (g *Grid) InsertLinesWithBg(n int, bg Color) {
 func (g *Grid) Resize(cols, rows int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.wrapPending = false
 
 	// Track if scroll region was full-screen before resize
 	wasFullScreen := (g.scrollTop == 1 && g.scrollBottom == g.Rows)
@@ -1133,8 +1157,18 @@ func (g *Grid) RepeatChar(n int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	for i := 0; i < n; i++ {
+		if g.wrapPending {
+			if g.autoWrap {
+				g.cursorNewline()
+			}
+			g.wrapPending = false
+		}
 		if g.CursorCol >= g.Cols {
-			g.cursorNewline()
+			if g.autoWrap {
+				g.cursorNewline()
+			} else {
+				g.CursorCol = g.Cols - 1
+			}
 		}
 		idx := g.index(g.CursorCol, g.CursorRow)
 		g.cells[idx] = Cell{
@@ -1145,6 +1179,12 @@ func (g *Grid) RepeatChar(n int) {
 			Width: CellWidthNormal,
 		}
 		g.CursorCol++
+		if g.CursorCol >= g.Cols {
+			if g.autoWrap {
+				g.wrapPending = true
+			}
+			g.CursorCol = g.Cols - 1
+		}
 	}
 }
 
@@ -1165,6 +1205,33 @@ func (g *Grid) SetScrollRegion(top, bottom int) {
 	// Move cursor to home position
 	g.CursorCol = 0
 	g.CursorRow = 0
+}
+
+// RestoreScrollRegion sets the scroll region without moving the cursor.
+// Unlike SetScrollRegion (which resets cursor to 0,0 per DECSTBM spec),
+// this preserves cursor position — used when restoring state during
+// alternate screen exit.
+func (g *Grid) RestoreScrollRegion(top, bottom int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if top < 1 {
+		top = 1
+	}
+	if bottom > g.Rows {
+		bottom = g.Rows
+	}
+	if top < bottom {
+		g.scrollTop = top
+		g.scrollBottom = bottom
+	}
+}
+
+// ResetWrapPending clears the wrapPending flag.
+// Used after restoring the main grid to avoid stale wrap state.
+func (g *Grid) ResetWrapPending() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.wrapPending = false
 }
 
 // GetScrollRegion returns the current scroll region

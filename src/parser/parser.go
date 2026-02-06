@@ -24,6 +24,61 @@ const (
 	StateHash
 )
 
+// Charset represents a character set designation (G0/G1).
+type Charset int
+
+const (
+	charsetASCII Charset = iota
+	charsetLineDrawing
+)
+
+type charsetTarget int
+
+const (
+	charsetTargetNone charsetTarget = iota
+	charsetTargetG0
+	charsetTargetG1
+)
+
+// CursorStyle represents the rendered cursor style.
+type CursorStyle int
+
+const (
+	CursorStyleBlock CursorStyle = iota
+	CursorStyleUnderline
+	CursorStyleBar
+)
+
+// DEC Special Graphics (line drawing) character mapping.
+// Used when G0/G1 is designated via ESC ( 0 / ESC ) 0 and selected via SI/SO.
+var decLineDrawing = map[rune]rune{
+	'`': '◆', // U+25C6 Black Diamond
+	'a': '▒', // U+2592 Medium Shade
+	'f': '°', // U+00B0 Degree Sign
+	'g': '±', // U+00B1 Plus-Minus Sign
+	'j': '┘', // U+2518 Box Drawings Light Up And Left
+	'k': '┐', // U+2510 Box Drawings Light Down And Left
+	'l': '┌', // U+250C Box Drawings Light Down And Right
+	'm': '└', // U+2514 Box Drawings Light Up And Right
+	'n': '┼', // U+253C Box Drawings Light Vertical And Horizontal
+	'o': '⎺', // U+23BA Horizontal Scan Line-1
+	'p': '⎻', // U+23BB Horizontal Scan Line-3
+	'q': '─', // U+2500 Box Drawings Light Horizontal
+	'r': '⎼', // U+23BC Horizontal Scan Line-7
+	's': '⎽', // U+23BD Horizontal Scan Line-9
+	't': '├', // U+251C Box Drawings Light Vertical And Right
+	'u': '┤', // U+2524 Box Drawings Light Vertical And Left
+	'v': '┴', // U+2534 Box Drawings Light Up And Horizontal
+	'w': '┬', // U+252C Box Drawings Light Down And Horizontal
+	'x': '│', // U+2502 Box Drawings Light Vertical
+	'y': '≤', // U+2264 Less-Than Or Equal To
+	'z': '≥', // U+2265 Greater-Than Or Equal To
+	'{': 'π', // U+03C0 Greek Small Letter Pi
+	'|': '≠', // U+2260 Not Equal To
+	'}': '£', // U+00A3 Pound Sign
+	'~': '·', // U+00B7 Middle Dot
+}
+
 // CursorState holds complete cursor state for save/restore
 type CursorState struct {
 	col   int
@@ -59,6 +114,15 @@ type Terminal struct {
 	// Per-screen scroll region state
 	savedMainScrollTop    int
 	savedMainScrollBottom int
+	// Character set handling (DEC line drawing)
+	charsetG0      Charset
+	charsetG1      Charset
+	activeCharset  int // 0=G0, 1=G1
+	charsetPending charsetTarget
+	// Origin mode (DECOM ?6)
+	originMode bool
+	// Cursor style (DECSCUSR)
+	cursorStyle CursorStyle
 	// Bracketed paste mode (?2004)
 	bracketedPaste bool
 	// Window title (OSC 0/2) and icon name (OSC 0/1)
@@ -67,6 +131,11 @@ type Terminal struct {
 	// Mouse tracking modes
 	mouseMode    int  // 0=off, 1000=normal, 1002=button, 1003=any
 	mouseSGRMode bool // ?1006 - SGR extended coordinates
+	// Saved terminal modes for alternate screen restore
+	savedMainAppCursorKeys  bool
+	savedMainBracketedPaste bool
+	savedMainMouseMode      int
+	savedMainMouseSGRMode   bool
 }
 
 // NewTerminal creates a new terminal parser
@@ -80,6 +149,11 @@ func NewTerminal(cols, rows int) *Terminal {
 		cursorVisible:         true,
 		savedMainScrollTop:    1,
 		savedMainScrollBottom: rows,
+		charsetG0:             charsetASCII,
+		charsetG1:             charsetASCII,
+		activeCharset:         0,
+		charsetPending:        charsetTargetNone,
+		cursorStyle:           CursorStyleBlock,
 	}
 }
 
@@ -111,7 +185,8 @@ func (t *Terminal) processByte(b byte) {
 	case StateDCSEscape:
 		t.processDCSEscape(b)
 	case StateCharset:
-		// Character set designation - consume the designator byte and ignore
+		// Character set designation - consume the designator byte
+		t.setCharset(b)
 		t.state = StateGround
 	case StateHash:
 		// DEC special sequences like ESC # 8 (DECALN)
@@ -128,7 +203,7 @@ func (t *Terminal) processGround(b byte) {
 			t.utf8Remaining--
 			if t.utf8Remaining == 0 {
 				// Complete UTF-8 sequence - decode and write
-				r := decodeUTF8(t.utf8Buf)
+				r := t.mapCharsetRune(decodeUTF8(t.utf8Buf))
 				t.Grid.WriteChar(r, t.currentFg, t.currentBg, t.currentFlags)
 				t.utf8Buf = nil
 			}
@@ -144,21 +219,37 @@ func (t *Terminal) processGround(b byte) {
 	switch b {
 	case 0x1b: // ESC
 		t.state = StateEscape
+	case 0x9b: // CSI (8-bit C1)
+		t.state = StateCSI
+		t.csiParams = ""
+	case 0x9d: // OSC (8-bit C1)
+		t.state = StateOSC
+		t.oscParams = ""
+	case 0x90: // DCS (8-bit C1)
+		t.state = StateDCS
+		t.dcsParams = ""
 	case 0x07: // BEL
 		// Bell - ignore
 	case 0x08: // BS
 		t.Grid.Backspace()
 	case 0x09: // HT (Tab)
 		t.Grid.Tab()
+	case 0x0e: // SO (Shift Out) - select G1
+		t.activeCharset = 1
+	case 0x0f: // SI (Shift In) - select G0
+		t.activeCharset = 0
 	case 0x0a, 0x0b, 0x0c: // LF, VT, FF
 		t.Grid.Newline()
 		// Scroll position preserved - reset happens on user input instead
 	case 0x0d: // CR
 		t.Grid.CarriageReturn()
+	case 0x9c: // ST (String Terminator) - ignore in ground
+		// No-op
 	default:
 		if b >= 0x20 && b < 0x7f {
 			// ASCII printable character
-			t.Grid.WriteChar(rune(b), t.currentFg, t.currentBg, t.currentFlags)
+			r := t.mapCharsetRune(rune(b))
+			t.Grid.WriteChar(r, t.currentFg, t.currentBg, t.currentFlags)
 		} else if b >= 0xC0 && b < 0xE0 {
 			// Start of 2-byte UTF-8 sequence
 			t.utf8Buf = []byte{b}
@@ -200,6 +291,99 @@ func decodeUTF8(buf []byte) rune {
 	}
 
 	return 0xFFFD // Replacement character for invalid sequences
+}
+
+// setCursorPos applies origin mode if enabled, then clamps to bounds.
+func (t *Terminal) setCursorPos(col, row int) {
+	if t.originMode {
+		top, bottom := t.Grid.GetScrollRegion()
+		row = top + row - 1
+		if row < top {
+			row = top
+		} else if row > bottom {
+			row = bottom
+		}
+	}
+	t.Grid.SetCursorPos(col, row)
+}
+
+// moveCursor moves the cursor and clamps to the scroll region if origin mode is enabled.
+func (t *Terminal) moveCursor(dCol, dRow int) {
+	if !t.originMode {
+		t.Grid.MoveCursor(dCol, dRow)
+		return
+	}
+	col, row := t.Grid.GetCursor()
+	col += dCol
+	row += dRow
+	if col < 0 {
+		col = 0
+	} else if col >= t.Grid.Cols {
+		col = t.Grid.Cols - 1
+	}
+	top, bottom := t.Grid.GetScrollRegion()
+	top--
+	bottom--
+	if row < top {
+		row = top
+	} else if row > bottom {
+		row = bottom
+	}
+	t.Grid.SetCursorPos(col+1, row+1)
+}
+
+// mapCharsetRune applies DEC line drawing mapping if a graphics charset is active.
+func (t *Terminal) mapCharsetRune(r rune) rune {
+	var cs Charset
+	if t.activeCharset == 1 {
+		cs = t.charsetG1
+	} else {
+		cs = t.charsetG0
+	}
+	if cs == charsetLineDrawing {
+		if mapped, ok := decLineDrawing[r]; ok {
+			return mapped
+		}
+	}
+	return r
+}
+
+// setCharset applies a charset designation byte to the pending target.
+func (t *Terminal) setCharset(designator byte) {
+	if t.charsetPending == charsetTargetNone {
+		return
+	}
+
+	cs := charsetASCII
+	switch designator {
+	case '0':
+		cs = charsetLineDrawing
+	case 'B':
+		cs = charsetASCII
+	}
+
+	switch t.charsetPending {
+	case charsetTargetG0:
+		t.charsetG0 = cs
+	case charsetTargetG1:
+		t.charsetG1 = cs
+	}
+	t.charsetPending = charsetTargetNone
+}
+
+func (t *Terminal) setCursorStyle(params []int) {
+	p := 0
+	if len(params) > 0 {
+		p = params[0]
+	}
+	switch p {
+	case 0, 1, 2: // Default/blink/steady block
+		t.cursorStyle = CursorStyleBlock
+	case 3, 4: // Blink/steady underline
+		t.cursorStyle = CursorStyleUnderline
+	case 5, 6: // Blink/steady bar
+		t.cursorStyle = CursorStyleBar
+	}
 }
 
 // processEscape handles bytes in escape state
@@ -246,6 +430,14 @@ func (t *Terminal) processEscape(b byte) {
 		t.Grid.Newline()
 		t.state = StateGround
 	case '(', ')', '*', '+': // Character set designation - need to consume next byte
+		switch b {
+		case '(':
+			t.charsetPending = charsetTargetG0
+		case ')':
+			t.charsetPending = charsetTargetG1
+		default:
+			t.charsetPending = charsetTargetNone
+		}
 		t.state = StateCharset
 	case '=': // DECKPAM - Application keypad mode
 		t.state = StateGround
@@ -284,24 +476,24 @@ func (t *Terminal) executeCSI(final byte) {
 	switch final {
 	case 'A': // CUU - Cursor up
 		n := t.getParam(params, 0, 1)
-		t.Grid.MoveCursor(0, -n)
+		t.moveCursor(0, -n)
 	case 'B': // CUD - Cursor down
 		n := t.getParam(params, 0, 1)
-		t.Grid.MoveCursor(0, n)
+		t.moveCursor(0, n)
 	case 'C': // CUF - Cursor forward
 		n := t.getParam(params, 0, 1)
-		t.Grid.MoveCursor(n, 0)
+		t.moveCursor(n, 0)
 	case 'D': // CUB - Cursor back
 		n := t.getParam(params, 0, 1)
-		t.Grid.MoveCursor(-n, 0)
+		t.moveCursor(-n, 0)
 	case 'E': // CNL - Cursor next line
 		n := t.getParam(params, 0, 1)
 		t.Grid.CarriageReturn()
-		t.Grid.MoveCursor(0, n)
+		t.moveCursor(0, n)
 	case 'F': // CPL - Cursor previous line
 		n := t.getParam(params, 0, 1)
 		t.Grid.CarriageReturn()
-		t.Grid.MoveCursor(0, -n)
+		t.moveCursor(0, -n)
 	case 'G': // CHA - Cursor horizontal absolute
 		n := t.getParam(params, 0, 1)
 		_, row := t.Grid.GetCursor()
@@ -309,7 +501,7 @@ func (t *Terminal) executeCSI(final byte) {
 	case 'H', 'f': // CUP - Cursor position
 		row := t.getParam(params, 0, 1)
 		col := t.getParam(params, 1, 1)
-		t.Grid.SetCursorPos(col, row)
+		t.setCursorPos(col, row)
 	case 'J': // ED - Erase in display (with BCE support)
 		n := t.getParam(params, 0, 0)
 		switch n {
@@ -354,12 +546,13 @@ func (t *Terminal) executeCSI(final byte) {
 	case 'd': // VPA - Vertical position absolute
 		n := t.getParam(params, 0, 1)
 		col, _ := t.Grid.GetCursor()
-		t.Grid.SetCursorPos(col+1, n)
+		t.setCursorPos(col+1, n)
 	case 'b': // REP - Repeat preceding character
 		n := t.getParam(params, 0, 1)
 		t.Grid.RepeatChar(n)
 	case 'm': // SGR - Select graphic rendition
-		t.executeSGR(params)
+		sgrParams := t.parseSGRParams(t.csiParams)
+		t.executeSGR(sgrParams)
 	case 'h': // SM - Set mode
 		t.setMode(params, true)
 	case 'l': // RM - Reset mode
@@ -368,6 +561,11 @@ func (t *Terminal) executeCSI(final byte) {
 		top := t.getParam(params, 0, 1)
 		bottom := t.getParam(params, 1, t.Grid.Rows)
 		t.Grid.SetScrollRegion(top, bottom)
+		if t.originMode {
+			t.setCursorPos(1, 1)
+		} else {
+			t.Grid.SetCursorPos(1, 1)
+		}
 	case 's': // SCP - Save cursor position
 		t.saveCursor()
 	case 'u': // RCP - Restore cursor position
@@ -378,6 +576,7 @@ func (t *Terminal) executeCSI(final byte) {
 		t.handleDA(params)
 	case 't': // Window manipulation (ignore)
 	case 'q': // DECSCUSR - Set cursor style (ignore for now)
+		t.setCursorStyle(params)
 	}
 }
 
@@ -479,11 +678,24 @@ func (t *Terminal) setMode(params []int, set bool) {
 				t.Grid.SetAutoWrap(set)
 			case 25: // DECTCEM - Text cursor enable
 				t.cursorVisible = set
+			case 6: // DECOM - Origin mode
+				t.originMode = set
+				if t.originMode {
+					t.setCursorPos(1, 1)
+				} else {
+					t.Grid.SetCursorPos(1, 1)
+				}
 			case 47, 1047: // Alternate screen buffer
 				if set {
 					t.enterAlternateScreen()
 				} else {
 					t.exitAlternateScreen()
+				}
+			case 1048: // Save/restore cursor (xterm)
+				if set {
+					t.saveCursor()
+				} else {
+					t.restoreCursor()
 				}
 			case 1049: // Alternate screen buffer with save/restore cursor
 				if set {
@@ -526,6 +738,12 @@ func (t *Terminal) enterAlternateScreen() {
 		// Save main screen's scroll region
 		t.savedMainScrollTop, t.savedMainScrollBottom = t.Grid.GetScrollRegion()
 
+		// Save terminal modes so they can be restored on exit
+		t.savedMainAppCursorKeys = t.appCursorKeys
+		t.savedMainBracketedPaste = t.bracketedPaste
+		t.savedMainMouseMode = t.mouseMode
+		t.savedMainMouseSGRMode = t.mouseSGRMode
+
 		t.savedMainGrid = t.Grid
 		t.Grid = grid.NewGrid(t.Grid.Cols, t.Grid.Rows)
 		t.alternateScreen = true
@@ -536,21 +754,54 @@ func (t *Terminal) enterAlternateScreen() {
 	}
 }
 
-// exitAlternateScreen returns to main screen buffer
+// exitAlternateScreen returns to main screen buffer with full state cleanup.
+// Resets all terminal attributes so TUI app state doesn't leak into the main screen.
 func (t *Terminal) exitAlternateScreen() {
 	if t.alternateScreen && t.savedMainGrid != nil {
 		t.Grid = t.savedMainGrid
 		t.savedMainGrid = nil
 		t.alternateScreen = false
 
-		// Restore main screen's scroll region
-		t.Grid.SetScrollRegion(t.savedMainScrollTop, t.savedMainScrollBottom)
+		// Restore scroll region without resetting cursor position
+		t.Grid.RestoreScrollRegion(t.savedMainScrollTop, t.savedMainScrollBottom)
+
+		// Reset text attributes to defaults (prevent TUI colors leaking)
+		t.currentFg = grid.DefaultFg()
+		t.currentBg = grid.DefaultBg()
+		t.currentFlags = 0
+
+		// Reset BCE background on the restored grid
+		t.Grid.SetEraseBackground(grid.DefaultBg())
+
+		// Reset charset state to ASCII defaults
+		t.charsetG0 = charsetASCII
+		t.charsetG1 = charsetASCII
+		t.activeCharset = 0
+		t.charsetPending = charsetTargetNone
+
+		// Reset terminal modes
+		t.originMode = false
+		t.cursorStyle = CursorStyleBlock
+		t.cursorVisible = true
+
+		// Restore saved terminal modes from main screen
+		t.appCursorKeys = t.savedMainAppCursorKeys
+		t.bracketedPaste = t.savedMainBracketedPaste
+		t.mouseMode = t.savedMainMouseMode
+		t.mouseSGRMode = t.savedMainMouseSGRMode
+
+		// Clear stale wrap state from the restored grid
+		t.Grid.ResetWrapPending()
 	}
 }
 
 // processOSC handles OSC sequences (Operating System Command)
 func (t *Terminal) processOSC(b byte) {
 	if b == 0x07 { // BEL terminates OSC
+		t.handleOSC(t.oscParams)
+		t.oscParams = ""
+		t.state = StateGround
+	} else if b == 0x9c { // ST (8-bit)
 		t.handleOSC(t.oscParams)
 		t.oscParams = ""
 		t.state = StateGround
@@ -579,6 +830,10 @@ func (t *Terminal) processOSCEscape(b byte) {
 func (t *Terminal) processDCS(b byte) {
 	if b == 0x1b { // ESC - might be start of ST
 		t.state = StateDCSEscape
+	} else if b == 0x9c { // ST (8-bit)
+		t.handleDCS(t.dcsParams)
+		t.dcsParams = ""
+		t.state = StateGround
 	} else if b == 0x07 { // BEL also terminates (non-standard but common)
 		t.handleDCS(t.dcsParams)
 		t.dcsParams = ""
@@ -763,6 +1018,40 @@ func (t *Terminal) EncodeMouseEvent(button int, x, y int, pressed bool) []byte {
 	return []byte{0x1b, '[', 'M', cb, cx, cy}
 }
 
+// parseSGRParams parses CSI parameters for SGR sequences, properly expanding
+// colon sub-parameters for extended color sequences (38, 48, 58) per ISO 8613-6.
+// Modern apps like Neovim use "38:2:R:G:B" instead of "38;2;R;G;B".
+func (t *Terminal) parseSGRParams(s string) []int {
+	s = strings.TrimPrefix(s, "?")
+	s = strings.TrimPrefix(s, ">")
+	s = strings.TrimPrefix(s, "!")
+	if s == "" {
+		return nil
+	}
+	var params []int
+	parts := strings.Split(s, ";")
+	for _, part := range parts {
+		if strings.Contains(part, ":") {
+			subparts := strings.Split(part, ":")
+			first, _ := strconv.Atoi(subparts[0])
+			if first == 38 || first == 48 || first == 58 {
+				// Expand colon sub-params for extended color sequences
+				for _, sp := range subparts {
+					n, _ := strconv.Atoi(sp)
+					params = append(params, n)
+				}
+			} else {
+				// For other codes (e.g. 4:3 underline style), keep first value only
+				params = append(params, first)
+			}
+		} else {
+			n, _ := strconv.Atoi(part)
+			params = append(params, n)
+		}
+	}
+	return params
+}
+
 // parseParams parses CSI parameters
 func (t *Terminal) parseParams(s string) []int {
 	// Remove private mode indicator
@@ -810,6 +1099,12 @@ func (t *Terminal) reset() {
 	t.appCursorKeys = false
 	t.cursorVisible = true
 	t.exitAlternateScreen()
+	t.charsetG0 = charsetASCII
+	t.charsetG1 = charsetASCII
+	t.activeCharset = 0
+	t.charsetPending = charsetTargetNone
+	t.originMode = false
+	t.cursorStyle = CursorStyleBlock
 }
 
 // Resize resizes the terminal
@@ -829,6 +1124,13 @@ func (t *Terminal) IsCursorVisible() bool {
 	return t.cursorVisible
 }
 
+// CursorStyle returns the current cursor style.
+func (t *Terminal) CursorStyle() CursorStyle {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.cursorStyle
+}
+
 // AppCursorKeys returns whether application cursor keys mode is enabled
 func (t *Terminal) AppCursorKeys() bool {
 	t.mu.Lock()
@@ -843,6 +1145,14 @@ func (t *Terminal) SetResponseWriter(writer func([]byte)) {
 	t.responseWriter = writer
 }
 
+// GetGrid returns the current grid with thread-safe access.
+// Use this from render and main goroutines instead of accessing Terminal.Grid directly.
+func (t *Terminal) GetGrid() *grid.Grid {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.Grid
+}
+
 func (t *Terminal) handleDSR(params []int) {
 	if t.responseWriter == nil {
 		return
@@ -853,6 +1163,13 @@ func (t *Terminal) handleDSR(params []int) {
 		t.responseWriter([]byte("\x1b[0n"))
 	case 6: // Cursor position report
 		col, row := t.Grid.GetCursor()
+		if t.originMode {
+			top, _ := t.Grid.GetScrollRegion()
+			row = row - (top - 1)
+			if row < 0 {
+				row = 0
+			}
+		}
 		response := fmt.Sprintf("\x1b[%d;%dR", row+1, col+1)
 		t.responseWriter([]byte(response))
 	}
