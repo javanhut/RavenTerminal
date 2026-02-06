@@ -244,10 +244,24 @@ check_dependencies() {
 
     # macOS-specific dependency checks
     if [ "$OS_TYPE" = "Darwin" ]; then
-        # Check for icon conversion tools (optional but recommended)
+        # Check for Homebrew
+        if ! command -v brew &> /dev/null; then
+            print_error "Homebrew is not installed. Please install it first:"
+            echo "  /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+            exit 1
+        fi
+        print_success "Homebrew found"
+
+        # Check for icon conversion tools and install if missing
         if ! command -v rsvg-convert &> /dev/null && ! command -v convert &> /dev/null; then
-            print_warning "No SVG conversion tool found. App icon may not be generated."
-            print_info "Install with: brew install librsvg   OR   brew install imagemagick"
+            print_info "Installing librsvg for icon generation..."
+            if brew install librsvg; then
+                print_success "librsvg installed"
+            else
+                print_warning "Failed to install librsvg. App icon may not be generated."
+            fi
+        else
+            print_success "SVG conversion tools found"
         fi
         return 0
     fi
@@ -331,14 +345,31 @@ EOF
 convert_svg_to_icns() {
     local resources_dir="$1"
     local svg_path="$REPO_DIR/src/assets/raven_terminal_icon.svg"
+    local prebuilt_icns="$REPO_DIR/src/assets/raven-terminal.icns"
     local iconset_dir="/tmp/raven-terminal.iconset"
     local icns_path="${resources_dir}/raven-terminal.icns"
 
-    # Check for conversion tools
-    if ! command -v rsvg-convert &> /dev/null && ! command -v convert &> /dev/null; then
-        print_warning "Neither rsvg-convert nor ImageMagick found. Skipping icon generation."
-        print_info "Install with: brew install librsvg   OR   brew install imagemagick"
+    # First check for pre-built ICNS file in repo
+    if [ -f "$prebuilt_icns" ]; then
+        cp "$prebuilt_icns" "$icns_path"
+        print_success "Copied pre-built icon: $icns_path"
         return 0
+    fi
+
+    # Check for conversion tools, install if missing
+    if ! command -v rsvg-convert &> /dev/null && ! command -v convert &> /dev/null; then
+        print_info "SVG conversion tools not found. Installing librsvg..."
+        if command -v brew &> /dev/null; then
+            if brew install librsvg; then
+                print_success "librsvg installed"
+            else
+                print_warning "Failed to install librsvg. Skipping icon generation."
+                return 0
+            fi
+        else
+            print_warning "Homebrew not found. Skipping icon generation."
+            return 0
+        fi
     fi
 
     if [ ! -f "$svg_path" ]; then
@@ -348,21 +379,37 @@ convert_svg_to_icns() {
 
     mkdir -p "$iconset_dir"
 
-    # Generate required icon sizes
-    for size in 16 32 64 128 256 512; do
+    print_info "Generating macOS icon from SVG..."
+
+    # Generate required icon sizes (macOS iconset requires specific sizes)
+    # Standard sizes: 16, 32, 128, 256, 512 (plus @2x retina versions)
+    local sizes=(16 32 128 256 512)
+    local failed=false
+
+    for size in "${sizes[@]}"; do
+        local retina_size=$((size * 2))
         if command -v rsvg-convert &> /dev/null; then
-            rsvg-convert -w $size -h $size "$svg_path" -o "${iconset_dir}/icon_${size}x${size}.png"
-            rsvg-convert -w $((size*2)) -h $((size*2)) "$svg_path" -o "${iconset_dir}/icon_${size}x${size}@2x.png"
+            rsvg-convert -w $size -h $size "$svg_path" -o "${iconset_dir}/icon_${size}x${size}.png" 2>/dev/null || failed=true
+            rsvg-convert -w $retina_size -h $retina_size "$svg_path" -o "${iconset_dir}/icon_${size}x${size}@2x.png" 2>/dev/null || failed=true
         else
-            convert -background none -resize ${size}x${size} "$svg_path" "${iconset_dir}/icon_${size}x${size}.png"
-            convert -background none -resize $((size*2))x$((size*2)) "$svg_path" "${iconset_dir}/icon_${size}x${size}@2x.png"
+            convert -background none -resize ${size}x${size} "$svg_path" "${iconset_dir}/icon_${size}x${size}.png" 2>/dev/null || failed=true
+            convert -background none -resize ${retina_size}x${retina_size} "$svg_path" "${iconset_dir}/icon_${size}x${size}@2x.png" 2>/dev/null || failed=true
         fi
     done
 
+    if [ "$failed" = true ]; then
+        print_warning "Some icon sizes failed to generate"
+        rm -rf "$iconset_dir"
+        return 0
+    fi
+
     # Create ICNS file using macOS iconutil
     if command -v iconutil &> /dev/null; then
-        iconutil -c icns "$iconset_dir" -o "$icns_path"
-        print_success "Created icon: $icns_path"
+        if iconutil -c icns "$iconset_dir" -o "$icns_path" 2>/dev/null; then
+            print_success "Created icon: $icns_path"
+        else
+            print_warning "iconutil failed to create ICNS file"
+        fi
     else
         print_warning "iconutil not found. Cannot create ICNS file."
     fi

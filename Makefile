@@ -1,7 +1,7 @@
 # Raven Terminal Makefile
 # Provides easy build, install, uninstall, and dependency management
 
-.PHONY: all build install install-local uninstall uninstall-local clean deps deps-check help
+.PHONY: all build install install-local uninstall uninstall-local clean deps deps-check test macos-icon help
 
 # Application info
 APP_NAME := raven-terminal
@@ -180,6 +180,15 @@ test:
 	@echo -e "$(BLUE)[INFO]$(NC) Running tests..."
 	@go test ./src/...
 
+# Generate macOS icon (run on macOS only)
+macos-icon:
+ifeq ($(OS),Darwin)
+	@$(SCRIPTS_DIR)/generate-macos-icon.sh
+else
+	@echo -e "$(YELLOW)[WARNING]$(NC) This target must be run on macOS"
+	@echo "The macOS icon will be generated automatically during install if conversion tools are available."
+endif
+
 # Show help
 help:
 	@echo ""
@@ -198,6 +207,7 @@ help:
 	@echo "  deps            Install build dependencies for your OS"
 	@echo "  deps-check      Check if all dependencies are installed"
 	@echo "  test            Run tests"
+	@echo "  macos-icon      Generate macOS app icon (macOS only)"
 	@echo "  help            Show this help message"
 	@echo ""
 	@echo "Detected System:"
