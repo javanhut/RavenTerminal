@@ -162,7 +162,7 @@ else ifeq ($(DISTRO),macos)
 		echo -e "$(RED)[ERROR]$(NC) Homebrew is not installed. Please install it from https://brew.sh"; \
 		exit 1; \
 	fi
-	brew install go pkg-config
+	brew install go pkg-config librsvg
 else
 	@echo -e "$(RED)[ERROR]$(NC) Unknown distribution: $(DISTRO)"
 	@echo -e "$(YELLOW)[INFO]$(NC) Please install the following dependencies manually:"

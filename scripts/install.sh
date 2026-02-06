@@ -6,6 +6,9 @@
 
 set -e
 
+# Detect OS type
+OS_TYPE="$(uname -s)"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -224,34 +227,48 @@ parse_args() {
 
 check_dependencies() {
     print_info "Checking dependencies..."
-    
+
     # Check for Go
     if ! command -v go &> /dev/null; then
         print_error "Go is not installed. Please install Go first."
-        echo "  Arch: sudo pacman -S go"
-        echo "  Ubuntu/Debian: sudo apt install golang"
-        echo "  Fedora: sudo dnf install golang"
+        if [ "$OS_TYPE" = "Darwin" ]; then
+            echo "  macOS: brew install go"
+        else
+            echo "  Arch: sudo pacman -S go"
+            echo "  Ubuntu/Debian: sudo apt install golang"
+            echo "  Fedora: sudo dnf install golang"
+        fi
         exit 1
     fi
     print_success "Go found: $(go version | awk '{print $3}')"
-    
-    # Check for required system libraries (for OpenGL)
+
+    # macOS-specific dependency checks
+    if [ "$OS_TYPE" = "Darwin" ]; then
+        # Check for icon conversion tools (optional but recommended)
+        if ! command -v rsvg-convert &> /dev/null && ! command -v convert &> /dev/null; then
+            print_warning "No SVG conversion tool found. App icon may not be generated."
+            print_info "Install with: brew install librsvg   OR   brew install imagemagick"
+        fi
+        return 0
+    fi
+
+    # Linux: Check for required system libraries (for OpenGL)
     local missing_deps=()
-    
+
     # Check pkg-config
     if ! command -v pkg-config &> /dev/null; then
         missing_deps+=("pkg-config")
     fi
-    
+
     # Check for OpenGL/GLFW dependencies
     if ! pkg-config --exists gl 2>/dev/null; then
         missing_deps+=("OpenGL development libraries")
     fi
-    
+
     if ! pkg-config --exists x11 2>/dev/null && ! pkg-config --exists wayland-client 2>/dev/null; then
         missing_deps+=("X11 or Wayland development libraries")
     fi
-    
+
     if [ ${#missing_deps[@]} -gt 0 ]; then
         print_warning "Some dependencies may be missing: ${missing_deps[*]}"
         echo "  Arch: sudo pacman -S base-devel libx11 libxcursor libxrandr libxinerama libxi mesa"
@@ -293,7 +310,7 @@ create_desktop_file() {
     local bin_path="$1"
     local desktop_file="$2"
     local icon_name="$3"
-    
+
     cat > "$desktop_file" << EOF
 [Desktop Entry]
 Version=1.0
@@ -308,6 +325,154 @@ Keywords=terminal;console;shell;command;prompt;
 StartupNotify=true
 StartupWMClass=raven-terminal
 EOF
+}
+
+# macOS: Convert SVG to ICNS icon format
+convert_svg_to_icns() {
+    local resources_dir="$1"
+    local svg_path="$REPO_DIR/src/assets/raven_terminal_icon.svg"
+    local iconset_dir="/tmp/raven-terminal.iconset"
+    local icns_path="${resources_dir}/raven-terminal.icns"
+
+    # Check for conversion tools
+    if ! command -v rsvg-convert &> /dev/null && ! command -v convert &> /dev/null; then
+        print_warning "Neither rsvg-convert nor ImageMagick found. Skipping icon generation."
+        print_info "Install with: brew install librsvg   OR   brew install imagemagick"
+        return 0
+    fi
+
+    if [ ! -f "$svg_path" ]; then
+        print_warning "SVG icon not found at $svg_path. Skipping icon generation."
+        return 0
+    fi
+
+    mkdir -p "$iconset_dir"
+
+    # Generate required icon sizes
+    for size in 16 32 64 128 256 512; do
+        if command -v rsvg-convert &> /dev/null; then
+            rsvg-convert -w $size -h $size "$svg_path" -o "${iconset_dir}/icon_${size}x${size}.png"
+            rsvg-convert -w $((size*2)) -h $((size*2)) "$svg_path" -o "${iconset_dir}/icon_${size}x${size}@2x.png"
+        else
+            convert -background none -resize ${size}x${size} "$svg_path" "${iconset_dir}/icon_${size}x${size}.png"
+            convert -background none -resize $((size*2))x$((size*2)) "$svg_path" "${iconset_dir}/icon_${size}x${size}@2x.png"
+        fi
+    done
+
+    # Create ICNS file using macOS iconutil
+    if command -v iconutil &> /dev/null; then
+        iconutil -c icns "$iconset_dir" -o "$icns_path"
+        print_success "Created icon: $icns_path"
+    else
+        print_warning "iconutil not found. Cannot create ICNS file."
+    fi
+
+    rm -rf "$iconset_dir"
+}
+
+# macOS: Install as app bundle
+install_macos() {
+    local app_name="Raven Terminal"
+    local app_bundle
+
+    if [ "$INSTALL_MODE" = "global" ]; then
+        app_bundle="/Applications/${app_name}.app"
+        print_info "Installing system-wide to /Applications (requires sudo)..."
+    else
+        app_bundle="$HOME/Applications/${app_name}.app"
+        mkdir -p "$HOME/Applications"
+        print_info "Installing for current user to ~/Applications..."
+    fi
+
+    # Create app bundle structure
+    if [ "$INSTALL_MODE" = "global" ]; then
+        sudo mkdir -p "${app_bundle}/Contents/MacOS"
+        sudo mkdir -p "${app_bundle}/Contents/Resources"
+    else
+        mkdir -p "${app_bundle}/Contents/MacOS"
+        mkdir -p "${app_bundle}/Contents/Resources"
+    fi
+
+    # Copy binary
+    if [ "$INSTALL_MODE" = "global" ]; then
+        sudo cp "$REPO_DIR/$APP_NAME" "${app_bundle}/Contents/MacOS/"
+        sudo chmod +x "${app_bundle}/Contents/MacOS/$APP_NAME"
+    else
+        cp "$REPO_DIR/$APP_NAME" "${app_bundle}/Contents/MacOS/"
+        chmod +x "${app_bundle}/Contents/MacOS/$APP_NAME"
+    fi
+    print_success "Binary installed to ${app_bundle}/Contents/MacOS/$APP_NAME"
+
+    # Clean up build artifact
+    rm -f "$REPO_DIR/$APP_NAME"
+    print_info "Cleaned up build artifact from source directory"
+
+    # Create Info.plist
+    local plist_content='<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>raven-terminal</string>
+    <key>CFBundleIconFile</key>
+    <string>raven-terminal</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.javanhut.raven-terminal</string>
+    <key>CFBundleName</key>
+    <string>Raven Terminal</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>10.13</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>'
+
+    if [ "$INSTALL_MODE" = "global" ]; then
+        echo "$plist_content" | sudo tee "${app_bundle}/Contents/Info.plist" > /dev/null
+    else
+        echo "$plist_content" > "${app_bundle}/Contents/Info.plist"
+    fi
+    print_success "Created Info.plist"
+
+    # Convert SVG to ICNS (needs to be done to a temp location first for global install)
+    if [ "$INSTALL_MODE" = "global" ]; then
+        local temp_resources="/tmp/raven-terminal-resources"
+        mkdir -p "$temp_resources"
+        convert_svg_to_icns "$temp_resources"
+        if [ -f "$temp_resources/raven-terminal.icns" ]; then
+            sudo cp "$temp_resources/raven-terminal.icns" "${app_bundle}/Contents/Resources/"
+        fi
+        rm -rf "$temp_resources"
+    else
+        convert_svg_to_icns "${app_bundle}/Contents/Resources"
+    fi
+
+    # Create CLI symlink for terminal access
+    if [ "$INSTALL_MODE" = "global" ]; then
+        sudo ln -sf "${app_bundle}/Contents/MacOS/$APP_NAME" /usr/local/bin/$APP_NAME
+        print_success "Created CLI symlink at /usr/local/bin/$APP_NAME"
+    else
+        mkdir -p "$HOME/.local/bin"
+        ln -sf "${app_bundle}/Contents/MacOS/$APP_NAME" "$HOME/.local/bin/$APP_NAME"
+        print_success "Created CLI symlink at $HOME/.local/bin/$APP_NAME"
+
+        # Check if ~/.local/bin is in PATH
+        if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+            print_warning "$HOME/.local/bin is not in your PATH"
+            echo ""
+            echo "Add this to your ~/.bashrc or ~/.zshrc:"
+            echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+            echo ""
+        fi
+    fi
+
+    print_success "Installed app bundle to: ${app_bundle}"
 }
 
 install_user() {
@@ -449,7 +614,7 @@ print_completion() {
     echo -e "${GREEN}     Installation Complete!${NC}"
     echo -e "${GREEN}============================================${NC}"
     echo ""
-    
+
     if [ "$BUILD_ONLY" = true ]; then
         echo "Binary built at: $REPO_DIR/$APP_NAME"
         echo ""
@@ -457,12 +622,22 @@ print_completion() {
     else
         echo "You can now launch Raven Terminal:"
         echo ""
-        if [ "$INSTALL_MODE" = "user" ]; then
+        if [ "$OS_TYPE" = "Darwin" ]; then
+            if [ "$INSTALL_MODE" = "user" ]; then
+                echo "  - From Finder: ~/Applications/Raven Terminal.app"
+            else
+                echo "  - From Finder: /Applications/Raven Terminal.app"
+            fi
+            echo "  - From Spotlight: Search for 'Raven Terminal'"
             echo "  - From terminal: $APP_NAME"
-            echo "  - From application menu: Search for 'Raven Terminal'"
         else
-            echo "  - From terminal: $APP_NAME"
-            echo "  - From application menu: Search for 'Raven Terminal'"
+            if [ "$INSTALL_MODE" = "user" ]; then
+                echo "  - From terminal: $APP_NAME"
+                echo "  - From application menu: Search for 'Raven Terminal'"
+            else
+                echo "  - From terminal: $APP_NAME"
+                echo "  - From application menu: Search for 'Raven Terminal'"
+            fi
         fi
         echo ""
         echo "To uninstall, run: $(dirname "$0")/uninstall.sh --$INSTALL_MODE"
@@ -486,19 +661,26 @@ main() {
         exit 0
     fi
     
-    case $INSTALL_MODE in
-        user)
-            install_user
-            warn_path_conflict "$USER_BIN_DIR/$APP_NAME"
-            fix_stale_desktop_entry "$USER_APP_DIR/$APP_NAME.desktop" "$USER_BIN_DIR/raven-terminal-launcher" "" true
-            ;;
-        global)
-            install_global
-            warn_path_conflict "$GLOBAL_BIN_DIR/$APP_NAME"
-            fix_stale_desktop_entry "$GLOBAL_APP_DIR/$APP_NAME.desktop" "$GLOBAL_BIN_DIR/raven-terminal-launcher" "" false
-            fix_stale_desktop_entry "$USER_APP_DIR/$APP_NAME.desktop" "$USER_BIN_DIR/raven-terminal-launcher" "$GLOBAL_BIN_DIR/raven-terminal-launcher" true
-            ;;
-    esac
+    # Branch based on OS type
+    if [ "$OS_TYPE" = "Darwin" ]; then
+        # macOS: Create app bundle
+        install_macos
+    else
+        # Linux: Use traditional installation
+        case $INSTALL_MODE in
+            user)
+                install_user
+                warn_path_conflict "$USER_BIN_DIR/$APP_NAME"
+                fix_stale_desktop_entry "$USER_APP_DIR/$APP_NAME.desktop" "$USER_BIN_DIR/raven-terminal-launcher" "" true
+                ;;
+            global)
+                install_global
+                warn_path_conflict "$GLOBAL_BIN_DIR/$APP_NAME"
+                fix_stale_desktop_entry "$GLOBAL_APP_DIR/$APP_NAME.desktop" "$GLOBAL_BIN_DIR/raven-terminal-launcher" "" false
+                fix_stale_desktop_entry "$USER_APP_DIR/$APP_NAME.desktop" "$USER_BIN_DIR/raven-terminal-launcher" "$GLOBAL_BIN_DIR/raven-terminal-launcher" true
+                ;;
+        esac
+    fi
 
     print_completion
 }
