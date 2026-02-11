@@ -567,7 +567,9 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 	status := panel.Status
 	if panel.Loading {
 		spinner := panel.SpinnerFrame()
-		if status == "" || status == "Thinking..." || status == "Loading model..." {
+		if status == "Loading model..." {
+			status = spinner + " Loading model..."
+		} else if status == "" || status == "Thinking..." {
 			status = spinner + " Thinking..."
 		} else {
 			status = spinner + " " + status
@@ -655,8 +657,22 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 		bulletColor := [4]float32{0.7, 0.7, 0.9, 1.0}     // Light blue for bullets
 		thinkingColor := [4]float32{0.6, 0.5, 0.7, 0.85}  // Purple/dim for thinking
 		thinkingHeaderColor := [4]float32{0.7, 0.5, 0.8, 1.0} // Brighter purple for thinking header
+		// Compute selection range for highlight
+		selStart, selEnd := panel.SelectionStart, panel.SelectionEnd
+		if selEnd < selStart {
+			selStart, selEnd = selEnd, selStart
+		}
+
 		for i := 0; i < visibleLines && startLine+i < totalLines; i++ {
-			line := lines[startLine+i]
+			lineIdx := startLine + i
+			line := lines[lineIdx]
+
+			// Draw selection highlight
+			if panel.SelectionActive && lineIdx >= selStart && lineIdx <= selEnd {
+				selColor := [4]float32{r.theme.Selection[0], r.theme.Selection[1], r.theme.Selection[2], 0.3}
+				r.drawRect(layout.ContentX, lineY-layout.LineHeight*0.75, layout.ContentWidth, layout.LineHeight, selColor, proj)
+			}
+
 			if strings.TrimSpace(line.Text) != "" {
 				color := r.theme.Foreground
 				if line.IsThinking {
@@ -2114,6 +2130,26 @@ var boxDrawingFallbacks = map[rune]rune{
 	'╳': 'X', // U+2573 -> ASCII X
 }
 
+// unicodeFallbacks maps common Unicode characters to ASCII equivalents
+var unicodeFallbacks = map[rune]rune{
+	'\u2010': '-',  // HYPHEN
+	'\u2011': '-',  // NON-BREAKING HYPHEN
+	'\u2012': '-',  // FIGURE DASH
+	'\u2013': '-',  // EN DASH
+	'\u2014': '-',  // EM DASH
+	'\u2015': '-',  // HORIZONTAL BAR
+	'\u2212': '-',  // MINUS SIGN
+	'\u2018': '\'', // LEFT SINGLE QUOTATION
+	'\u2019': '\'', // RIGHT SINGLE QUOTATION
+	'\u201C': '"',  // LEFT DOUBLE QUOTATION
+	'\u201D': '"',  // RIGHT DOUBLE QUOTATION
+	'\u2026': '.',  // HORIZONTAL ELLIPSIS
+	'\u00B7': '.',  // MIDDLE DOT
+	'\u2022': '*',  // BULLET
+	'\u2023': '>',  // TRIANGULAR BULLET
+	'\u25CF': '*',  // BLACK CIRCLE
+}
+
 var quadrantBlockMasks = map[rune]uint8{
 	'\u2596': 0b0100, // Quadrant lower left
 	'\u2597': 0b1000, // Quadrant lower right
@@ -2210,6 +2246,12 @@ func (r *Renderer) drawChar(x, y float32, char rune, clr [4]float32, proj [16]fl
 		if fallback, hasFallback := boxDrawingFallbacks[char]; hasFallback {
 			glyph, ok = r.glyphs[fallback]
 		}
+		// Try unicode-to-ASCII fallbacks
+		if !ok {
+			if fallback, hasFallback := unicodeFallbacks[char]; hasFallback {
+				glyph, ok = r.glyphs[fallback]
+			}
+		}
 		// If still not found, fallback to '?'
 		if !ok {
 			glyph, ok = r.glyphs['?']
@@ -2276,6 +2318,12 @@ func (r *Renderer) drawCharScaled(x, y float32, char rune, clr [4]float32, proj 
 		// Try box-drawing fallbacks first
 		if fallback, hasFallback := boxDrawingFallbacks[char]; hasFallback {
 			glyph, ok = r.glyphs[fallback]
+		}
+		// Try unicode-to-ASCII fallbacks
+		if !ok {
+			if fallback, hasFallback := unicodeFallbacks[char]; hasFallback {
+				glyph, ok = r.glyphs[fallback]
+			}
 		}
 		// If still not found, fallback to '?'
 		if !ok {

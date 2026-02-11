@@ -7,7 +7,7 @@ import (
 )
 
 // Spinner frames for loading animation
-var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+var spinnerFrames = []string{"|", "/", "-", "\\"}
 
 const spinnerFrameRate = 100 * time.Millisecond
 
@@ -55,6 +55,11 @@ type Panel struct {
 	InputScroll    int      // Scroll offset for input area (in lines)
 	InputLines     []string // Wrapped input lines for display
 	InputWrapChars int      // Characters per line for wrapping
+
+	// Mouse text selection
+	SelectionActive bool
+	SelectionStart  int // Start line index (in wrapped lines)
+	SelectionEnd    int // End line index (in wrapped lines)
 }
 
 type Layout struct {

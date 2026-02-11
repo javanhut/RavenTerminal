@@ -106,6 +106,7 @@ type mouseSelection struct {
 	startRow int
 }
 
+
 type toastState struct {
 	message   string
 	expiresAt time.Time
@@ -306,7 +307,11 @@ func main() {
 		aiPanel.AddMessage("user", trimmed)
 		aiPanel.TrimMessages(maxChatMessages)
 		aiPanel.ClearInput()
-		aiPanel.Status = "Thinking..."
+		if !aiPanel.ModelLoaded {
+			aiPanel.Status = "Loading model..."
+		} else {
+			aiPanel.Status = "Thinking..."
+		}
 		aiPanel.StartLoading()
 		aiPanel.RequestID++
 		requestID := aiPanel.RequestID
@@ -345,6 +350,8 @@ func main() {
 					return
 				}
 				loadSuccess = true
+				// Signal: model loaded, now thinking
+				aiResponses <- aiResponse{id: id, token: "", done: false, loaded: true}
 			}
 
 			// Use streaming chat with thinking support
@@ -1224,6 +1231,27 @@ func main() {
 		case glfw.MouseButtonLeft:
 			switch action {
 			case glfw.Press:
+				// Check AI panel first for click-to-focus and text selection
+				if aiPanel.Open {
+					cellW, cellH := renderer.CellDimensions()
+					layout := aiPanel.Layout(width, height, cellW, cellH)
+					fx, fy := float32(x), float32(y)
+					if fx >= layout.PanelX && fx <= layout.PanelX+layout.PanelWidth &&
+						fy >= layout.PanelY && fy <= layout.PanelY+layout.PanelHeight {
+						aiPanel.Focused = true
+						// Check if click is in message area for text selection
+						if fx >= layout.ContentX && fx <= layout.ContentX+layout.ContentWidth &&
+							fy >= layout.MessagesStart && fy <= layout.MessagesEnd {
+							lineIdx := int((fy-layout.MessagesStart)/layout.LineHeight) + aiPanel.Scroll
+							aiPanel.SelectionActive = true
+							aiPanel.SelectionStart = lineIdx
+							aiPanel.SelectionEnd = lineIdx
+						}
+						return
+					}
+					// Click is outside AI panel
+					aiPanel.Focused = false
+				}
 				pane, col, row, ok := renderer.HitTestPane(activeTab, x, y, width, height)
 				if !ok || pane == nil {
 					if selection.pane != nil {
@@ -1254,6 +1282,39 @@ func main() {
 				pane.Terminal.GetGrid().SetSelection(col, row, col, row)
 				activeTab.SetActivePane(pane)
 			case glfw.Release:
+				// Handle AI panel text selection release
+				if aiPanel.SelectionActive {
+					cellW, cellH := renderer.CellDimensions()
+					layout := aiPanel.Layout(width, height, cellW, cellH)
+					fy := float32(y)
+					if fy < layout.MessagesStart {
+						fy = layout.MessagesStart
+					}
+					if fy > layout.MessagesEnd {
+						fy = layout.MessagesEnd
+					}
+					endLine := int((fy-layout.MessagesStart)/layout.LineHeight) + aiPanel.Scroll
+					startLine := aiPanel.SelectionStart
+					if endLine < startLine {
+						startLine, endLine = endLine, startLine
+					}
+					var selectedText strings.Builder
+					for i := startLine; i <= endLine && i < len(aiPanel.WrappedLines); i++ {
+						if i < 0 {
+							continue
+						}
+						if i > startLine {
+							selectedText.WriteString("\n")
+						}
+						selectedText.WriteString(aiPanel.WrappedLines[i].Text)
+					}
+					if text := selectedText.String(); strings.TrimSpace(text) != "" {
+						glfw.SetClipboardString(text)
+						showToast("Copied to clipboard")
+					}
+					aiPanel.SelectionActive = false
+					return
+				}
 				if !selection.active || selection.pane == nil {
 					return
 				}
@@ -1352,6 +1413,22 @@ func main() {
 		activeTab := tabManager.ActiveTab()
 		if activeTab == nil {
 			renderer.ClearHoverURL()
+			return
+		}
+
+		// Track AI panel text selection during drag
+		if aiPanel.SelectionActive && aiPanel.Open {
+			width, height := win.GetFramebufferSize()
+			cellW, cellH := renderer.CellDimensions()
+			layout := aiPanel.Layout(width, height, cellW, cellH)
+			fy := float32(ypos)
+			if fy < layout.MessagesStart {
+				fy = layout.MessagesStart
+			}
+			if fy > layout.MessagesEnd {
+				fy = layout.MessagesEnd
+			}
+			aiPanel.SelectionEnd = int((fy-layout.MessagesStart)/layout.LineHeight) + aiPanel.Scroll
 			return
 		}
 
@@ -1480,6 +1557,10 @@ func main() {
 					break
 				}
 				if !resp.done {
+					if resp.loaded {
+						// Model finished loading, now generating
+						aiPanel.Status = "Thinking..."
+					}
 					// Streaming token - append to assistant message
 					if resp.token != "" {
 						aiPanel.Status = ""

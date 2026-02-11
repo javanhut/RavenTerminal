@@ -289,6 +289,7 @@ func (m *Menu) buildMainMenu() {
 		{Label: "Ollama URL: " + truncate(ollamaURL, 25)},
 		{Label: "Ollama Model: " + truncate(ollamaModel, 25)},
 		{Label: "Test Ollama Connection"},
+		{Label: "Load Model"},
 		{Label: "Refresh Ollama Models"},
 		{Label: "Ollama Models..."},
 		{Label: "Thinking Mode", IsToggle: true, Toggled: m.Config.Ollama.ThinkingMode},
@@ -635,9 +636,10 @@ func (m *Menu) handleMainSelect() {
 	// 13: Prompt Style, 14: Prompt Options
 	// 15: AI FEATURES (header)
 	// 16: Web Search, 17: Reader Proxy, 18: Ollama Chat, 19: Ollama URL, 20: Ollama Model
-	// 21: Test Ollama, 22: Refresh Models, 23: Ollama Models
-	// 24: ACTIONS (header)
-	// 25: Reload Config, 26: Save and Close, 27: Cancel
+	// 21: Test Ollama, 22: Load Model, 23: Refresh Models, 24: Ollama Models
+	// 25: Thinking Mode, 26: Show Thinking
+	// 27: ACTIONS (header)
+	// 28: Reload Config, 29: Save and Close, 30: Cancel
 
 	switch m.SelectedIndex {
 	case 1: // Shell
@@ -700,7 +702,18 @@ func (m *Menu) handleMainSelect() {
 			return
 		}
 		m.StatusMessage = "Ollama connection OK"
-	case 22: // Refresh Ollama Models
+	case 22: // Load Model
+		if m.OnOllamaLoadModel == nil {
+			m.StatusMessage = "Ollama load unavailable"
+			return
+		}
+		if m.Config.Ollama.URL == "" || m.Config.Ollama.Model == "" {
+			m.StatusMessage = "Set Ollama URL and model first"
+			return
+		}
+		m.OnOllamaLoadModel(m.Config.Ollama.URL, m.Config.Ollama.Model)
+		m.StatusMessage = "Loading model..."
+	case 23: // Refresh Ollama Models
 		if m.OnOllamaFetchModels == nil {
 			m.StatusMessage = "Ollama fetch unavailable"
 			return
@@ -716,17 +729,17 @@ func (m *Menu) handleMainSelect() {
 			return
 		}
 		m.StatusMessage = "Models loaded (" + itoa(len(models)) + ")"
-	case 23: // Ollama Models
+	case 24: // Ollama Models
 		m.navigateTo(MenuOllamaModels, m.buildOllamaModelsMenu)
-	case 24: // Thinking Mode
+	case 25: // Thinking Mode
 		m.Config.Ollama.ThinkingMode = !m.Config.Ollama.ThinkingMode
 		m.buildMainMenu()
 		m.StatusMessage = "Updated (save to persist)"
-	case 25: // Show Thinking
+	case 26: // Show Thinking
 		m.Config.Ollama.ShowThinking = !m.Config.Ollama.ShowThinking
 		m.buildMainMenu()
 		m.StatusMessage = "Updated (save to persist)"
-	case 27: // Reload Config
+	case 28: // Reload Config
 		cfg, err := config.Load()
 		if err != nil {
 			m.StatusMessage = "Failed to reload config"
@@ -747,7 +760,7 @@ func (m *Menu) handleMainSelect() {
 		if m.StatusMessage == "" {
 			m.StatusMessage = "Config reloaded"
 		}
-	case 28: // Save and Close
+	case 29: // Save and Close
 		if !m.saveConfigWithInitScript("Saved") {
 			m.buildMainMenu()
 			return
@@ -760,7 +773,7 @@ func (m *Menu) handleMainSelect() {
 			}
 		}
 		m.Close()
-	case 29: // Cancel
+	case 30: // Cancel
 		m.Config, _ = config.Load()
 		m.Close()
 	}

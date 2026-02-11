@@ -9,3 +9,4 @@ raven-terminal
 node_modules/
 bun.lock
 package.json
+.lazy/*
