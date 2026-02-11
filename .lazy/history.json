@@ -1,0 +1,20 @@
+[
+  {
+    "command": "uninstall",
+    "args": null,
+    "timestamp": "2026-02-11T12:53:19.969022962Z",
+    "exit_code": 0
+  },
+  {
+    "command": "install",
+    "args": null,
+    "timestamp": "2026-02-11T12:53:28.551624532Z",
+    "exit_code": 0
+  },
+  {
+    "command": "uninstall",
+    "args": null,
+    "timestamp": "2026-02-11T12:54:01.374054176Z",
+    "exit_code": 0
+  }
+]
