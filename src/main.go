@@ -1252,6 +1252,38 @@ func main() {
 					// Click is outside AI panel
 					aiPanel.Focused = false
 				}
+				// Check search panel for click-to-focus and click-to-select
+				if searchPanel.Open {
+					cellW, cellH := renderer.CellDimensions()
+					layout := searchPanel.Layout(width, height, cellW, cellH)
+					fx, fy := float32(x), float32(y)
+					if fx >= layout.PanelX && fx <= layout.PanelX+layout.PanelWidth &&
+						fy >= layout.PanelY && fy <= layout.PanelY+layout.PanelHeight {
+						searchPanel.Focused = true
+						// Check if click is in results/preview area
+						if fx >= layout.ContentX && fx <= layout.ContentX+layout.ContentWidth &&
+							fy >= layout.ResultsStart && fy <= layout.ResultsEnd {
+							if searchPanel.Mode == searchpanel.ModePreview {
+								// Start text selection in preview
+								lineIdx := int((fy-layout.ResultsStart-layout.LineHeight)/layout.LineHeight) + searchPanel.PreviewScroll
+								searchPanel.SelectionActive = true
+								searchPanel.SelectionStart = lineIdx
+								searchPanel.SelectionEnd = lineIdx
+							} else if len(searchPanel.Results) > 0 {
+								// Click to select a result
+								relY := fy - layout.ResultsStart
+								clickedLine := int(relY/layout.LineHeight) + searchPanel.ResultsScroll
+								clickedResult := clickedLine / searchPanel.LinesPerResult()
+								if clickedResult >= 0 && clickedResult < len(searchPanel.Results) {
+									searchPanel.Selected = clickedResult
+								}
+							}
+						}
+						return
+					}
+					// Click is outside search panel
+					searchPanel.Focused = false
+				}
 				pane, col, row, ok := renderer.HitTestPane(activeTab, x, y, width, height)
 				if !ok || pane == nil {
 					if selection.pane != nil {
@@ -1313,6 +1345,39 @@ func main() {
 						showToast("Copied to clipboard")
 					}
 					aiPanel.SelectionActive = false
+					return
+				}
+				// Handle search panel preview text selection release
+				if searchPanel.SelectionActive {
+					cellW, cellH := renderer.CellDimensions()
+					layout := searchPanel.Layout(width, height, cellW, cellH)
+					fy := float32(y)
+					if fy < layout.ResultsStart+layout.LineHeight {
+						fy = layout.ResultsStart + layout.LineHeight
+					}
+					if fy > layout.ResultsEnd {
+						fy = layout.ResultsEnd
+					}
+					endLine := int((fy-layout.ResultsStart-layout.LineHeight)/layout.LineHeight) + searchPanel.PreviewScroll
+					startLine := searchPanel.SelectionStart
+					if endLine < startLine {
+						startLine, endLine = endLine, startLine
+					}
+					var selectedText strings.Builder
+					for i := startLine; i <= endLine && i < len(searchPanel.PreviewWrapped); i++ {
+						if i < 0 {
+							continue
+						}
+						if i > startLine {
+							selectedText.WriteString("\n")
+						}
+						selectedText.WriteString(searchPanel.PreviewWrapped[i])
+					}
+					if text := selectedText.String(); strings.TrimSpace(text) != "" {
+						glfw.SetClipboardString(text)
+						showToast("Copied to clipboard")
+					}
+					searchPanel.SelectionActive = false
 					return
 				}
 				if !selection.active || selection.pane == nil {
@@ -1429,6 +1494,22 @@ func main() {
 				fy = layout.MessagesEnd
 			}
 			aiPanel.SelectionEnd = int((fy-layout.MessagesStart)/layout.LineHeight) + aiPanel.Scroll
+			return
+		}
+
+		// Track search panel preview text selection during drag
+		if searchPanel.SelectionActive && searchPanel.Open {
+			width, height := win.GetFramebufferSize()
+			cellW, cellH := renderer.CellDimensions()
+			layout := searchPanel.Layout(width, height, cellW, cellH)
+			fy := float32(ypos)
+			if fy < layout.ResultsStart+layout.LineHeight {
+				fy = layout.ResultsStart + layout.LineHeight
+			}
+			if fy > layout.ResultsEnd {
+				fy = layout.ResultsEnd
+			}
+			searchPanel.SelectionEnd = int((fy-layout.ResultsStart-layout.LineHeight)/layout.LineHeight) + searchPanel.PreviewScroll
 			return
 		}
 

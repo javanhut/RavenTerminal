@@ -510,7 +510,11 @@ func (r *Renderer) renderSearchPanel(panel *searchpanel.Panel, width, height int
 	status := panel.Status
 	if panel.Loading {
 		spinner := panel.SpinnerFrame()
-		if status == "" || status == "Searching..." || status == "Loading preview..." {
+		if status == "Searching..." {
+			status = spinner + " Searching..."
+		} else if status == "Loading preview..." {
+			status = spinner + " Loading preview..."
+		} else if status == "" {
 			status = spinner + " Loading..."
 		} else {
 			status = spinner + " " + status
@@ -793,9 +797,23 @@ func (r *Renderer) renderSearchPreview(panel *searchpanel.Panel, layout searchpa
 		startLine = maxScroll
 	}
 
+	// Compute selection range for highlight
+	selStart, selEnd := panel.SelectionStart, panel.SelectionEnd
+	if selEnd < selStart {
+		selStart, selEnd = selEnd, selStart
+	}
+
 	lineY := layout.ResultsStart + layout.LineHeight
 	for i := 0; i < visibleLines && startLine+i < len(wrappedLines); i++ {
-		line := wrappedLines[startLine+i]
+		lineIdx := startLine + i
+		line := wrappedLines[lineIdx]
+
+		// Draw selection highlight
+		if panel.SelectionActive && lineIdx >= selStart && lineIdx <= selEnd {
+			selColor := [4]float32{r.theme.Selection[0], r.theme.Selection[1], r.theme.Selection[2], 0.3}
+			r.drawRect(layout.ContentX, lineY-layout.LineHeight*0.75, layout.ContentWidth, layout.LineHeight, selColor, proj)
+		}
+
 		r.drawText(layout.ContentX, lineY, line.text, line.color, proj)
 		lineY += layout.LineHeight
 	}
