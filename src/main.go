@@ -106,6 +106,7 @@ type mouseSelection struct {
 	startRow int
 }
 
+
 type toastState struct {
 	message   string
 	expiresAt time.Time
@@ -306,7 +307,11 @@ func main() {
 		aiPanel.AddMessage("user", trimmed)
 		aiPanel.TrimMessages(maxChatMessages)
 		aiPanel.ClearInput()
-		aiPanel.Status = "Thinking..."
+		if !aiPanel.ModelLoaded {
+			aiPanel.Status = "Loading model..."
+		} else {
+			aiPanel.Status = "Thinking..."
+		}
 		aiPanel.StartLoading()
 		aiPanel.RequestID++
 		requestID := aiPanel.RequestID
@@ -345,6 +350,8 @@ func main() {
 					return
 				}
 				loadSuccess = true
+				// Signal: model loaded, now thinking
+				aiResponses <- aiResponse{id: id, token: "", done: false, loaded: true}
 			}
 
 			// Use streaming chat with thinking support
@@ -640,7 +647,7 @@ func main() {
 
 			switch result.Action {
 			case keybindings.ActionCopy:
-				g := activeTab.Terminal.Grid
+				g := activeTab.Terminal.GetGrid()
 				text := g.SelectedText()
 				if text == "" {
 					text = g.VisibleText()
@@ -656,7 +663,7 @@ func main() {
 					clip = strings.ReplaceAll(clip, "\r\n", "\n")
 					clip = strings.ReplaceAll(clip, "\n", "\r")
 					activeTab.Write([]byte(clip))
-					activeTab.Terminal.Grid.ResetScrollOffset()
+					activeTab.Terminal.GetGrid().ResetScrollOffset()
 					showToast("Pasted from clipboard")
 				}
 				return
@@ -894,19 +901,19 @@ func main() {
 				lineBuf.clear()
 			}
 			activeTab.Write(result.Data)
-			activeTab.Terminal.Grid.ResetScrollOffset()
+			activeTab.Terminal.GetGrid().ResetScrollOffset()
 		case keybindings.ActionScrollUp:
-			activeTab.Terminal.Grid.ScrollViewUp(5)
+			activeTab.Terminal.GetGrid().ScrollViewUp(5)
 		case keybindings.ActionScrollDown:
-			activeTab.Terminal.Grid.ScrollViewDown(5)
+			activeTab.Terminal.GetGrid().ScrollViewDown(5)
 		case keybindings.ActionScrollUpLine:
-			activeTab.Terminal.Grid.ScrollViewUp(1)
+			activeTab.Terminal.GetGrid().ScrollViewUp(1)
 		case keybindings.ActionScrollDownLine:
-			activeTab.Terminal.Grid.ScrollViewDown(1)
+			activeTab.Terminal.GetGrid().ScrollViewDown(1)
 		case keybindings.ActionToggleFullscreen:
 			win.ToggleFullscreen()
 		case keybindings.ActionCopy:
-			g := activeTab.Terminal.Grid
+			g := activeTab.Terminal.GetGrid()
 			text := g.SelectedText()
 			if text == "" {
 				text = g.VisibleText()
@@ -921,7 +928,7 @@ func main() {
 				clip = strings.ReplaceAll(clip, "\r\n", "\n")
 				clip = strings.ReplaceAll(clip, "\n", "\r")
 				activeTab.Write([]byte(clip))
-				activeTab.Terminal.Grid.ResetScrollOffset()
+				activeTab.Terminal.GetGrid().ResetScrollOffset()
 				showToast("Pasted from clipboard")
 			}
 		case keybindings.ActionNewTab:
@@ -1052,7 +1059,7 @@ func main() {
 
 		data := keybindings.TranslateChar(char, currentMods)
 		activeTab.Write(data)
-		activeTab.Terminal.Grid.ResetScrollOffset()
+		activeTab.Terminal.GetGrid().ResetScrollOffset()
 	})
 
 	win.GLFW().SetFramebufferSizeCallback(func(w *glfw.Window, width, height int) {
@@ -1090,7 +1097,7 @@ func main() {
 
 		if selection.active && selection.pane != nil {
 			pane := selection.pane
-			g := pane.Terminal.Grid
+			g := pane.Terminal.GetGrid()
 			steps := int(math.Abs(yoff))
 			if steps == 0 {
 				steps = 1
@@ -1201,9 +1208,9 @@ func main() {
 		}
 
 		if yoff > 0 {
-			activeTab.Terminal.Grid.ScrollViewUp(3)
+			activeTab.Terminal.GetGrid().ScrollViewUp(3)
 		} else if yoff < 0 {
-			activeTab.Terminal.Grid.ScrollViewDown(3)
+			activeTab.Terminal.GetGrid().ScrollViewDown(3)
 		}
 	})
 
@@ -1224,10 +1231,63 @@ func main() {
 		case glfw.MouseButtonLeft:
 			switch action {
 			case glfw.Press:
+				// Check AI panel first for click-to-focus and text selection
+				if aiPanel.Open {
+					cellW, cellH := renderer.CellDimensions()
+					layout := aiPanel.Layout(width, height, cellW, cellH)
+					fx, fy := float32(x), float32(y)
+					if fx >= layout.PanelX && fx <= layout.PanelX+layout.PanelWidth &&
+						fy >= layout.PanelY && fy <= layout.PanelY+layout.PanelHeight {
+						aiPanel.Focused = true
+						// Check if click is in message area for text selection
+						if fx >= layout.ContentX && fx <= layout.ContentX+layout.ContentWidth &&
+							fy >= layout.MessagesStart && fy <= layout.MessagesEnd {
+							lineIdx := int((fy-layout.MessagesStart)/layout.LineHeight) + aiPanel.Scroll
+							aiPanel.SelectionActive = true
+							aiPanel.SelectionStart = lineIdx
+							aiPanel.SelectionEnd = lineIdx
+						}
+						return
+					}
+					// Click is outside AI panel
+					aiPanel.Focused = false
+				}
+				// Check search panel for click-to-focus and click-to-select
+				if searchPanel.Open {
+					cellW, cellH := renderer.CellDimensions()
+					layout := searchPanel.Layout(width, height, cellW, cellH)
+					fx, fy := float32(x), float32(y)
+					if fx >= layout.PanelX && fx <= layout.PanelX+layout.PanelWidth &&
+						fy >= layout.PanelY && fy <= layout.PanelY+layout.PanelHeight {
+						searchPanel.Focused = true
+						// Check if click is in results/preview area
+						if fx >= layout.ContentX && fx <= layout.ContentX+layout.ContentWidth &&
+							fy >= layout.ResultsStart && fy <= layout.ResultsEnd {
+							if searchPanel.Mode == searchpanel.ModePreview {
+								// Start text selection in preview
+								lineIdx := int((fy-layout.ResultsStart-layout.LineHeight)/layout.LineHeight) + searchPanel.PreviewScroll
+								searchPanel.SelectionActive = true
+								searchPanel.SelectionStart = lineIdx
+								searchPanel.SelectionEnd = lineIdx
+							} else if len(searchPanel.Results) > 0 {
+								// Click to select a result
+								relY := fy - layout.ResultsStart
+								clickedLine := int(relY/layout.LineHeight) + searchPanel.ResultsScroll
+								clickedResult := clickedLine / searchPanel.LinesPerResult()
+								if clickedResult >= 0 && clickedResult < len(searchPanel.Results) {
+									searchPanel.Selected = clickedResult
+								}
+							}
+						}
+						return
+					}
+					// Click is outside search panel
+					searchPanel.Focused = false
+				}
 				pane, col, row, ok := renderer.HitTestPane(activeTab, x, y, width, height)
 				if !ok || pane == nil {
 					if selection.pane != nil {
-						selection.pane.Terminal.Grid.ClearSelection()
+						selection.pane.Terminal.GetGrid().ClearSelection()
 					}
 					selection.active = false
 					selection.pane = nil
@@ -1235,11 +1295,11 @@ func main() {
 				}
 
 				if selection.pane != nil && selection.pane != pane {
-					selection.pane.Terminal.Grid.ClearSelection()
+					selection.pane.Terminal.GetGrid().ClearSelection()
 				}
 
 				if mods&glfw.ModControl != 0 {
-					if urlText, _, _ := urlAtCellRange(pane.Terminal.Grid, col, row); urlText != "" {
+					if urlText, _, _ := urlAtCellRange(pane.Terminal.GetGrid(), col, row); urlText != "" {
 						if err := openURL(urlText); err != nil {
 							log.Printf("failed to open url %q: %v", urlText, err)
 						}
@@ -1251,9 +1311,75 @@ func main() {
 				selection.pane = pane
 				selection.startCol = col
 				selection.startRow = row
-				pane.Terminal.Grid.SetSelection(col, row, col, row)
+				pane.Terminal.GetGrid().SetSelection(col, row, col, row)
 				activeTab.SetActivePane(pane)
 			case glfw.Release:
+				// Handle AI panel text selection release
+				if aiPanel.SelectionActive {
+					cellW, cellH := renderer.CellDimensions()
+					layout := aiPanel.Layout(width, height, cellW, cellH)
+					fy := float32(y)
+					if fy < layout.MessagesStart {
+						fy = layout.MessagesStart
+					}
+					if fy > layout.MessagesEnd {
+						fy = layout.MessagesEnd
+					}
+					endLine := int((fy-layout.MessagesStart)/layout.LineHeight) + aiPanel.Scroll
+					startLine := aiPanel.SelectionStart
+					if endLine < startLine {
+						startLine, endLine = endLine, startLine
+					}
+					var selectedText strings.Builder
+					for i := startLine; i <= endLine && i < len(aiPanel.WrappedLines); i++ {
+						if i < 0 {
+							continue
+						}
+						if i > startLine {
+							selectedText.WriteString("\n")
+						}
+						selectedText.WriteString(aiPanel.WrappedLines[i].Text)
+					}
+					if text := selectedText.String(); strings.TrimSpace(text) != "" {
+						glfw.SetClipboardString(text)
+						showToast("Copied to clipboard")
+					}
+					aiPanel.SelectionActive = false
+					return
+				}
+				// Handle search panel preview text selection release
+				if searchPanel.SelectionActive {
+					cellW, cellH := renderer.CellDimensions()
+					layout := searchPanel.Layout(width, height, cellW, cellH)
+					fy := float32(y)
+					if fy < layout.ResultsStart+layout.LineHeight {
+						fy = layout.ResultsStart + layout.LineHeight
+					}
+					if fy > layout.ResultsEnd {
+						fy = layout.ResultsEnd
+					}
+					endLine := int((fy-layout.ResultsStart-layout.LineHeight)/layout.LineHeight) + searchPanel.PreviewScroll
+					startLine := searchPanel.SelectionStart
+					if endLine < startLine {
+						startLine, endLine = endLine, startLine
+					}
+					var selectedText strings.Builder
+					for i := startLine; i <= endLine && i < len(searchPanel.PreviewWrapped); i++ {
+						if i < 0 {
+							continue
+						}
+						if i > startLine {
+							selectedText.WriteString("\n")
+						}
+						selectedText.WriteString(searchPanel.PreviewWrapped[i])
+					}
+					if text := selectedText.String(); strings.TrimSpace(text) != "" {
+						glfw.SetClipboardString(text)
+						showToast("Copied to clipboard")
+					}
+					searchPanel.SelectionActive = false
+					return
+				}
 				if !selection.active || selection.pane == nil {
 					return
 				}
@@ -1281,7 +1407,7 @@ func main() {
 				cellW, cellH := renderer.CellSize()
 				col := int((fx - rectX) / cellW)
 				row := int((fy - rectY) / cellH)
-				g := pane.Terminal.Grid
+				g := pane.Terminal.GetGrid()
 				col = clampInt(col, 0, g.Cols-1)
 				row = clampInt(row, 0, g.Rows-1)
 
@@ -1309,7 +1435,7 @@ func main() {
 			}
 
 			activeTab.SetActivePane(pane)
-			g := pane.Terminal.Grid
+			g := pane.Terminal.GetGrid()
 
 			if mods&glfw.ModControl != 0 {
 				if urlText, _, _ := urlAtCellRange(g, col, row); urlText != "" {
@@ -1355,6 +1481,38 @@ func main() {
 			return
 		}
 
+		// Track AI panel text selection during drag
+		if aiPanel.SelectionActive && aiPanel.Open {
+			width, height := win.GetFramebufferSize()
+			cellW, cellH := renderer.CellDimensions()
+			layout := aiPanel.Layout(width, height, cellW, cellH)
+			fy := float32(ypos)
+			if fy < layout.MessagesStart {
+				fy = layout.MessagesStart
+			}
+			if fy > layout.MessagesEnd {
+				fy = layout.MessagesEnd
+			}
+			aiPanel.SelectionEnd = int((fy-layout.MessagesStart)/layout.LineHeight) + aiPanel.Scroll
+			return
+		}
+
+		// Track search panel preview text selection during drag
+		if searchPanel.SelectionActive && searchPanel.Open {
+			width, height := win.GetFramebufferSize()
+			cellW, cellH := renderer.CellDimensions()
+			layout := searchPanel.Layout(width, height, cellW, cellH)
+			fy := float32(ypos)
+			if fy < layout.ResultsStart+layout.LineHeight {
+				fy = layout.ResultsStart + layout.LineHeight
+			}
+			if fy > layout.ResultsEnd {
+				fy = layout.ResultsEnd
+			}
+			searchPanel.SelectionEnd = int((fy-layout.ResultsStart-layout.LineHeight)/layout.LineHeight) + searchPanel.PreviewScroll
+			return
+		}
+
 		if selection.active && selection.pane != nil {
 			width, height := win.GetFramebufferSize()
 			rectX, rectY, rectW, rectH, ok := renderer.PaneRectFor(activeTab, selection.pane, width, height)
@@ -1378,7 +1536,7 @@ func main() {
 			cellW, cellH := renderer.CellSize()
 			col := int((fx - rectX) / cellW)
 			row := int((fy - rectY) / cellH)
-			g := selection.pane.Terminal.Grid
+			g := selection.pane.Terminal.GetGrid()
 			col = clampInt(col, 0, g.Cols-1)
 			row = clampInt(row, 0, g.Rows-1)
 
@@ -1394,8 +1552,8 @@ func main() {
 			return
 		}
 
-		if _, startCol, endCol := urlAtCellRange(pane.Terminal.Grid, col, row); startCol <= endCol {
-			renderer.SetHoverURL(pane.Terminal.Grid, row, startCol, endCol)
+		if _, startCol, endCol := urlAtCellRange(pane.Terminal.GetGrid(), col, row); startCol <= endCol {
+			renderer.SetHoverURL(pane.Terminal.GetGrid(), row, startCol, endCol)
 			return
 		}
 		renderer.ClearHoverURL()
@@ -1480,6 +1638,10 @@ func main() {
 					break
 				}
 				if !resp.done {
+					if resp.loaded {
+						// Model finished loading, now generating
+						aiPanel.Status = "Thinking..."
+					}
 					// Streaming token - append to assistant message
 					if resp.token != "" {
 						aiPanel.Status = ""
@@ -1561,7 +1723,7 @@ func main() {
 							dir = 1
 						}
 						if dir != 0 {
-							g := selection.pane.Terminal.Grid
+							g := selection.pane.Terminal.GetGrid()
 							prevOffset := g.GetScrollOffset()
 							if dir < 0 {
 								g.ScrollViewUp(1)
@@ -1606,10 +1768,14 @@ func main() {
 		// Render
 		width, height := win.GetFramebufferSize()
 		win.SetViewport(width, height)
+		drawCursor := cursorVisible
+		if activeTab := tabManager.ActiveTab(); activeTab != nil && activeTab.Terminal != nil {
+			drawCursor = drawCursor && activeTab.Terminal.IsCursorVisible()
+		}
 		if settingsMenu.IsOpen() {
-			renderer.RenderWithMenu(tabManager, width, height, cursorVisible, settingsMenu)
+			renderer.RenderWithMenu(tabManager, width, height, drawCursor, settingsMenu)
 		} else {
-			renderer.RenderWithHelpAndPanels(tabManager, width, height, cursorVisible, showHelp, searchPanel, aiPanel)
+			renderer.RenderWithHelpAndPanels(tabManager, width, height, drawCursor, showHelp, searchPanel, aiPanel)
 		}
 		if now.Before(toast.expiresAt) {
 			renderer.DrawToast(toast.message, width, height)

@@ -6,6 +6,9 @@
 
 set -e
 
+# Detect OS type
+OS_TYPE="$(uname -s)"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -35,6 +38,11 @@ GLOBAL_APP_DIR="/usr/share/applications"
 GLOBAL_ICON_DIR="/usr/share/icons/hicolor/scalable/apps"
 GLOBAL_PIXMAP_DIR="/usr/share/pixmaps"
 LEGACY_GLOBAL_BIN_DIR="/usr/bin"
+
+# macOS paths
+MACOS_USER_APP_DIR="$HOME/Applications"
+MACOS_GLOBAL_APP_DIR="/Applications"
+MACOS_APP_NAME="Raven Terminal"
 
 print_header() {
     echo -e "${BLUE}"
@@ -145,37 +153,58 @@ parse_args() {
 detect_installations() {
     local found_user=false
     local found_global=false
-    
-    # Check user installation
-    if [ -f "$USER_BIN_DIR/$APP_NAME" ] || \
-       [ -f "$USER_APP_DIR/$APP_NAME.desktop" ] || \
-       [ -f "$USER_ICON_DIR/$APP_NAME.svg" ]; then
-        found_user=true
+
+    if [ "$OS_TYPE" = "Darwin" ]; then
+        # macOS: Check for app bundles
+        if [ -d "$MACOS_USER_APP_DIR/${MACOS_APP_NAME}.app" ] || \
+           [ -L "$HOME/.local/bin/$APP_NAME" ]; then
+            found_user=true
+        fi
+
+        if [ -d "$MACOS_GLOBAL_APP_DIR/${MACOS_APP_NAME}.app" ] || \
+           [ -L "$GLOBAL_BIN_DIR/$APP_NAME" ]; then
+            found_global=true
+        fi
+
+        echo "Detected installations:"
+        if [ "$found_user" = true ]; then
+            echo "  - User installation (in ~/Applications/)"
+        fi
+        if [ "$found_global" = true ]; then
+            echo "  - Global installation (in /Applications/)"
+        fi
+    else
+        # Linux: Check traditional paths
+        if [ -f "$USER_BIN_DIR/$APP_NAME" ] || \
+           [ -f "$USER_APP_DIR/$APP_NAME.desktop" ] || \
+           [ -f "$USER_ICON_DIR/$APP_NAME.svg" ]; then
+            found_user=true
+        fi
+
+        if [ -f "$GLOBAL_BIN_DIR/$APP_NAME" ] || \
+           [ -f "$LEGACY_GLOBAL_BIN_DIR/$APP_NAME" ] || \
+           [ -f "$GLOBAL_APP_DIR/$APP_NAME.desktop" ] || \
+           [ -f "$GLOBAL_ICON_DIR/$APP_NAME.svg" ]; then
+            found_global=true
+        fi
+
+        echo "Detected installations:"
+        if [ "$found_user" = true ]; then
+            echo "  - User installation (in ~/.local/)"
+        fi
+        if [ "$found_global" = true ]; then
+            echo "  - Global installation (in /usr/)"
+        fi
     fi
-    
-    # Check global installation
-    if [ -f "$GLOBAL_BIN_DIR/$APP_NAME" ] || \
-       [ -f "$LEGACY_GLOBAL_BIN_DIR/$APP_NAME" ] || \
-       [ -f "$GLOBAL_APP_DIR/$APP_NAME.desktop" ] || \
-       [ -f "$GLOBAL_ICON_DIR/$APP_NAME.svg" ]; then
-        found_global=true
-    fi
-    
-    echo "Detected installations:"
-    if [ "$found_user" = true ]; then
-        echo "  - User installation (in ~/.local/)"
-    fi
-    if [ "$found_global" = true ]; then
-        echo "  - Global installation (in /usr/)"
-    fi
+
     if [ "$found_user" = false ] && [ "$found_global" = false ]; then
         echo "  - None found"
     fi
-    
+
     if [ -d "$USER_CONFIG_DIR" ]; then
         echo "  - Configuration files (in ~/.config/raven-terminal/)"
     fi
-    
+
     echo ""
 }
 
@@ -375,6 +404,67 @@ remove_config() {
     fi
 }
 
+# macOS: Remove app bundle
+uninstall_macos_user() {
+    print_info "Removing macOS user installation..."
+
+    local removed=0
+    local app_bundle="$MACOS_USER_APP_DIR/${MACOS_APP_NAME}.app"
+
+    # Remove user app bundle
+    if remove_dir "$app_bundle" false "User app bundle"; then
+        ((++removed))
+    fi
+
+    # Remove CLI symlink
+    if remove_file "$HOME/.local/bin/$APP_NAME" false "User CLI symlink"; then
+        ((++removed))
+    fi
+
+    if [ $removed -gt 0 ]; then
+        print_success "macOS user installation removed ($removed items)"
+    else
+        print_info "No macOS user installation found"
+    fi
+}
+
+uninstall_macos_global() {
+    print_info "Removing macOS global installation (requires sudo)..."
+
+    # Check for sudo
+    if ! command -v sudo &> /dev/null; then
+        print_error "sudo is required for removing global installation"
+        exit 1
+    fi
+
+    local removed=0
+    local app_bundle="$MACOS_GLOBAL_APP_DIR/${MACOS_APP_NAME}.app"
+
+    # Remove global app bundle
+    if [ -d "$app_bundle" ]; then
+        sudo rm -rf "$app_bundle"
+        record_action "Removed: Global app bundle ($app_bundle)"
+        ((++removed))
+    else
+        record_action "Not found: Global app bundle ($app_bundle)"
+    fi
+
+    # Remove CLI symlink
+    if [ -L "$GLOBAL_BIN_DIR/$APP_NAME" ]; then
+        sudo rm "$GLOBAL_BIN_DIR/$APP_NAME"
+        record_action "Removed: Global CLI symlink ($GLOBAL_BIN_DIR/$APP_NAME)"
+        ((++removed))
+    else
+        record_action "Not found: Global CLI symlink ($GLOBAL_BIN_DIR/$APP_NAME)"
+    fi
+
+    if [ $removed -gt 0 ]; then
+        print_success "macOS global installation removed ($removed items)"
+    else
+        print_info "No macOS global installation found"
+    fi
+}
+
 print_completion() {
     echo ""
     echo -e "${GREEN}============================================${NC}"
@@ -406,18 +496,36 @@ main() {
     detect_installations
     confirm_uninstall
     
-    case $UNINSTALL_MODE in
-        user)
-            uninstall_user
-            ;;
-        global)
-            uninstall_global
-            ;;
-        all)
-            uninstall_user
-            uninstall_global
-            ;;
-    esac
+    # Branch based on OS type
+    if [ "$OS_TYPE" = "Darwin" ]; then
+        # macOS: Remove app bundles
+        case $UNINSTALL_MODE in
+            user)
+                uninstall_macos_user
+                ;;
+            global)
+                uninstall_macos_global
+                ;;
+            all)
+                uninstall_macos_user
+                uninstall_macos_global
+                ;;
+        esac
+    else
+        # Linux: Use traditional uninstallation
+        case $UNINSTALL_MODE in
+            user)
+                uninstall_user
+                ;;
+            global)
+                uninstall_global
+                ;;
+            all)
+                uninstall_user
+                uninstall_global
+                ;;
+        esac
+    fi
     
     if [ "$REMOVE_CONFIG" = true ]; then
         remove_config

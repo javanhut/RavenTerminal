@@ -85,6 +85,17 @@ func NewCell() Cell {
 	}
 }
 
+// NewCellWithBg creates an empty cell with a specific background color (for BCE)
+func NewCellWithBg(bg Color) Cell {
+	return Cell{
+		Char:  ' ',
+		Fg:    DefaultFg(),
+		Bg:    bg,
+		Flags: 0,
+		Width: CellWidthNormal,
+	}
+}
+
 // Grid represents the terminal grid buffer
 type Grid struct {
 	cells        []Cell
@@ -99,6 +110,7 @@ type Grid struct {
 	// Scroll region (1-based, inclusive)
 	scrollTop    int
 	scrollBottom int
+	wrapPending  bool
 
 	// Last written character for REP sequence
 	lastChar  rune
@@ -116,6 +128,9 @@ type Grid struct {
 
 	// Auto-wrap mode (DECAWM ?7) - default true
 	autoWrap bool
+
+	// BCE (Background Color Erase) - background color for scroll/erase operations
+	eraseBg Color
 }
 
 // NewGrid creates a new grid with the given dimensions
@@ -134,6 +149,7 @@ func NewGrid(cols, rows int) *Grid {
 		scrollOffset: 0,
 		scrollTop:    1,
 		scrollBottom: rows,
+		wrapPending:  false,
 		lastChar:     ' ',
 		autoWrap:     true, // DECAWM ?7 default on
 	}
@@ -149,7 +165,7 @@ func (g *Grid) GetCell(col, row int) Cell {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	if col < 0 || col >= g.Cols || row < 0 || row >= g.Rows {
-		return NewCell()
+		return NewCellWithBg(g.eraseBg)
 	}
 	return g.cells[g.index(col, row)]
 }
@@ -168,6 +184,13 @@ func (g *Grid) SetCell(col, row int, cell Cell) {
 func (g *Grid) WriteChar(c rune, fg, bg Color, flags CellFlags) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+
+	if g.wrapPending {
+		if g.autoWrap {
+			g.cursorNewline()
+		}
+		g.wrapPending = false
+	}
 
 	// Handle auto-wrap if at end of line
 	if g.CursorCol >= g.Cols {
@@ -229,6 +252,14 @@ func (g *Grid) WriteChar(c rune, fg, bg Color, flags CellFlags) {
 		g.CursorCol++
 	}
 
+	// If we advanced past the last column, set wrap pending (DECAWM behavior)
+	if g.CursorCol >= g.Cols {
+		if g.autoWrap {
+			g.wrapPending = true
+		}
+		g.CursorCol = g.Cols - 1
+	}
+
 	// Save for REP sequence
 	g.lastChar = c
 	g.lastFg = fg
@@ -238,27 +269,44 @@ func (g *Grid) WriteChar(c rune, fg, bg Color, flags CellFlags) {
 
 // cursorNewline moves cursor to next line (internal, no lock)
 func (g *Grid) cursorNewline() {
+	g.wrapPending = false
 	g.CursorCol = 0
 	g.CursorRow++
 	// Check if we're at the bottom of the scroll region
 	if g.CursorRow >= g.scrollBottom {
-		g.scrollUpRegion()
+		g.scrollUpRegionWithBg(g.eraseBg)
 		g.CursorRow = g.scrollBottom - 1
 	} else if g.CursorRow >= g.Rows {
-		g.scrollUpInternal()
+		g.scrollUpInternalWithBg(g.eraseBg)
 		g.CursorRow = g.Rows - 1
 	}
 }
 
 // scrollUpRegion scrolls only within the scroll region
 func (g *Grid) scrollUpRegion() {
+	g.scrollUpRegionWithBg(DefaultBg())
+}
+
+// scrollUpRegionWithBg scrolls only within the scroll region with BCE support
+func (g *Grid) scrollUpRegionWithBg(bg Color) {
 	if g.scrollTop == 1 && g.scrollBottom == g.Rows {
-		g.scrollUpInternal()
+		g.scrollUpInternalWithBg(bg)
 		return
 	}
 
 	top := g.scrollTop - 1 // Convert to 0-based
 	bottom := g.scrollBottom - 1
+
+	// If scroll region starts at top, save row to scrollback
+	if top == 0 {
+		topRow := make([]Cell, g.Cols)
+		copy(topRow, g.cells[0:g.Cols])
+		g.scrollback = append(g.scrollback, topRow)
+
+		if len(g.scrollback) > MaxScrollback {
+			g.scrollback = g.scrollback[1:]
+		}
+	}
 
 	// Shift rows up within region
 	for row := top; row < bottom; row++ {
@@ -267,9 +315,9 @@ func (g *Grid) scrollUpRegion() {
 		}
 	}
 
-	// Clear bottom row of region
+	// Clear bottom row of region with background color
 	for col := 0; col < g.Cols; col++ {
-		g.cells[g.index(col, bottom)] = NewCell()
+		g.cells[g.index(col, bottom)] = NewCellWithBg(bg)
 	}
 }
 
@@ -284,6 +332,7 @@ func (g *Grid) Newline() {
 func (g *Grid) CarriageReturn() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.wrapPending = false
 	g.CursorCol = 0
 }
 
@@ -291,6 +340,7 @@ func (g *Grid) CarriageReturn() {
 func (g *Grid) Backspace() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.wrapPending = false
 	if g.CursorCol > 0 {
 		g.CursorCol--
 		// If we landed on a continuation cell, move back one more
@@ -307,6 +357,7 @@ func (g *Grid) Backspace() {
 func (g *Grid) Tab() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.wrapPending = false
 	g.CursorCol = ((g.CursorCol / 8) + 1) * 8
 	if g.CursorCol >= g.Cols {
 		g.CursorCol = g.Cols - 1
@@ -324,6 +375,7 @@ func (g *Grid) Tab() {
 func (g *Grid) MoveCursor(dCol, dRow int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.wrapPending = false
 
 	// Handle horizontal movement with wide cell awareness
 	if dCol < 0 {
@@ -373,6 +425,7 @@ func (g *Grid) MoveCursor(dCol, dRow int) {
 func (g *Grid) SetCursorPos(col, row int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.wrapPending = false
 	g.CursorCol = col - 1
 	g.CursorRow = row - 1
 
@@ -402,6 +455,11 @@ func (g *Grid) SetCursorPos(col, row int) {
 
 // scrollUpInternal scrolls the grid up by one line (internal, no lock)
 func (g *Grid) scrollUpInternal() {
+	g.scrollUpInternalWithBg(DefaultBg())
+}
+
+// scrollUpInternalWithBg scrolls the grid up by one line with BCE support (internal, no lock)
+func (g *Grid) scrollUpInternalWithBg(bg Color) {
 	// Save top row to scrollback
 	topRow := make([]Cell, g.Cols)
 	copy(topRow, g.cells[0:g.Cols])
@@ -415,33 +473,89 @@ func (g *Grid) scrollUpInternal() {
 	// Shift rows up
 	copy(g.cells, g.cells[g.Cols:])
 
-	// Clear bottom row
+	// Clear bottom row with background color
 	for i := (g.Rows - 1) * g.Cols; i < g.Rows*g.Cols; i++ {
-		g.cells[i] = NewCell()
+		g.cells[i] = NewCellWithBg(bg)
 	}
 }
 
-// ScrollUp scrolls the grid up by n lines
+// ScrollUp scrolls the grid up by n lines within the scroll region
 func (g *Grid) ScrollUp(n int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	for i := 0; i < n; i++ {
-		g.scrollUpInternal()
+		g.scrollUpRegion()
 	}
 }
 
-// ScrollDown scrolls the grid down by n lines
+// ScrollUpWithBg scrolls the grid up by n lines with BCE support
+func (g *Grid) ScrollUpWithBg(n int, bg Color) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for i := 0; i < n; i++ {
+		g.scrollUpRegionWithBg(bg)
+	}
+}
+
+// scrollDownInternal scrolls the entire grid down by one line (internal, no lock)
+func (g *Grid) scrollDownInternal() {
+	g.scrollDownInternalWithBg(DefaultBg())
+}
+
+// scrollDownInternalWithBg scrolls the entire grid down by one line with BCE support (internal, no lock)
+func (g *Grid) scrollDownInternalWithBg(bg Color) {
+	// Shift rows down
+	copy(g.cells[g.Cols:], g.cells[:len(g.cells)-g.Cols])
+
+	// Clear top row with background color
+	for j := 0; j < g.Cols; j++ {
+		g.cells[j] = NewCellWithBg(bg)
+	}
+}
+
+// scrollDownRegion scrolls only within the scroll region
+func (g *Grid) scrollDownRegion() {
+	g.scrollDownRegionWithBg(DefaultBg())
+}
+
+// scrollDownRegionWithBg scrolls only within the scroll region with BCE support
+func (g *Grid) scrollDownRegionWithBg(bg Color) {
+	if g.scrollTop == 1 && g.scrollBottom == g.Rows {
+		g.scrollDownInternalWithBg(bg)
+		return
+	}
+
+	top := g.scrollTop - 1    // Convert to 0-based
+	bottom := g.scrollBottom - 1
+
+	// Shift rows down within region
+	for row := bottom; row > top; row-- {
+		for col := 0; col < g.Cols; col++ {
+			g.cells[g.index(col, row)] = g.cells[g.index(col, row-1)]
+		}
+	}
+
+	// Clear top row of region with background color
+	for col := 0; col < g.Cols; col++ {
+		g.cells[g.index(col, top)] = NewCellWithBg(bg)
+	}
+}
+
+// ScrollDown scrolls the grid down by n lines within the scroll region
 func (g *Grid) ScrollDown(n int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	for i := 0; i < n; i++ {
-		// Shift rows down
-		copy(g.cells[g.Cols:], g.cells[:len(g.cells)-g.Cols])
+		g.scrollDownRegion()
+	}
+}
 
-		// Clear top row
-		for j := 0; j < g.Cols; j++ {
-			g.cells[j] = NewCell()
-		}
+// ScrollDownWithBg scrolls the grid down by n lines with BCE support
+func (g *Grid) ScrollDownWithBg(n int, bg Color) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for i := 0; i < n; i++ {
+		g.scrollDownRegionWithBg(bg)
 	}
 }
 
@@ -489,7 +603,7 @@ func (g *Grid) DisplayCell(col, row int) Cell {
 func (g *Grid) displayCellLocked(col, row int) Cell {
 	if g.scrollOffset == 0 {
 		if col < 0 || col >= g.Cols || row < 0 || row >= g.Rows {
-			return NewCell()
+			return NewCellWithBg(g.eraseBg)
 		}
 		return g.cells[g.index(col, row)]
 	}
@@ -497,18 +611,18 @@ func (g *Grid) displayCellLocked(col, row int) Cell {
 	// Calculate scrollback position
 	scrollbackRow := len(g.scrollback) - g.scrollOffset + row
 	if scrollbackRow < 0 {
-		return NewCell()
+		return NewCellWithBg(g.eraseBg)
 	}
 	if scrollbackRow < len(g.scrollback) {
 		if col < len(g.scrollback[scrollbackRow]) {
 			return g.scrollback[scrollbackRow][col]
 		}
-		return NewCell()
+		return NewCellWithBg(g.eraseBg)
 	}
 
 	gridRow := scrollbackRow - len(g.scrollback)
 	if gridRow >= g.Rows || col >= g.Cols {
-		return NewCell()
+		return NewCellWithBg(g.eraseBg)
 	}
 	return g.cells[g.index(col, gridRow)]
 }
@@ -664,69 +778,124 @@ func clampInt(value, min, max int) int {
 
 // ClearAll clears the entire grid
 func (g *Grid) ClearAll() {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	for i := range g.cells {
-		g.cells[i] = NewCell()
-	}
+	g.ClearAllWithBg(g.eraseBg)
 }
 
 // ClearToEnd clears from cursor to end of screen
 func (g *Grid) ClearToEnd() {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	// Clear rest of current line
-	for col := g.CursorCol; col < g.Cols; col++ {
-		g.cells[g.index(col, g.CursorRow)] = NewCell()
-	}
-	// Clear lines below
-	for row := g.CursorRow + 1; row < g.Rows; row++ {
-		for col := 0; col < g.Cols; col++ {
-			g.cells[g.index(col, row)] = NewCell()
-		}
-	}
+	g.ClearToEndWithBg(g.eraseBg)
 }
 
 // ClearToStart clears from start of screen to cursor
 func (g *Grid) ClearToStart() {
+	g.ClearToStartWithBg(g.eraseBg)
+}
+
+// ClearLine clears the current line
+func (g *Grid) ClearLine() {
+	g.ClearLineWithBg(g.eraseBg)
+}
+
+// ClearLineToEnd clears from cursor to end of line
+func (g *Grid) ClearLineToEnd() {
+	g.ClearLineToEndWithBg(g.eraseBg)
+}
+
+// ClearLineToStart clears from start of line to cursor
+func (g *Grid) ClearLineToStart() {
+	g.ClearLineToStartWithBg(g.eraseBg)
+}
+
+// ClearAllWithBg clears the entire grid with a specific background color (BCE)
+func (g *Grid) ClearAllWithBg(bg Color) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	// Save non-empty rows to scrollback before clearing
+	for row := 0; row < g.Rows; row++ {
+		hasContent := false
+		for col := 0; col < g.Cols; col++ {
+			cell := g.cells[g.index(col, row)]
+			if cell.Char != ' ' && cell.Char != 0 {
+				hasContent = true
+				break
+			}
+		}
+
+		if hasContent {
+			rowCopy := make([]Cell, g.Cols)
+			copy(rowCopy, g.cells[row*g.Cols:(row+1)*g.Cols])
+			g.scrollback = append(g.scrollback, rowCopy)
+		}
+	}
+
+	// Trim scrollback if too large
+	if len(g.scrollback) > MaxScrollback {
+		g.scrollback = g.scrollback[len(g.scrollback)-MaxScrollback:]
+	}
+
+	// Now clear the grid
+	for i := range g.cells {
+		g.cells[i] = NewCellWithBg(bg)
+	}
+}
+
+// ClearToEndWithBg clears from cursor to end of screen with background color (BCE)
+func (g *Grid) ClearToEndWithBg(bg Color) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	// Clear rest of current line
+	for col := g.CursorCol; col < g.Cols; col++ {
+		g.cells[g.index(col, g.CursorRow)] = NewCellWithBg(bg)
+	}
+	// Clear lines below
+	for row := g.CursorRow + 1; row < g.Rows; row++ {
+		for col := 0; col < g.Cols; col++ {
+			g.cells[g.index(col, row)] = NewCellWithBg(bg)
+		}
+	}
+}
+
+// ClearToStartWithBg clears from start of screen to cursor with background color (BCE)
+func (g *Grid) ClearToStartWithBg(bg Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	// Clear lines above
 	for row := 0; row < g.CursorRow; row++ {
 		for col := 0; col < g.Cols; col++ {
-			g.cells[g.index(col, row)] = NewCell()
+			g.cells[g.index(col, row)] = NewCellWithBg(bg)
 		}
 	}
 	// Clear start of current line
 	for col := 0; col <= g.CursorCol; col++ {
-		g.cells[g.index(col, g.CursorRow)] = NewCell()
+		g.cells[g.index(col, g.CursorRow)] = NewCellWithBg(bg)
 	}
 }
 
-// ClearLine clears the current line
-func (g *Grid) ClearLine() {
+// ClearLineWithBg clears the current line with background color (BCE)
+func (g *Grid) ClearLineWithBg(bg Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	for col := 0; col < g.Cols; col++ {
-		g.cells[g.index(col, g.CursorRow)] = NewCell()
+		g.cells[g.index(col, g.CursorRow)] = NewCellWithBg(bg)
 	}
 }
 
-// ClearLineToEnd clears from cursor to end of line
-func (g *Grid) ClearLineToEnd() {
+// ClearLineToEndWithBg clears from cursor to end of line with background color (BCE)
+func (g *Grid) ClearLineToEndWithBg(bg Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	for col := g.CursorCol; col < g.Cols; col++ {
-		g.cells[g.index(col, g.CursorRow)] = NewCell()
+		g.cells[g.index(col, g.CursorRow)] = NewCellWithBg(bg)
 	}
 }
 
-// ClearLineToStart clears from start of line to cursor
-func (g *Grid) ClearLineToStart() {
+// ClearLineToStartWithBg clears from start of line to cursor with background color (BCE)
+func (g *Grid) ClearLineToStartWithBg(bg Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	for col := 0; col <= g.CursorCol; col++ {
-		g.cells[g.index(col, g.CursorRow)] = NewCell()
+		g.cells[g.index(col, g.CursorRow)] = NewCellWithBg(bg)
 	}
 }
 
@@ -740,8 +909,8 @@ func (g *Grid) DeleteChars(n int) {
 		idx := g.index(g.CursorCol, g.CursorRow)
 		if g.cells[idx].Width == CellWidthContinuation {
 			// Clear the wide character (both cells)
-			g.cells[g.index(g.CursorCol-1, g.CursorRow)] = NewCell()
-			g.cells[idx] = NewCell()
+			g.cells[g.index(g.CursorCol-1, g.CursorRow)] = NewCellWithBg(g.eraseBg)
+			g.cells[idx] = NewCellWithBg(g.eraseBg)
 		}
 	}
 
@@ -751,8 +920,8 @@ func (g *Grid) DeleteChars(n int) {
 		idx := g.index(endPos, g.CursorRow)
 		if g.cells[idx].Width == CellWidthContinuation {
 			// Would break a wide char - clear it first
-			g.cells[g.index(endPos-1, g.CursorRow)] = NewCell()
-			g.cells[idx] = NewCell()
+			g.cells[g.index(endPos-1, g.CursorRow)] = NewCellWithBg(g.eraseBg)
+			g.cells[idx] = NewCellWithBg(g.eraseBg)
 		}
 	}
 
@@ -761,7 +930,7 @@ func (g *Grid) DeleteChars(n int) {
 		g.cells[g.index(col, g.CursorRow)] = g.cells[g.index(col+n, g.CursorRow)]
 	}
 	for col := g.Cols - n; col < g.Cols; col++ {
-		g.cells[g.index(col, g.CursorRow)] = NewCell()
+		g.cells[g.index(col, g.CursorRow)] = NewCellWithBg(g.eraseBg)
 	}
 }
 
@@ -774,8 +943,8 @@ func (g *Grid) InsertChars(n int) {
 	if g.CursorCol > 0 {
 		idx := g.index(g.CursorCol, g.CursorRow)
 		if g.cells[idx].Width == CellWidthContinuation {
-			g.cells[g.index(g.CursorCol-1, g.CursorRow)] = NewCell()
-			g.cells[idx] = NewCell()
+			g.cells[g.index(g.CursorCol-1, g.CursorRow)] = NewCellWithBg(g.eraseBg)
+			g.cells[idx] = NewCellWithBg(g.eraseBg)
 		}
 	}
 
@@ -784,7 +953,7 @@ func (g *Grid) InsertChars(n int) {
 	if g.Cols-n >= 0 && g.Cols-n < g.Cols {
 		idx := g.index(g.Cols-n, g.CursorRow)
 		if idx >= 0 && idx < len(g.cells) && g.cells[idx].Width == CellWidthWide {
-			g.cells[idx] = NewCell()
+			g.cells[idx] = NewCellWithBg(g.eraseBg)
 		}
 	}
 
@@ -794,38 +963,82 @@ func (g *Grid) InsertChars(n int) {
 	}
 	// Clear inserted positions
 	for col := g.CursorCol; col < g.CursorCol+n && col < g.Cols; col++ {
-		g.cells[g.index(col, g.CursorRow)] = NewCell()
+		g.cells[g.index(col, g.CursorRow)] = NewCellWithBg(g.eraseBg)
 	}
 }
 
-// DeleteLines deletes n lines at cursor, shifting up
+// DeleteLines deletes n lines at cursor within scroll region, shifting up
 func (g *Grid) DeleteLines(n int) {
+	g.DeleteLinesWithBg(n, DefaultBg())
+}
+
+// DeleteLinesWithBg deletes n lines at cursor with BCE support
+func (g *Grid) DeleteLinesWithBg(n int, bg Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for row := g.CursorRow; row < g.Rows-n; row++ {
+
+	top := g.scrollTop - 1    // Convert to 0-based
+	bottom := g.scrollBottom - 1
+
+	// Cursor must be within scroll region
+	if g.CursorRow < top || g.CursorRow > bottom {
+		return
+	}
+
+	// Clamp n to not exceed remaining lines in region
+	if g.CursorRow+n > bottom+1 {
+		n = bottom + 1 - g.CursorRow
+	}
+
+	// Shift lines up within the scroll region
+	for row := g.CursorRow; row <= bottom-n; row++ {
 		for col := 0; col < g.Cols; col++ {
 			g.cells[g.index(col, row)] = g.cells[g.index(col, row+n)]
 		}
 	}
-	for row := g.Rows - n; row < g.Rows; row++ {
+
+	// Clear bottom n lines of the scroll region with background color
+	for row := bottom - n + 1; row <= bottom; row++ {
 		for col := 0; col < g.Cols; col++ {
-			g.cells[g.index(col, row)] = NewCell()
+			g.cells[g.index(col, row)] = NewCellWithBg(bg)
 		}
 	}
 }
 
-// InsertLines inserts n blank lines at cursor, shifting down
+// InsertLines inserts n blank lines at cursor within scroll region, shifting down
 func (g *Grid) InsertLines(n int) {
+	g.InsertLinesWithBg(n, DefaultBg())
+}
+
+// InsertLinesWithBg inserts n blank lines at cursor with BCE support
+func (g *Grid) InsertLinesWithBg(n int, bg Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for row := g.Rows - 1; row >= g.CursorRow+n; row-- {
+
+	top := g.scrollTop - 1    // Convert to 0-based
+	bottom := g.scrollBottom - 1
+
+	// Cursor must be within scroll region
+	if g.CursorRow < top || g.CursorRow > bottom {
+		return
+	}
+
+	// Clamp n to not exceed remaining lines in region
+	if g.CursorRow+n > bottom+1 {
+		n = bottom + 1 - g.CursorRow
+	}
+
+	// Shift lines down within the scroll region
+	for row := bottom; row >= g.CursorRow+n; row-- {
 		for col := 0; col < g.Cols; col++ {
 			g.cells[g.index(col, row)] = g.cells[g.index(col, row-n)]
 		}
 	}
-	for row := g.CursorRow; row < g.CursorRow+n && row < g.Rows; row++ {
+
+	// Clear n lines at cursor position with background color
+	for row := g.CursorRow; row < g.CursorRow+n && row <= bottom; row++ {
 		for col := 0; col < g.Cols; col++ {
-			g.cells[g.index(col, row)] = NewCell()
+			g.cells[g.index(col, row)] = NewCellWithBg(bg)
 		}
 	}
 }
@@ -834,10 +1047,16 @@ func (g *Grid) InsertLines(n int) {
 func (g *Grid) Resize(cols, rows int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.wrapPending = false
+
+	// Track if scroll region was full-screen before resize
+	wasFullScreen := (g.scrollTop == 1 && g.scrollBottom == g.Rows)
+	oldScrollTop := g.scrollTop
+	oldScrollBottom := g.scrollBottom
 
 	newCells := make([]Cell, cols*rows)
 	for i := range newCells {
-		newCells[i] = NewCell()
+		newCells[i] = NewCellWithBg(g.eraseBg)
 	}
 
 	// Copy existing cells
@@ -848,12 +1067,34 @@ func (g *Grid) Resize(cols, rows int) {
 	}
 
 	g.cells = newCells
+	oldRows := g.Rows
 	g.Cols = cols
 	g.Rows = rows
 
-	// Reset scroll region to full screen
-	g.scrollTop = 1
-	g.scrollBottom = rows
+	// Smart scroll region handling
+	if wasFullScreen {
+		// Keep scroll region as full-screen after resize
+		g.scrollTop = 1
+		g.scrollBottom = rows
+	} else {
+		// Custom scroll region: preserve if still valid
+		g.scrollTop = oldScrollTop
+		g.scrollBottom = oldScrollBottom
+
+		// Clamp scroll region to new bounds
+		if g.scrollTop > rows {
+			g.scrollTop = 1
+		}
+		if g.scrollBottom > rows {
+			g.scrollBottom = rows
+		}
+		// If region becomes invalid, reset to full screen
+		if g.scrollTop >= g.scrollBottom {
+			g.scrollTop = 1
+			g.scrollBottom = rows
+		}
+	}
+	_ = oldRows // Suppress unused variable warning
 
 	// Clamp cursor
 	if g.CursorCol >= cols {
@@ -907,7 +1148,7 @@ func (g *Grid) EraseChars(n int) {
 
 	// Erase the range
 	for col := startCol; col < endCol && col < g.Cols; col++ {
-		g.cells[g.index(col, g.CursorRow)] = NewCell()
+		g.cells[g.index(col, g.CursorRow)] = NewCellWithBg(g.eraseBg)
 	}
 }
 
@@ -916,8 +1157,18 @@ func (g *Grid) RepeatChar(n int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	for i := 0; i < n; i++ {
+		if g.wrapPending {
+			if g.autoWrap {
+				g.cursorNewline()
+			}
+			g.wrapPending = false
+		}
 		if g.CursorCol >= g.Cols {
-			g.cursorNewline()
+			if g.autoWrap {
+				g.cursorNewline()
+			} else {
+				g.CursorCol = g.Cols - 1
+			}
 		}
 		idx := g.index(g.CursorCol, g.CursorRow)
 		g.cells[idx] = Cell{
@@ -928,6 +1179,12 @@ func (g *Grid) RepeatChar(n int) {
 			Width: CellWidthNormal,
 		}
 		g.CursorCol++
+		if g.CursorCol >= g.Cols {
+			if g.autoWrap {
+				g.wrapPending = true
+			}
+			g.CursorCol = g.Cols - 1
+		}
 	}
 }
 
@@ -950,6 +1207,33 @@ func (g *Grid) SetScrollRegion(top, bottom int) {
 	g.CursorRow = 0
 }
 
+// RestoreScrollRegion sets the scroll region without moving the cursor.
+// Unlike SetScrollRegion (which resets cursor to 0,0 per DECSTBM spec),
+// this preserves cursor position — used when restoring state during
+// alternate screen exit.
+func (g *Grid) RestoreScrollRegion(top, bottom int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if top < 1 {
+		top = 1
+	}
+	if bottom > g.Rows {
+		bottom = g.Rows
+	}
+	if top < bottom {
+		g.scrollTop = top
+		g.scrollBottom = bottom
+	}
+}
+
+// ResetWrapPending clears the wrapPending flag.
+// Used after restoring the main grid to avoid stale wrap state.
+func (g *Grid) ResetWrapPending() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.wrapPending = false
+}
+
 // GetScrollRegion returns the current scroll region
 func (g *Grid) GetScrollRegion() (top, bottom int) {
 	g.mu.RLock()
@@ -969,4 +1253,18 @@ func (g *Grid) GetAutoWrap() bool {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	return g.autoWrap
+}
+
+// SetEraseBackground sets the background color for BCE (Background Color Erase)
+func (g *Grid) SetEraseBackground(bg Color) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.eraseBg = bg
+}
+
+// GetEraseBackground returns the current BCE background color
+func (g *Grid) GetEraseBackground() Color {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.eraseBg
 }

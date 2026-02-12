@@ -44,10 +44,10 @@ func NewClient(baseURL, model string) *Client {
 		Model:     strings.TrimSpace(model),
 		KeepAlive: "5m",
 		HTTP: &http.Client{
-			Timeout: 180 * time.Second, // Increased for slow remote APIs
+			Timeout: 360 * time.Second, // Must exceed ResponseHeaderTimeout for model loading
 			Transport: &http.Transport{
 				TLSHandshakeTimeout:   30 * time.Second,
-				ResponseHeaderTimeout: 120 * time.Second,
+				ResponseHeaderTimeout: 300 * time.Second, // Match the 300s context deadline for model loading
 				ExpectContinueTimeout: 5 * time.Second,
 			},
 		},
@@ -69,13 +69,13 @@ func (c *Client) LoadModel(ctx context.Context) error {
 		KeepAlive: c.KeepAlive,
 	}
 
-	// Retry with exponential backoff for flaky connections
-	maxRetries := 3
+	// Retry with linear backoff — gives the model time to load on cold starts
+	maxRetries := 5
 	var lastErr error
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
-			// Exponential backoff: 2s, 4s
-			backoff := time.Duration(1<<attempt) * time.Second
+			// Linear backoff: 5s, 10s, 15s, 20s
+			backoff := time.Duration(attempt*5) * time.Second
 			select {
 			case <-ctx.Done():
 				return fmt.Errorf("cancelled during retry: %w", ctx.Err())
@@ -93,7 +93,12 @@ func (c *Client) LoadModel(ctx context.Context) error {
 			continue
 		}
 		if resp.Error != "" {
-			return errors.New(resp.Error)
+			lastErr = c.wrapError(errors.New(resp.Error))
+			// Retry if the error is transient (e.g. model still loading)
+			if isRetryableError(errors.New(resp.Error)) {
+				continue
+			}
+			return lastErr
 		}
 		return nil
 	}
@@ -119,6 +124,9 @@ func (c *Client) wrapError(err error) error {
 	if strings.Contains(errStr, "certificate") {
 		return fmt.Errorf("TLS/SSL error - certificate issue with %s", c.BaseURL)
 	}
+	if strings.Contains(errStr, "loading model") {
+		return fmt.Errorf("model is still loading on server at %s - try again in a moment", c.BaseURL)
+	}
 	return err
 }
 
@@ -132,7 +140,9 @@ func isRetryableError(err error) bool {
 		strings.Contains(errStr, "Client.Timeout") ||
 		strings.Contains(errStr, "connection reset") ||
 		strings.Contains(errStr, "EOF") ||
-		strings.Contains(errStr, "temporary failure")
+		strings.Contains(errStr, "temporary failure") ||
+		strings.Contains(errStr, "loading model") ||
+		strings.Contains(errStr, "llm server loading")
 }
 
 func (c *Client) Chat(ctx context.Context, messages []Message) (string, error) {
@@ -204,37 +214,77 @@ func (c *Client) ChatStreamWithThinking(ctx context.Context, messages []Message,
 		return ChatResult{}, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return ChatResult{}, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
 	// Use a client without timeout for streaming - context handles cancellation
 	streamClient := &http.Client{}
-	resp, err := streamClient.Do(httpReq)
-	if err != nil {
-		return ChatResult{}, err
-	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	// Retry loop for connection/pre-stream errors (3 attempts, 5s backoff)
+	const streamMaxRetries = 3
+	var resp *http.Response
+	var lastErr error
+	for attempt := 0; attempt < streamMaxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(attempt*5) * time.Second
+			select {
+			case <-ctx.Done():
+				return ChatResult{}, fmt.Errorf("cancelled during retry: %w", ctx.Err())
+			case <-time.After(backoff):
+			}
+		}
+
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		if err != nil {
+			return ChatResult{}, err
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+
+		resp, err = streamClient.Do(httpReq)
+		if err != nil {
+			lastErr = c.wrapError(err)
+			if isRetryableError(err) {
+				continue
+			}
+			return ChatResult{}, lastErr
+		}
+
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			break // Success — proceed to streaming
+		}
+
+		// Non-2xx: read body and decide whether to retry
 		bodyBytes, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		var errMsg string
 		if len(bodyBytes) > 0 {
 			var errResp struct {
 				Error string `json:"error"`
 			}
 			if json.Unmarshal(bodyBytes, &errResp) == nil && errResp.Error != "" {
-				return ChatResult{}, fmt.Errorf("ollama: %s", errResp.Error)
+				errMsg = errResp.Error
+			} else {
+				errMsg = strings.TrimSpace(string(bodyBytes))
+				if len(errMsg) > 200 {
+					errMsg = errMsg[:200]
+				}
 			}
-			errMsg := strings.TrimSpace(string(bodyBytes))
-			if len(errMsg) > 200 {
-				errMsg = errMsg[:200]
-			}
-			return ChatResult{}, fmt.Errorf("ollama: %s", errMsg)
 		}
-		return ChatResult{}, fmt.Errorf("ollama api error (%s)", resp.Status)
+
+		if errMsg != "" {
+			lastErr = c.wrapError(fmt.Errorf("ollama: %s", errMsg))
+			if isRetryableError(fmt.Errorf("%s", errMsg)) {
+				continue
+			}
+			return ChatResult{}, lastErr
+		}
+
+		lastErr = fmt.Errorf("ollama api error (%s)", resp.Status)
+		// Non-retryable HTTP error
+		return ChatResult{}, lastErr
 	}
+	if resp == nil {
+		return ChatResult{}, fmt.Errorf("failed after %d attempts: %w", streamMaxRetries, lastErr)
+	}
+	defer resp.Body.Close()
 
 	var fullContent strings.Builder
 	var fullThinking strings.Builder

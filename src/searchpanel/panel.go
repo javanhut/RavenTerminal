@@ -19,7 +19,7 @@ const (
 )
 
 // Spinner frames for loading animation
-var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+var spinnerFrames = []string{"|", "/", "-", "\\"}
 
 type Result struct {
 	Title   string
@@ -57,6 +57,11 @@ type Panel struct {
 
 	// Loading animation
 	LoadingStart time.Time // When loading started
+
+	// Mouse text selection (preview mode)
+	SelectionActive bool
+	SelectionStart  int // Start line index (in wrapped preview lines)
+	SelectionEnd    int // End line index (in wrapped preview lines)
 }
 
 type Layout struct {
