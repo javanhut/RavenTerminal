@@ -1473,6 +1473,10 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 		visibleItems = 1
 	}
 
+	// Report the real viewport size so the menu scrolls to keep the selection visible
+	// at any window size (fullscreen or windowed). This also re-clamps the scroll offset.
+	m.SetVisibleCount(visibleItems)
+
 	totalItems := len(m.Items)
 	maxScroll := totalItems - visibleItems
 	if maxScroll < 0 {

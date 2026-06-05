@@ -29,8 +29,8 @@ const (
 	MenuConfirmCommand
 	MenuConfirmAlias
 	MenuConfirmExport
-	MenuConfirmDelete  // Confirmation before deleting items
-	MenuCursorStyle    // Cursor style selection
+	MenuConfirmDelete // Confirmation before deleting items
+	MenuCursorStyle   // Cursor style selection
 )
 
 // InputState tracks what we're currently inputting
@@ -67,9 +67,9 @@ type MenuItem struct {
 	Label    string
 	Value    string
 	Disabled bool
-	IsHeader bool   // Section header (non-selectable, styled differently)
-	IsToggle bool   // Toggle item (shows checkbox indicator)
-	Toggled  bool   // Current toggle state
+	IsHeader bool // Section header (non-selectable, styled differently)
+	IsToggle bool // Toggle item (shows checkbox indicator)
+	Toggled  bool // Current toggle state
 }
 
 // Menu manages the configuration menu
@@ -80,6 +80,11 @@ type Menu struct {
 	Items         []MenuItem
 	ScrollOffset  int
 	OllamaModels  []string
+
+	// visibleCount is how many item rows currently fit in the rendered viewport.
+	// The renderer reports it each frame via SetVisibleCount so scrolling tracks the
+	// real window size (fullscreen vs windowed), keeping the selection on screen.
+	visibleCount int
 
 	// Position memory - preserve selection when navigating between menus
 	savedIndex  map[MenuState]int
@@ -571,13 +576,39 @@ func (m *Menu) MoveDown() {
 	m.adjustScroll()
 }
 
-// adjustScroll adjusts scroll offset to keep selection visible
+// SetVisibleCount records how many rows the renderer can currently show and re-clamps
+// the scroll offset so the selection stays visible (e.g. after a window resize or
+// toggling fullscreen). Called by the renderer each frame.
+func (m *Menu) SetVisibleCount(n int) {
+	if n < 1 {
+		n = 1
+	}
+	m.visibleCount = n
+	m.adjustScroll()
+}
+
+// adjustScroll adjusts the scroll offset to keep the selection within the visible
+// viewport. It uses the renderer-reported visibleCount so it works at any window size.
 func (m *Menu) adjustScroll() {
-	visibleItems := 12
+	visibleItems := m.visibleCount
+	if visibleItems < 1 {
+		visibleItems = 12 // fallback before the first render reports the real count
+	}
 	if m.SelectedIndex < m.ScrollOffset {
 		m.ScrollOffset = m.SelectedIndex
 	} else if m.SelectedIndex >= m.ScrollOffset+visibleItems {
 		m.ScrollOffset = m.SelectedIndex - visibleItems + 1
+	}
+	// Never leave a gap of blank rows below a short list.
+	maxScroll := len(m.Items) - visibleItems
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if m.ScrollOffset > maxScroll {
+		m.ScrollOffset = maxScroll
+	}
+	if m.ScrollOffset < 0 {
+		m.ScrollOffset = 0
 	}
 }
 
