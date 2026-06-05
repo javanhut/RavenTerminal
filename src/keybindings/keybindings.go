@@ -118,11 +118,21 @@ func TranslateKey(key glfw.Key, mods glfw.ModifierKey, appCursorMode bool) KeyRe
 		return KeyResult{Action: ActionShowHelp}
 	}
 
-	if primary && key == glfw.KeyRightBracket {
-		return KeyResult{Action: ActionNextPane}
+	// Tab cycling with brackets: on macOS Cmd+Shift+] / Cmd+Shift+[ (the Safari /
+	// Terminal.app convention). Cmd+Tab can't be used — macOS reserves it for the app
+	// switcher. Checked before the pane bindings so Shift selects tabs over panes.
+	if isMacOS && super && shift && key == glfw.KeyRightBracket {
+		return KeyResult{Action: ActionNextTab}
+	}
+	if isMacOS && super && shift && key == glfw.KeyLeftBracket {
+		return KeyResult{Action: ActionPrevTab}
 	}
 
-	if primary && key == glfw.KeyLeftBracket {
+	// Pane cycling: Cmd+] / Cmd+[ on macOS (no Shift), Ctrl+Shift+] / [ elsewhere.
+	if (isMacOS && super && !shift && key == glfw.KeyRightBracket) || (!isMacOS && ctrl && shift && key == glfw.KeyRightBracket) {
+		return KeyResult{Action: ActionNextPane}
+	}
+	if (isMacOS && super && !shift && key == glfw.KeyLeftBracket) || (!isMacOS && ctrl && shift && key == glfw.KeyLeftBracket) {
 		return KeyResult{Action: ActionPrevPane}
 	}
 

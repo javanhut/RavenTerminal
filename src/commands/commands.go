@@ -57,9 +57,13 @@ func getKeybindingsHelp() string {
 	// Platform-aware modifier: macOS uses Cmd for app shortcuts, others Ctrl+Shift.
 	mod := "Ctrl+Shift"
 	exitKey := "Ctrl+Q"
+	nextTab := "Ctrl+Tab"
+	prevTab := "Ctrl+Shift+Tab"
 	if runtime.GOOS == "darwin" {
 		mod = "Cmd"
 		exitKey = "Cmd+Q"
+		nextTab = "Cmd+Shift+]"
+		prevTab = "Cmd+Shift+["
 	}
 	return fmt.Sprintf(`
 Raven Terminal - Keybindings
@@ -73,8 +77,8 @@ Tabs:
   %-15s New tab
   %-15s Close current tab
   %-15s Jump to tab N
-  Ctrl+Tab        Next tab
-  Ctrl+Shift+Tab  Previous tab
+  %-15s Next tab
+  %-15s Previous tab
 
 Scrolling:`+`
   Mouse wheel     Scroll up/down (3 lines)
@@ -93,7 +97,7 @@ Terminal Commands:
   change-font <name>  Change font (e.g., change-font firacode)
   list-fonts      List available fonts
 
-`, exitKey, mod+"+T", mod+"+X", mod+"+1..9")
+`, exitKey, mod+"+T", mod+"+X", mod+"+1..9", nextTab, prevTab)
 }
 
 func handleChangeFont(fontName string, fontChanger FontChanger) CommandResult {

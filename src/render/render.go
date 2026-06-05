@@ -1104,12 +1104,16 @@ func (r *Renderer) getHelpSections() []struct {
 	pasteKey := "Ctrl+Shift+P"
 	splitV := "Ctrl+Shift+V"
 	splitH := "Ctrl+Shift+H"
+	nextTab := "Ctrl+Tab"
+	prevTab := "Ctrl+Shift+Tab"
 	if isMac {
 		mod = "Cmd"
 		exitKey = "Cmd+Q"
 		pasteKey = "Cmd+V"
 		splitV = "Cmd+D"
 		splitH = "Cmd+Shift+D"
+		nextTab = "Cmd+Shift+]"
+		prevTab = "Cmd+Shift+["
 	}
 
 	return []struct {
@@ -1138,8 +1142,8 @@ func (r *Renderer) getHelpSections() []struct {
 				{mod + "+T", "New tab"},
 				{mod + "+X", "Close current tab"},
 				{mod + "+1..9", "Jump to tab N"},
-				{"Ctrl+Tab", "Next tab"},
-				{"Ctrl+Shift+Tab", "Previous tab"},
+				{nextTab, "Next tab"},
+				{prevTab, "Previous tab"},
 			},
 		},
 		{
