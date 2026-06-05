@@ -1,12 +1,14 @@
 package parser
 
 import (
+	"encoding/base64"
 	"fmt"
 	"github.com/javanhut/RavenTerminal/src/grid"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ParserState represents the current state of the ANSI parser
@@ -136,6 +138,18 @@ type Terminal struct {
 	savedMainBracketedPaste bool
 	savedMainMouseMode      int
 	savedMainMouseSGRMode   bool
+	// OSC 8 hyperlink + extended underline (SGR 4:n / 58) pending attributes
+	currentLinkID         uint16
+	currentUnderlineStyle uint8
+	currentUnderlineColor grid.Color
+	// Focus reporting (?1004)
+	focusReporting bool
+	// Synchronized output (?2026)
+	syncActive   bool
+	syncDeadline time.Time
+	// OSC 52 clipboard access (nil-guarded, wired by the host)
+	clipboardWriter func(string)
+	clipboardReader func() string
 }
 
 // NewTerminal creates a new terminal parser
@@ -204,7 +218,7 @@ func (t *Terminal) processGround(b byte) {
 			if t.utf8Remaining == 0 {
 				// Complete UTF-8 sequence - decode and write
 				r := t.mapCharsetRune(decodeUTF8(t.utf8Buf))
-				t.Grid.WriteChar(r, t.currentFg, t.currentBg, t.currentFlags)
+				t.Grid.WriteChar(r, t.currentFg, t.currentBg, t.currentFlags, t.currentLinkID, t.currentUnderlineStyle, t.currentUnderlineColor)
 				t.utf8Buf = nil
 			}
 		} else {
@@ -249,7 +263,7 @@ func (t *Terminal) processGround(b byte) {
 		if b >= 0x20 && b < 0x7f {
 			// ASCII printable character
 			r := t.mapCharsetRune(rune(b))
-			t.Grid.WriteChar(r, t.currentFg, t.currentBg, t.currentFlags)
+			t.Grid.WriteChar(r, t.currentFg, t.currentBg, t.currentFlags, t.currentLinkID, t.currentUnderlineStyle, t.currentUnderlineColor)
 		} else if b >= 0xC0 && b < 0xE0 {
 			// Start of 2-byte UTF-8 sequence
 			t.utf8Buf = []byte{b}
@@ -580,6 +594,11 @@ func (t *Terminal) executeCSI(final byte) {
 	}
 }
 
+// sgrUnderlineStyleBase encodes a "4:n" underline sub-style as a single pseudo-param
+// (base+n) so it survives executeSGR's int stream without colliding with real SGR codes
+// (which top out at 107). Values: 0=none,1=solid,2=double,3=curly,4=dotted,5=dashed.
+const sgrUnderlineStyleBase = 9000
+
 // executeSGR handles SGR (Select Graphic Rendition) sequences
 func (t *Terminal) executeSGR(params []int) {
 	if len(params) == 0 {
@@ -594,14 +613,17 @@ func (t *Terminal) executeSGR(params []int) {
 			t.currentFg = grid.DefaultFg()
 			t.currentBg = grid.DefaultBg()
 			t.currentFlags = 0
+			t.currentUnderlineStyle = 0
+			t.currentUnderlineColor = grid.Color{}
 		case p == 1: // Bold
 			t.currentFlags |= grid.FlagBold
 		case p == 2: // Dim/faint
 			t.currentFlags |= grid.FlagDim
 		case p == 3: // Italic
 			t.currentFlags |= grid.FlagItalic
-		case p == 4: // Underline
+		case p == 4: // Underline (plain = solid)
 			t.currentFlags |= grid.FlagUnderline
+			t.currentUnderlineStyle = 1
 		case p == 7: // Inverse
 			t.currentFlags |= grid.FlagInverse
 		case p == 8: // Hidden
@@ -615,6 +637,7 @@ func (t *Terminal) executeSGR(params []int) {
 			t.currentFlags &^= grid.FlagItalic
 		case p == 24: // Not underlined
 			t.currentFlags &^= grid.FlagUnderline
+			t.currentUnderlineStyle = 0
 		case p == 27: // Not inverse
 			t.currentFlags &^= grid.FlagInverse
 		case p == 28: // Not hidden
@@ -653,6 +676,27 @@ func (t *Terminal) executeSGR(params []int) {
 			}
 		case p == 49: // Default background
 			t.currentBg = grid.DefaultBg()
+		case p == 58: // Set underline color (extended)
+			if i+1 < len(params) {
+				if params[i+1] == 5 && i+2 < len(params) {
+					t.currentUnderlineColor = grid.IndexedColor(uint8(params[i+2]))
+					i += 2
+				} else if params[i+1] == 2 && i+4 < len(params) {
+					t.currentUnderlineColor = grid.RGBColor(uint8(params[i+2]), uint8(params[i+3]), uint8(params[i+4]))
+					i += 4
+				}
+			}
+		case p == 59: // Default underline color (follow text color)
+			t.currentUnderlineColor = grid.Color{}
+		case p >= sgrUnderlineStyleBase && p <= sgrUnderlineStyleBase+5: // 4:n underline style
+			style := uint8(p - sgrUnderlineStyleBase)
+			if style == 0 {
+				t.currentFlags &^= grid.FlagUnderline
+				t.currentUnderlineStyle = 0
+			} else {
+				t.currentFlags |= grid.FlagUnderline
+				t.currentUnderlineStyle = style
+			}
 		case p >= 90 && p <= 97: // Bright foreground colors
 			t.currentFg = grid.IndexedColor(uint8(p - 90 + 8))
 		case p >= 100 && p <= 107: // Bright background colors
@@ -727,6 +771,15 @@ func (t *Terminal) setMode(params []int, set bool) {
 				}
 			case 1006: // SGR extended mode
 				t.mouseSGRMode = set
+			case 1004: // Focus reporting
+				t.focusReporting = set
+			case 2026: // Synchronized output
+				t.syncActive = set
+				if set {
+					// Watchdog deadline: if the app never closes the sync, the
+					// renderer resumes presenting after this elapses.
+					t.syncDeadline = time.Now().Add(100 * time.Millisecond)
+				}
 			}
 		}
 	}
@@ -920,7 +973,46 @@ func (t *Terminal) handleOSC(params string) {
 		if path != "" {
 			t.lastWorkingDir = path
 		}
+	case "8": // Hyperlink: OSC 8 ; params ; URI
+		// value is "params;URI"; an empty URI closes the current hyperlink.
+		uri := ""
+		if idx := strings.Index(value, ";"); idx >= 0 {
+			uri = value[idx+1:]
+		}
+		if uri == "" {
+			t.currentLinkID = 0
+		} else {
+			t.currentLinkID = t.Grid.InternLink(uri)
+		}
+	case "52": // Clipboard access: OSC 52 ; Pc ; Pd
+		t.handleOSC52(value)
 	}
+}
+
+// handleOSC52 implements OSC 52 clipboard set/query.
+// value is "Pc;Pd" where Pd is base64 data, or "?" to query the clipboard.
+func (t *Terminal) handleOSC52(value string) {
+	parts := strings.SplitN(value, ";", 2)
+	if len(parts) < 2 {
+		return
+	}
+	selection := parts[0] // c=clipboard, p=primary, etc. (treated uniformly)
+	data := parts[1]
+	if data == "?" {
+		// Query: respond with the current clipboard contents, base64-encoded.
+		if t.clipboardReader == nil || t.responseWriter == nil {
+			return
+		}
+		enc := base64.StdEncoding.EncodeToString([]byte(t.clipboardReader()))
+		t.responseWriter([]byte("\x1b]52;" + selection + ";" + enc + "\x1b\\"))
+		return
+	}
+	// Set: decode base64 and write to the system clipboard.
+	decoded, err := base64.StdEncoding.DecodeString(data)
+	if err != nil || t.clipboardWriter == nil {
+		return // ignore malformed data silently
+	}
+	t.clipboardWriter(string(decoded))
 }
 
 func parseOSC7Path(value string) string {
@@ -956,6 +1048,43 @@ func (t *Terminal) BracketedPasteEnabled() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.bracketedPaste
+}
+
+// FocusReportingEnabled returns whether focus event reporting is enabled (?1004)
+func (t *Terminal) FocusReportingEnabled() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.focusReporting
+}
+
+// SyncActive reports whether the app is holding a synchronized-output frame (?2026).
+// It applies a watchdog: if the hold has exceeded its deadline, it is cleared so the
+// renderer resumes presenting (guarantees liveness even if the app never closes it).
+func (t *Terminal) SyncActive() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.syncActive {
+		return false
+	}
+	if time.Now().After(t.syncDeadline) {
+		t.syncActive = false
+		return false
+	}
+	return true
+}
+
+// SetClipboardWriter sets the callback used to write OSC 52 clipboard data.
+func (t *Terminal) SetClipboardWriter(writer func(string)) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.clipboardWriter = writer
+}
+
+// SetClipboardReader sets the callback used to answer OSC 52 clipboard queries.
+func (t *Terminal) SetClipboardReader(reader func() string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.clipboardReader = reader
 }
 
 // GetWindowTitle returns the current window title (set via OSC 0/2)
@@ -1040,8 +1169,12 @@ func (t *Terminal) parseSGRParams(s string) []int {
 					n, _ := strconv.Atoi(sp)
 					params = append(params, n)
 				}
+			} else if first == 4 && len(subparts) > 1 {
+				// Underline style "4:n" (curly/dotted/dashed/etc) - encode the sub-style
+				style, _ := strconv.Atoi(subparts[1])
+				params = append(params, sgrUnderlineStyleBase+style)
 			} else {
-				// For other codes (e.g. 4:3 underline style), keep first value only
+				// For other colon codes, keep first value only
 				params = append(params, first)
 			}
 		} else {
@@ -1105,6 +1238,11 @@ func (t *Terminal) reset() {
 	t.charsetPending = charsetTargetNone
 	t.originMode = false
 	t.cursorStyle = CursorStyleBlock
+	t.currentLinkID = 0
+	t.currentUnderlineStyle = 0
+	t.currentUnderlineColor = grid.Color{}
+	t.focusReporting = false
+	t.syncActive = false
 }
 
 // Resize resizes the terminal
@@ -1188,20 +1326,10 @@ func (t *Terminal) handleDA(params []int) {
 	} else {
 		// Primary DA: report as VT220 with various features
 		// 62 = VT220, 22 = ANSI color, 29 = ANSI text locator
-		// This tells applications we support:
+		// The response advertises exactly what we implement:
 		// - VT220 features (62)
-		// - 132 columns (1)
-		// - Printer port (2)
-		// - Sixel graphics (4)
-		// - Selective erase (6)
-		// - User-defined keys (8)
-		// - National replacement charsets (9)
-		// - Technical character set (15)
-		// - Windowing capability (18)
-		// - Horizontal scrolling (21)
 		// - ANSI color (22)
-		// - Greek (23)
-		// - Turkish (24)
+		// NOTE: do not advertise Sixel (4) or other features we don't render.
 		t.responseWriter([]byte("\x1b[?62;22c"))
 	}
 }

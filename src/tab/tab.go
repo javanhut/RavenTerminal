@@ -63,6 +63,45 @@ type Pane struct {
 	readerMu sync.Mutex
 }
 
+// clipboardOut is a thread-safe mailbox for OSC 52 clipboard writes. The PTY reader
+// goroutine fills it; the main render loop drains it and performs the GLFW write
+// (which must happen on the main thread). There is a single system clipboard, so a
+// package-level mailbox is sufficient.
+var clipboardOut struct {
+	mu   sync.Mutex
+	text string
+	has  bool
+}
+
+// wakeNotifier, if set, is called by PTY reader goroutines after processing output
+// so the main loop can re-render promptly instead of waiting out its idle timeout.
+var wakeNotifier func()
+
+// SetWakeNotifier registers a callback invoked whenever a pane produces new output.
+// It must be safe to call from any goroutine (e.g. glfw.PostEmptyEvent).
+func SetWakeNotifier(f func()) {
+	wakeNotifier = f
+}
+
+// QueueClipboard stores text to be copied to the system clipboard by the main thread.
+func QueueClipboard(text string) {
+	clipboardOut.mu.Lock()
+	clipboardOut.text = text
+	clipboardOut.has = true
+	clipboardOut.mu.Unlock()
+}
+
+// DrainClipboard returns and clears any pending OSC 52 clipboard write.
+func DrainClipboard() (string, bool) {
+	clipboardOut.mu.Lock()
+	defer clipboardOut.mu.Unlock()
+	if !clipboardOut.has {
+		return "", false
+	}
+	clipboardOut.has = false
+	return clipboardOut.text, true
+}
+
 // NewPane creates a new terminal pane
 func NewPane(id int, cols, rows uint16, startDir string) (*Pane, error) {
 	pty, err := shell.NewPtySession(cols, rows, startDir)
@@ -79,6 +118,9 @@ func NewPane(id int, cols, rows uint16, startDir string) (*Pane, error) {
 	pane.Terminal.SetResponseWriter(func(data []byte) {
 		_, _ = pty.Write(data)
 	})
+	// OSC 52 clipboard writes originate on the PTY reader goroutine; GLFW clipboard
+	// calls must run on the main thread, so queue them for the render loop to drain.
+	pane.Terminal.SetClipboardWriter(QueueClipboard)
 
 	// Start reader goroutine
 	go pane.readLoop()
@@ -101,6 +143,11 @@ func (p *Pane) readLoop() {
 		p.readerMu.Lock()
 		p.Terminal.Process(buf[:n])
 		p.readerMu.Unlock()
+
+		// Wake the main loop so this output renders without waiting for the idle timeout.
+		if wakeNotifier != nil {
+			wakeNotifier()
+		}
 	}
 }
 
@@ -923,6 +970,16 @@ func (tm *TabManager) PrevTab() {
 
 	if len(tm.tabs) > 1 {
 		tm.activeIndex = (tm.activeIndex - 1 + len(tm.tabs)) % len(tm.tabs)
+	}
+}
+
+// SelectTab switches to the tab at the given 0-based index, if it exists.
+func (tm *TabManager) SelectTab(index int) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	if index >= 0 && index < len(tm.tabs) {
+		tm.activeIndex = index
 	}
 }
 

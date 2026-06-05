@@ -3,6 +3,7 @@ package commands
 import (
 	"fmt"
 	"github.com/javanhut/RavenTerminal/src/assets/fonts"
+	"runtime"
 	"strings"
 )
 
@@ -53,21 +54,29 @@ func HandleCommand(input string, fontChanger FontChanger) CommandResult {
 }
 
 func getKeybindingsHelp() string {
-	return `
+	// Platform-aware modifier: macOS uses Cmd for app shortcuts, others Ctrl+Shift.
+	mod := "Ctrl+Shift"
+	exitKey := "Ctrl+Q"
+	if runtime.GOOS == "darwin" {
+		mod = "Cmd"
+		exitKey = "Cmd+Q"
+	}
+	return fmt.Sprintf(`
 Raven Terminal - Keybindings
 ============================
 
 General:
-  Ctrl+Q          Exit terminal
+  %-15s Exit terminal
   Shift+Enter     Toggle fullscreen mode
 
 Tabs:
-  Ctrl+Shift+T    New tab
-  Ctrl+Shift+X    Close current tab
+  %-15s New tab
+  %-15s Close current tab
+  %-15s Jump to tab N
   Ctrl+Tab        Next tab
   Ctrl+Shift+Tab  Previous tab
 
-Scrolling:
+Scrolling:`+`
   Mouse wheel     Scroll up/down (3 lines)
   Shift+Up        Scroll up 1 line
   Shift+Down      Scroll down 1 line
@@ -84,7 +93,7 @@ Terminal Commands:
   change-font <name>  Change font (e.g., change-font firacode)
   list-fonts      List available fonts
 
-`
+`, exitKey, mod+"+T", mod+"+X", mod+"+1..9")
 }
 
 func handleChangeFont(fontName string, fontChanger FontChanger) CommandResult {

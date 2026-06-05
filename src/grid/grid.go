@@ -67,11 +67,14 @@ const (
 
 // Cell represents a single terminal cell
 type Cell struct {
-	Char  rune
-	Fg    Color
-	Bg    Color
-	Flags CellFlags
-	Width uint8 // 0=continuation cell, 1=normal width, 2=wide cell start
+	Char           rune
+	Fg             Color
+	Bg             Color
+	UnderlineColor Color // Underline color (ColorDefault = follow Fg). Set via SGR 58.
+	Flags          CellFlags
+	Width          uint8  // 0=continuation cell, 1=normal width, 2=wide cell start
+	UnderlineStyle uint8  // 0=default/solid, 1=solid, 2=double, 3=curly, 4=dotted, 5=dashed (SGR 4:n)
+	Link           uint16 // OSC 8 hyperlink id (0=none); resolve via Grid.LinkURL
 }
 
 // NewCell creates an empty cell
@@ -113,10 +116,18 @@ type Grid struct {
 	wrapPending  bool
 
 	// Last written character for REP sequence
-	lastChar  rune
-	lastFg    Color
-	lastBg    Color
-	lastFlags CellFlags
+	lastChar           rune
+	lastFg             Color
+	lastBg             Color
+	lastFlags          CellFlags
+	lastLink           uint16
+	lastUnderlineStyle uint8
+	lastUnderlineColor Color
+
+	// OSC 8 hyperlink interning: url <-> compact id stored on cells
+	links      map[string]uint16
+	linkURLs   map[uint16]string
+	nextLinkID uint16
 
 	// Selection state (display coordinates)
 	selectionActive       bool
@@ -180,8 +191,43 @@ func (g *Grid) SetCell(col, row int, cell Cell) {
 	g.cells[g.index(col, row)] = cell
 }
 
+// InternLink returns a compact id for a hyperlink URL, deduplicating repeats.
+// Returns 0 for an empty URL (meaning "no link").
+func (g *Grid) InternLink(url string) uint16 {
+	if url == "" {
+		return 0
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.links == nil {
+		g.links = make(map[string]uint16)
+		g.linkURLs = make(map[uint16]string)
+	}
+	if id, ok := g.links[url]; ok {
+		return id
+	}
+	g.nextLinkID++
+	if g.nextLinkID == 0 { // wrap-around guard: 0 is reserved for "no link"
+		g.nextLinkID = 1
+	}
+	id := g.nextLinkID
+	g.links[url] = id
+	g.linkURLs[id] = url
+	return id
+}
+
+// LinkURL resolves a hyperlink id back to its URL ("" if none).
+func (g *Grid) LinkURL(id uint16) string {
+	if id == 0 {
+		return ""
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.linkURLs[id]
+}
+
 // WriteChar writes a character at the cursor position and advances
-func (g *Grid) WriteChar(c rune, fg, bg Color, flags CellFlags) {
+func (g *Grid) WriteChar(c rune, fg, bg Color, flags CellFlags, link uint16, ulStyle uint8, ulColor Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -231,11 +277,14 @@ func (g *Grid) WriteChar(c rune, fg, bg Color, flags CellFlags) {
 	// Write the character to current cell
 	idx := g.index(g.CursorCol, g.CursorRow)
 	g.cells[idx] = Cell{
-		Char:  c,
-		Fg:    fg,
-		Bg:    bg,
-		Flags: flags,
-		Width: uint8(charWidth),
+		Char:           c,
+		Fg:             fg,
+		Bg:             bg,
+		UnderlineColor: ulColor,
+		Flags:          flags,
+		Width:          uint8(charWidth),
+		UnderlineStyle: ulStyle,
+		Link:           link,
 	}
 	g.CursorCol++
 
@@ -243,11 +292,14 @@ func (g *Grid) WriteChar(c rune, fg, bg Color, flags CellFlags) {
 	if charWidth == 2 && g.CursorCol < g.Cols {
 		contIdx := g.index(g.CursorCol, g.CursorRow)
 		g.cells[contIdx] = Cell{
-			Char:  ' ', // Placeholder for continuation
-			Fg:    fg,
-			Bg:    bg,
-			Flags: flags,
-			Width: CellWidthContinuation,
+			Char:           ' ', // Placeholder for continuation
+			Fg:             fg,
+			Bg:             bg,
+			UnderlineColor: ulColor,
+			Flags:          flags,
+			Width:          CellWidthContinuation,
+			UnderlineStyle: ulStyle,
+			Link:           link,
 		}
 		g.CursorCol++
 	}
@@ -265,6 +317,9 @@ func (g *Grid) WriteChar(c rune, fg, bg Color, flags CellFlags) {
 	g.lastFg = fg
 	g.lastBg = bg
 	g.lastFlags = flags
+	g.lastLink = link
+	g.lastUnderlineStyle = ulStyle
+	g.lastUnderlineColor = ulColor
 }
 
 // cursorNewline moves cursor to next line (internal, no lock)
@@ -525,7 +580,7 @@ func (g *Grid) scrollDownRegionWithBg(bg Color) {
 		return
 	}
 
-	top := g.scrollTop - 1    // Convert to 0-based
+	top := g.scrollTop - 1 // Convert to 0-based
 	bottom := g.scrollBottom - 1
 
 	// Shift rows down within region
@@ -977,7 +1032,7 @@ func (g *Grid) DeleteLinesWithBg(n int, bg Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	top := g.scrollTop - 1    // Convert to 0-based
+	top := g.scrollTop - 1 // Convert to 0-based
 	bottom := g.scrollBottom - 1
 
 	// Cursor must be within scroll region
@@ -1015,7 +1070,7 @@ func (g *Grid) InsertLinesWithBg(n int, bg Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	top := g.scrollTop - 1    // Convert to 0-based
+	top := g.scrollTop - 1 // Convert to 0-based
 	bottom := g.scrollBottom - 1
 
 	// Cursor must be within scroll region
@@ -1172,11 +1227,14 @@ func (g *Grid) RepeatChar(n int) {
 		}
 		idx := g.index(g.CursorCol, g.CursorRow)
 		g.cells[idx] = Cell{
-			Char:  g.lastChar,
-			Fg:    g.lastFg,
-			Bg:    g.lastBg,
-			Flags: g.lastFlags,
-			Width: CellWidthNormal,
+			Char:           g.lastChar,
+			Fg:             g.lastFg,
+			Bg:             g.lastBg,
+			UnderlineColor: g.lastUnderlineColor,
+			Flags:          g.lastFlags,
+			Width:          CellWidthNormal,
+			UnderlineStyle: g.lastUnderlineStyle,
+			Link:           g.lastLink,
 		}
 		g.CursorCol++
 		if g.CursorCol >= g.Cols {

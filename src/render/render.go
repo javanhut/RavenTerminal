@@ -12,6 +12,7 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
+	"runtime"
 	"strings"
 
 	"github.com/go-gl/gl/v4.1-core/gl"
@@ -136,6 +137,41 @@ type Renderer struct {
 	hoverStartCol int
 	hoverEndCol   int
 	hoverActive   bool
+
+	// Text styling options (from config); default on
+	fauxBold   bool
+	fauxItalic bool
+	undercurl  bool
+
+	// tabBarVisible controls whether the left tab bar is shown and reserves layout
+	// width. It is hidden when there is a single tab so a lone tab uses the full window.
+	tabBarVisible bool
+}
+
+// SetTabBarVisible shows or hides the left tab bar (and its reserved layout width).
+func (r *Renderer) SetTabBarVisible(visible bool) {
+	r.tabBarVisible = visible
+}
+
+// TabBarVisible reports whether the tab bar is currently shown.
+func (r *Renderer) TabBarVisible() bool {
+	return r.tabBarVisible
+}
+
+// layoutTabBarWidth is the horizontal space the tab bar reserves: the bar width when
+// visible, otherwise 0 so the terminal grid spans the full window.
+func (r *Renderer) layoutTabBarWidth() float32 {
+	if r.tabBarVisible {
+		return r.tabBarWidth
+	}
+	return 0
+}
+
+// SetTextStyleOptions configures synthesized bold/italic and styled underlines.
+func (r *Renderer) SetTextStyleOptions(fauxBold, fauxItalic, undercurl bool) {
+	r.fauxBold = fauxBold
+	r.fauxItalic = fauxItalic
+	r.undercurl = undercurl
 }
 
 type paneRect struct {
@@ -157,8 +193,11 @@ func NewRenderer() (*Renderer, error) {
 		paddingBottom:   12.0,
 		tabBarWidth:     135.0,
 		currentFont:     fonts.DefaultFontName(),
-		glyphs: make(map[rune]Glyph),
+		glyphs:          make(map[rune]Glyph),
 		// atlasSize calculated dynamically in loadFontData based on glyph count
+		fauxBold:   true,
+		fauxItalic: true,
+		undercurl:  true,
 	}
 
 	if err := r.initGL(); err != nil {
@@ -656,10 +695,10 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 
 		startLine := panel.Scroll
 		lineY := layout.MessagesStart
-		codeColor := [4]float32{0.7, 0.8, 0.6, 1.0}       // Greenish for code
-		headerColor := [4]float32{0.9, 0.7, 0.4, 1.0}     // Orange/gold for headers
-		bulletColor := [4]float32{0.7, 0.7, 0.9, 1.0}     // Light blue for bullets
-		thinkingColor := [4]float32{0.6, 0.5, 0.7, 0.85}  // Purple/dim for thinking
+		codeColor := [4]float32{0.7, 0.8, 0.6, 1.0}           // Greenish for code
+		headerColor := [4]float32{0.9, 0.7, 0.4, 1.0}         // Orange/gold for headers
+		bulletColor := [4]float32{0.7, 0.7, 0.9, 1.0}         // Light blue for bullets
+		thinkingColor := [4]float32{0.6, 0.5, 0.7, 0.85}      // Purple/dim for thinking
 		thinkingHeaderColor := [4]float32{0.7, 0.5, 0.8, 1.0} // Brighter purple for thinking header
 		// Compute selection range for highlight
 		selStart, selEnd := panel.SelectionStart, panel.SelectionEnd
@@ -1058,6 +1097,21 @@ func (r *Renderer) getHelpSections() []struct {
 	title    string
 	bindings [][2]string
 } {
+	// Platform-aware modifier labels: macOS uses Cmd for app shortcuts, others Ctrl+Shift.
+	isMac := runtime.GOOS == "darwin"
+	mod := "Ctrl+Shift"
+	exitKey := "Ctrl+Q"
+	pasteKey := "Ctrl+Shift+P"
+	splitV := "Ctrl+Shift+V"
+	splitH := "Ctrl+Shift+H"
+	if isMac {
+		mod = "Cmd"
+		exitKey = "Cmd+Q"
+		pasteKey = "Cmd+V"
+		splitV = "Cmd+D"
+		splitH = "Cmd+Shift+D"
+	}
+
 	return []struct {
 		title    string
 		bindings [][2]string
@@ -1065,24 +1119,25 @@ func (r *Renderer) getHelpSections() []struct {
 		{
 			title: "General",
 			bindings: [][2]string{
-				{"Ctrl+Q", "Exit terminal"},
-				{"Ctrl+Shift+C", "Copy visible screen"},
-				{"Ctrl+Shift+P", "Paste clipboard"},
+				{exitKey, "Exit terminal"},
+				{mod + "+C", "Copy visible screen"},
+				{pasteKey, "Paste clipboard"},
 				{"Shift+Enter", "Toggle fullscreen"},
-				{"Ctrl+Shift+K", "Show/hide help"},
-				{"Ctrl+Shift+S", "Open settings"},
-				{"Ctrl+Shift+F", "Toggle web search"},
-				{"Ctrl+Shift+A", "Toggle AI chat"},
-				{"Ctrl+Shift++", "Zoom in"},
-				{"Ctrl+Shift+-", "Zoom out"},
-				{"Ctrl+Shift+0", "Reset zoom"},
+				{mod + "+K", "Show/hide help"},
+				{mod + "+S", "Open settings"},
+				{mod + "+F", "Toggle web search"},
+				{mod + "+A", "Toggle AI chat"},
+				{mod + "++", "Zoom in"},
+				{mod + "+-", "Zoom out"},
+				{mod + "+0", "Reset zoom"},
 			},
 		},
 		{
 			title: "Tab Management",
 			bindings: [][2]string{
-				{"Ctrl+Shift+T", "New tab"},
-				{"Ctrl+Shift+X", "Close current tab"},
+				{mod + "+T", "New tab"},
+				{mod + "+X", "Close current tab"},
+				{mod + "+1..9", "Jump to tab N"},
 				{"Ctrl+Tab", "Next tab"},
 				{"Ctrl+Shift+Tab", "Previous tab"},
 			},
@@ -1090,13 +1145,13 @@ func (r *Renderer) getHelpSections() []struct {
 		{
 			title: "Split Panes",
 			bindings: [][2]string{
-				{"Ctrl+Shift+V", "Split vertical"},
-				{"Ctrl+Shift+H", "Split horizontal"},
-				{"Ctrl+Shift+W", "Close pane"},
+				{splitV, "Split vertical"},
+				{splitH, "Split horizontal"},
+				{mod + "+W", "Close pane"},
 				{"Shift+Tab", "Cycle panes"},
-				{"Ctrl+Shift+]", "Next pane"},
-				{"Ctrl+Shift+[", "Previous pane"},
-				{"Ctrl+Shift+[ or ]", "Cycle overlay panel (when open)"},
+				{mod + "+]", "Next pane"},
+				{mod + "+[", "Previous pane"},
+				{mod + "+[ or ]", "Cycle overlay panel (when open)"},
 				{"Ctrl+R", "Toggle resize mode"},
 				{"Arrow Keys", "Resize active pane"},
 			},
@@ -1438,8 +1493,8 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 
 	// Draw menu items
 	itemIndex := 0
-	headerColor := [4]float32{0.5, 0.5, 0.6, 1.0}   // Dim color for headers
-	toggleOnColor := [4]float32{0.3, 0.8, 0.4, 1.0} // Green for enabled toggles
+	headerColor := [4]float32{0.5, 0.5, 0.6, 1.0}    // Dim color for headers
+	toggleOnColor := [4]float32{0.3, 0.8, 0.4, 1.0}  // Green for enabled toggles
 	toggleOffColor := [4]float32{0.5, 0.5, 0.5, 1.0} // Gray for disabled toggles
 
 	for i, item := range m.Items {
@@ -1645,9 +1700,10 @@ func (r *Renderer) renderPanes(t *tab.Tab, width, height int, proj [16]float32, 
 	}
 
 	// Calculate available area (after tab bar)
-	baseX := r.tabBarWidth + 5
+	tabBarW := r.layoutTabBarWidth()
+	baseX := tabBarW + 5
 	baseY := r.paddingTop
-	availableWidth := float32(width) - r.tabBarWidth - 5
+	availableWidth := float32(width) - tabBarW - 5
 	availableHeight := float32(height) - r.paddingTop - r.paddingBottom
 
 	// Get active pane for highlighting
@@ -1719,9 +1775,10 @@ func (r *Renderer) paneRects(t *tab.Tab, width, height int) []paneRect {
 		return nil
 	}
 
-	baseX := r.tabBarWidth + 5
+	tabBarW := r.layoutTabBarWidth()
+	baseX := tabBarW + 5
 	baseY := r.paddingTop
-	availableWidth := float32(width) - r.tabBarWidth - 5
+	availableWidth := float32(width) - tabBarW - 5
 	availableHeight := float32(height) - r.paddingTop - r.paddingBottom
 	separatorWidth := float32(2)
 
@@ -1913,43 +1970,90 @@ func nextPowerOf2(n int) int {
 	return n + 1
 }
 
-// renderTabBar renders the left tab bar
+// renderTabBar renders the left tab bar as a vertical stack of boxes. It is only
+// shown when there is more than one tab (see SetTabBarVisible), so a single tab uses
+// the full window width.
 func (r *Renderer) renderTabBar(tm *tab.TabManager, width, height int, proj [16]float32) {
-	// Draw tab bar background
-	r.drawRect(0, 0, r.tabBarWidth, float32(height), r.theme.TabBar, proj)
+	if !r.tabBarVisible {
+		return
+	}
 
-	// Draw separator line
-	r.drawRect(r.tabBarWidth-2, 0, 2, float32(height), r.theme.Foreground, proj)
+	barW := r.tabBarWidth
 
-	// Calculate scale to render at base size regardless of zoom
+	// Tab bar background + right separator.
+	r.drawRect(0, 0, barW, float32(height), r.theme.TabBar, proj)
+	r.drawRect(barW-2, 0, 2, float32(height), r.theme.Foreground, proj)
+
+	// Render labels at base size regardless of zoom.
 	scale := r.baseFontSize / r.fontSize
 	cellH := r.cellHeight * scale
 
-	// Draw header
-	header := fmt.Sprintf("RT %d/%d", tm.ActiveIndex()+1, tm.TabCount())
-	r.drawTextScaled(10, cellH, header, r.theme.TabActive, proj, scale)
-
-	// Draw tabs
 	tabs := tm.GetTabs()
 	activeIdx := tm.ActiveIndex()
+
+	// Box geometry.
+	const (
+		sidePad = 8.0
+		topPad  = 10.0
+		gap     = 6.0
+		border  = 2.0
+	)
+	boxX := float32(sidePad)
+	boxW := barW - 2*sidePad
+	boxH := cellH*1.4 + 8
+
 	for i, t := range tabs {
-		y := cellH*2 + float32(i)*cellH*1.2
-		prefix := "  "
-		clr := r.theme.Foreground
-		if i == activeIdx {
-			prefix = "> "
-			clr = r.theme.TabActive
+		boxY := float32(topPad) + float32(i)*(boxH+gap)
+		active := i == activeIdx
+
+		// Box fill: active uses the accent color, inactive a subtle raised panel.
+		fill := r.theme.TabBar
+		fill[0] = clampUnit(fill[0] + 0.06)
+		fill[1] = clampUnit(fill[1] + 0.06)
+		fill[2] = clampUnit(fill[2] + 0.06)
+		textClr := r.theme.Foreground
+		if active {
+			fill = r.theme.TabActive
+			fill[3] = 0.22
+			textClr = r.theme.TabActive
 		}
-		text := fmt.Sprintf("%sTab %d", prefix, t.ID())
-		r.drawTextScaled(10, y, text, clr, proj, scale)
+		r.drawRect(boxX, boxY, boxW, boxH, fill, proj)
+
+		// Border (accent for the active tab, faint otherwise).
+		borderClr := r.theme.Foreground
+		borderClr[3] = 0.25
+		if active {
+			borderClr = r.theme.TabActive
+		}
+		r.drawRect(boxX, boxY, boxW, border, borderClr, proj)             // top
+		r.drawRect(boxX, boxY+boxH-border, boxW, border, borderClr, proj) // bottom
+		r.drawRect(boxX, boxY, border, boxH, borderClr, proj)             // left
+		r.drawRect(boxX+boxW-border, boxY, border, boxH, borderClr, proj) // right
+
+		// Label, vertically centered within the box.
+		label := fmt.Sprintf("%d", t.ID())
+		baseline := boxY + boxH*0.5 + cellH*0.32
+		r.drawTextScaled(boxX+10, baseline, label, textClr, proj, scale)
 	}
+}
+
+// clampUnit clamps a color channel to the [0,1] range.
+func clampUnit(v float32) float32 {
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
 }
 
 // renderGrid renders the terminal grid (backward compatible wrapper)
 func (r *Renderer) renderGrid(g *grid.Grid, width, height int, proj [16]float32, cursorVisible bool, cursorStyle parser.CursorStyle) {
-	offsetX := r.tabBarWidth + 5
+	tabBarW := r.layoutTabBarWidth()
+	offsetX := tabBarW + 5
 	offsetY := r.paddingTop
-	availableWidth := float32(width) - r.tabBarWidth - 10
+	availableWidth := float32(width) - tabBarW - 10
 	availableHeight := float32(height) - r.paddingTop - r.paddingBottom
 	r.renderGridAt(g, offsetX, offsetY, availableWidth, availableHeight, proj, cursorVisible, cursorStyle)
 }
@@ -2003,18 +2107,35 @@ func (r *Renderer) renderGridAt(g *grid.Grid, offsetX, offsetY, paneWidth, paneH
 			hidden := cell.Flags&grid.FlagHidden != 0
 			if !hidden && cell.Char != ' ' && cell.Char != 0 {
 				if !r.drawBlockElement(x, y, cell.Char, fgColor, proj) {
-					r.drawChar(x, y+r.cellHeight, cell.Char, fgColor, proj)
+					bold := r.fauxBold && cell.Flags&grid.FlagBold != 0
+					italic := r.fauxItalic && cell.Flags&grid.FlagItalic != 0
+					r.drawCharStyled(x, y+r.cellHeight, cell.Char, fgColor, proj, bold, italic)
 				}
 			}
 
 			// Draw underline for ANSI styling or hovered URL
 			drawUnderline := cell.Flags&grid.FlagUnderline != 0
-			if r.hoverActive && r.hoverGrid == g && row == r.hoverRow && col >= r.hoverStartCol && col <= r.hoverEndCol {
+			hovered := r.hoverActive && r.hoverGrid == g && row == r.hoverRow && col >= r.hoverStartCol && col <= r.hoverEndCol
+			if hovered {
 				drawUnderline = true
 			}
 			if drawUnderline && !hidden {
-				underlineY := y + r.cellHeight - 1
-				r.drawRect(x, underlineY, r.cellWidth, 1, fgColor, proj)
+				ulColor := fgColor
+				style := uint8(1) // solid
+				// Honor the cell's underline color/style for real SGR underlines only;
+				// the synthetic hover-URL underline stays a flat foreground line.
+				if cell.Flags&grid.FlagUnderline != 0 && !hovered {
+					if cell.UnderlineColor.Type != grid.ColorDefault {
+						ulColor = r.colorToRGBA(cell.UnderlineColor, false)
+					}
+					if cell.UnderlineStyle != 0 {
+						style = cell.UnderlineStyle
+					}
+					if !r.undercurl {
+						style = 1 // styled underlines disabled -> solid
+					}
+				}
+				r.drawUnderlineStyled(x, y, ulColor, proj, style)
 			}
 			if cell.Flags&grid.FlagStrikethrough != 0 && !hidden {
 				strikeY := y + r.cellHeight/2
@@ -2137,15 +2258,64 @@ func (r *Renderer) drawRect(x, y, w, h float32, clr [4]float32, proj [16]float32
 	gl.BindVertexArray(0)
 }
 
+// drawUnderlineStyled draws an underline across a cell in the given SGR 4:n style:
+// 1=solid, 2=double, 3=curly (undercurl), 4=dotted, 5=dashed. Unknown styles draw solid.
+func (r *Renderer) drawUnderlineStyled(x, y float32, clr [4]float32, proj [16]float32, style uint8) {
+	w := r.cellWidth
+	baseY := y + r.cellHeight - 1
+	switch style {
+	case 2: // double underline
+		r.drawRect(x, baseY, w, 1, clr, proj)
+		if baseY-2 >= y {
+			r.drawRect(x, baseY-2, w, 1, clr, proj)
+		}
+	case 3: // curly / undercurl
+		r.drawUndercurl(x, baseY, w, clr, proj)
+	case 4: // dotted
+		for dx := 0; dx < int(w); dx += 2 {
+			r.drawRect(x+float32(dx), baseY, 1, 1, clr, proj)
+		}
+	case 5: // dashed
+		for dx := 0; dx < int(w); dx += 4 {
+			seg := float32(2)
+			if float32(dx)+seg > w {
+				seg = w - float32(dx)
+			}
+			r.drawRect(x+float32(dx), baseY, seg, 1, clr, proj)
+		}
+	default: // solid
+		r.drawRect(x, baseY, w, 1, clr, proj)
+	}
+}
+
+// drawUndercurl approximates a sine wave with 1px segments (triangle wave) so editors'
+// curly diagnostic underlines (SGR 4:3) render without needing a custom shader.
+func (r *Renderer) drawUndercurl(x, baseY, w float32, clr [4]float32, proj [16]float32) {
+	const period = 4 // pixels per wave
+	const amp = 1    // peak offset in pixels
+	for dx := 0; dx < int(w); dx++ {
+		phase := dx % period
+		var off float32
+		// triangle wave: 0 -> +amp -> 0 -> -amp across one period
+		switch {
+		case phase < period/2:
+			off = float32(amp) - float32(phase)*(2*amp)/float32(period/2)
+		default:
+			off = -float32(amp) + float32(phase-period/2)*(2*amp)/float32(period/2)
+		}
+		r.drawRect(x+float32(dx), baseY+off, 1, 1, clr, proj)
+	}
+}
+
 // boxDrawingFallbacks maps rounded corners and other box chars to simpler equivalents
 var boxDrawingFallbacks = map[rune]rune{
-	'╭': '┌', // U+256D -> U+250C (rounded to square corner)
-	'╮': '┐', // U+256E -> U+2510
-	'╯': '┘', // U+256F -> U+2518
-	'╰': '└', // U+2570 -> U+2514
-	'╱': '/', // U+2571 -> ASCII slash
+	'╭': '┌',  // U+256D -> U+250C (rounded to square corner)
+	'╮': '┐',  // U+256E -> U+2510
+	'╯': '┘',  // U+256F -> U+2518
+	'╰': '└',  // U+2570 -> U+2514
+	'╱': '/',  // U+2571 -> ASCII slash
 	'╲': '\\', // U+2572 -> ASCII backslash
-	'╳': 'X', // U+2573 -> ASCII X
+	'╳': 'X',  // U+2573 -> ASCII X
 }
 
 // unicodeFallbacks maps common Unicode characters to ASCII equivalents
@@ -2257,7 +2427,9 @@ func (r *Renderer) drawBlockElement(x, y float32, char rune, clr [4]float32, pro
 }
 
 // drawChar draws a single character using the font atlas
-func (r *Renderer) drawChar(x, y float32, char rune, clr [4]float32, proj [16]float32) {
+// lookupGlyph resolves a rune to a glyph, applying box-drawing and unicode-to-ASCII
+// fallbacks, then '?' as a last resort.
+func (r *Renderer) lookupGlyph(char rune) (Glyph, bool) {
 	glyph, ok := r.glyphs[char]
 	if !ok {
 		// Try box-drawing fallbacks first
@@ -2273,10 +2445,22 @@ func (r *Renderer) drawChar(x, y float32, char rune, clr [4]float32, proj [16]fl
 		// If still not found, fallback to '?'
 		if !ok {
 			glyph, ok = r.glyphs['?']
-			if !ok {
-				return
-			}
 		}
+	}
+	return glyph, ok
+}
+
+func (r *Renderer) drawChar(x, y float32, char rune, clr [4]float32, proj [16]float32) {
+	r.drawCharStyled(x, y, char, clr, proj, false, false)
+}
+
+// drawCharStyled draws a glyph with optional synthesized bold (offset double-draw)
+// and italic (horizontal shear). With bold=false, italic=false it is identical to a
+// plain drawChar.
+func (r *Renderer) drawCharStyled(x, y float32, char rune, clr [4]float32, proj [16]float32, bold, italic bool) {
+	glyph, ok := r.lookupGlyph(char)
+	if !ok {
+		return
 	}
 
 	// Calculate screen coordinates
@@ -2289,11 +2473,17 @@ func (r *Renderer) drawChar(x, y float32, char rune, clr [4]float32, proj [16]fl
 	tw := glyph.Width
 	th := glyph.Height
 
+	// Faux italic: slant the glyph by shifting its top edge to the right.
+	var shear float32
+	if italic {
+		shear = h * 0.2
+	}
+
 	vertices := []float32{
-		x, y - h, tx, ty,
-		x + w, y - h, tx + tw, ty,
+		x + shear, y - h, tx, ty,
+		x + w + shear, y - h, tx + tw, ty,
 		x + w, y, tx + tw, ty + th,
-		x, y - h, tx, ty,
+		x + shear, y - h, tx, ty,
 		x + w, y, tx + tw, ty + th,
 		x, y, tx, ty + th,
 	}
@@ -2310,6 +2500,15 @@ func (r *Renderer) drawChar(x, y float32, char rune, clr [4]float32, proj [16]fl
 	gl.BindBuffer(gl.ARRAY_BUFFER, r.fontVBO)
 	gl.BufferSubData(gl.ARRAY_BUFFER, 0, len(vertices)*4, gl.Ptr(vertices))
 	gl.DrawArrays(gl.TRIANGLES, 0, 6)
+
+	// Faux bold: redraw the glyph offset by 1px in x to thicken the strokes.
+	if bold {
+		for i := 0; i < len(vertices); i += 4 {
+			vertices[i] += 1
+		}
+		gl.BufferSubData(gl.ARRAY_BUFFER, 0, len(vertices)*4, gl.Ptr(vertices))
+		gl.DrawArrays(gl.TRIANGLES, 0, 6)
+	}
 	gl.BindVertexArray(0)
 }
 
@@ -2452,14 +2651,14 @@ func (r *Renderer) CellDimensions() (float32, float32) {
 	return r.cellWidth, r.cellHeight
 }
 
-// TabBarWidth returns the tab bar width
+// TabBarWidth returns the tab bar width currently reserved for layout (0 when hidden).
 func (r *Renderer) TabBarWidth() float32 {
-	return r.tabBarWidth
+	return r.layoutTabBarWidth()
 }
 
 // CalculateGridSize calculates the number of columns and rows that fit
 func (r *Renderer) CalculateGridSize(width, height int) (cols, rows int) {
-	availableWidth := float32(width) - r.tabBarWidth - 10
+	availableWidth := float32(width) - r.layoutTabBarWidth() - 10
 	availableHeight := float32(height) - r.paddingTop - r.paddingBottom
 	cols = int(availableWidth / r.cellWidth)
 	rows = int(availableHeight / r.cellHeight)

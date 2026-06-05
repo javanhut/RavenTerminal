@@ -188,3 +188,17 @@ func (w *Window) Destroy() {
 func PollEvents() {
 	glfw.PollEvents()
 }
+
+// WaitEventsTimeout blocks until an event arrives or the timeout (in seconds)
+// elapses, then processes pending events. This makes the main loop event-driven:
+// keystrokes and mouse input wake it immediately, while the timeout bounds how long
+// it sleeps when idle (for cursor blink, toasts, etc.).
+func WaitEventsTimeout(seconds float64) {
+	glfw.WaitEventsTimeout(seconds)
+}
+
+// PostEmptyEvent wakes a thread blocked in WaitEventsTimeout. It is safe to call
+// from any goroutine (e.g. the PTY reader) to request a prompt re-render.
+func PostEmptyEvent() {
+	glfw.PostEmptyEvent()
+}

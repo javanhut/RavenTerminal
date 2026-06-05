@@ -43,13 +43,13 @@ type WebSearchConfig struct {
 
 // OllamaConfig holds local AI chat settings.
 type OllamaConfig struct {
-	Enabled        bool   `toml:"enabled"`
-	URL            string `toml:"url"`
-	Model          string `toml:"model"`
-	ThinkingMode   bool   `toml:"thinking_mode"`    // Enable thinking/reasoning mode for supported models
-	ThinkingBudget int    `toml:"thinking_budget"`  // Max tokens for thinking (0 = no limit)
-	ShowThinking   bool   `toml:"show_thinking"`    // Show thinking content in UI (collapsible)
-	ExtendedTimeout int   `toml:"extended_timeout"` // Extended timeout in seconds for thinking models (0 = default 300s)
+	Enabled         bool   `toml:"enabled"`
+	URL             string `toml:"url"`
+	Model           string `toml:"model"`
+	ThinkingMode    bool   `toml:"thinking_mode"`    // Enable thinking/reasoning mode for supported models
+	ThinkingBudget  int    `toml:"thinking_budget"`  // Max tokens for thinking (0 = no limit)
+	ShowThinking    bool   `toml:"show_thinking"`    // Show thinking content in UI (collapsible)
+	ExtendedTimeout int    `toml:"extended_timeout"` // Extended timeout in seconds for thinking models (0 = default 300s)
 }
 
 // ShellConfig holds shell-specific settings
@@ -71,9 +71,12 @@ type CustomCommand struct {
 
 // AppearanceConfig holds visual settings
 type AppearanceConfig struct {
-	CursorStyle      string  `toml:"cursor_style"`       // "block", "underline", "bar"
-	CursorBlink      bool    `toml:"cursor_blink"`       // Whether cursor blinks
+	CursorStyle       string  `toml:"cursor_style"`        // "block", "underline", "bar"
+	CursorBlink       bool    `toml:"cursor_blink"`        // Whether cursor blinks
 	PanelWidthPercent float32 `toml:"panel_width_percent"` // Width of side panels (25-50)
+	FauxBold          bool    `toml:"faux_bold"`           // Synthesize bold text (offset double-draw)
+	FauxItalic        bool    `toml:"faux_italic"`         // Synthesize italic text (shear)
+	Undercurl         bool    `toml:"undercurl"`           // Render curly/styled underlines (SGR 4:n)
 }
 
 // Config holds the terminal configuration
@@ -318,14 +321,17 @@ echo "None"
 			URL:             "http://localhost:11434",
 			Model:           "llama3",
 			ThinkingMode:    false,
-			ThinkingBudget:  0,     // No limit
-			ShowThinking:    true,  // Show thinking by default
-			ExtendedTimeout: 600,   // 10 minutes for thinking models
+			ThinkingBudget:  0,    // No limit
+			ShowThinking:    true, // Show thinking by default
+			ExtendedTimeout: 600,  // 10 minutes for thinking models
 		},
 		Appearance: AppearanceConfig{
 			CursorStyle:       "block",
 			CursorBlink:       true,
 			PanelWidthPercent: 35.0,
+			FauxBold:          true,
+			FauxItalic:        true,
+			Undercurl:         true,
 		},
 		Commands: []CustomCommand{},
 		Aliases: map[string]string{

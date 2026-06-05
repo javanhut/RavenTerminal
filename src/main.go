@@ -106,7 +106,6 @@ type mouseSelection struct {
 	startRow int
 }
 
-
 type toastState struct {
 	message   string
 	expiresAt time.Time
@@ -131,6 +130,11 @@ func main() {
 	// Calculate initial grid size
 	width, height := win.GetFramebufferSize()
 	cols, rows := renderer.CalculateGridSize(width, height)
+
+	// Wake the event-driven main loop whenever a pane produces output, so shell output
+	// and key echoes render immediately. Registered before any pane (and its reader
+	// goroutine) is created to avoid a data race on the notifier.
+	tab.SetWakeNotifier(window.PostEmptyEvent)
 
 	// Create tab manager
 	tabManager, err := tab.NewTabManager(uint16(cols), uint16(rows))
@@ -189,6 +193,7 @@ func main() {
 		if err := renderer.SetDefaultFontSize(cfg.FontSize); err != nil {
 			return err
 		}
+		renderer.SetTextStyleOptions(cfg.Appearance.FauxBold, cfg.Appearance.FauxItalic, cfg.Appearance.Undercurl)
 		width, height := win.GetFramebufferSize()
 		cols, rows := renderer.CalculateGridSize(width, height)
 		tabManager.ResizeAll(uint16(cols), uint16(rows))
@@ -246,6 +251,7 @@ func main() {
 			cols, rows := renderer.CalculateGridSize(width, height)
 			tabManager.ResizeAll(uint16(cols), uint16(rows))
 		}
+		renderer.SetTextStyleOptions(settingsMenu.Config.Appearance.FauxBold, settingsMenu.Config.Appearance.FauxItalic, settingsMenu.Config.Appearance.Undercurl)
 	}
 
 	startSearch := func(query string) {
@@ -660,9 +666,7 @@ func main() {
 			case keybindings.ActionPaste:
 				clip := glfw.GetClipboardString()
 				if clip != "" {
-					clip = strings.ReplaceAll(clip, "\r\n", "\n")
-					clip = strings.ReplaceAll(clip, "\n", "\r")
-					activeTab.Write([]byte(clip))
+					writePaste(activeTab, clip)
 					activeTab.Terminal.GetGrid().ResetScrollOffset()
 					showToast("Pasted from clipboard")
 				}
@@ -925,9 +929,7 @@ func main() {
 		case keybindings.ActionPaste:
 			clip := glfw.GetClipboardString()
 			if clip != "" {
-				clip = strings.ReplaceAll(clip, "\r\n", "\n")
-				clip = strings.ReplaceAll(clip, "\n", "\r")
-				activeTab.Write([]byte(clip))
+				writePaste(activeTab, clip)
 				activeTab.Terminal.GetGrid().ResetScrollOffset()
 				showToast("Pasted from clipboard")
 			}
@@ -942,6 +944,9 @@ func main() {
 		case keybindings.ActionPrevTab:
 			lineBuf.clear()
 			tabManager.PrevTab()
+		case keybindings.ActionSelectTab:
+			lineBuf.clear()
+			tabManager.SelectTab(result.Num - 1)
 		case keybindings.ActionSplitVertical:
 			lineBuf.clear()
 			activeTab.SplitVertical()
@@ -1028,6 +1033,12 @@ func main() {
 	})
 
 	win.GLFW().SetCharCallback(func(w *glfw.Window, char rune) {
+		// Ignore Cmd/Super-modified keys: they are app shortcuts (handled in the key
+		// callback), never text input. Prevents e.g. Cmd+T from also typing "t".
+		if currentMods&glfw.ModSuper != 0 {
+			return
+		}
+
 		// Handle character input for settings menu
 		if settingsMenu.IsOpen() && settingsMenu.InputMode() {
 			settingsMenu.HandleChar(char)
@@ -1299,7 +1310,7 @@ func main() {
 				}
 
 				if mods&glfw.ModControl != 0 {
-					if urlText, _, _ := urlAtCellRange(pane.Terminal.GetGrid(), col, row); urlText != "" {
+					if urlText, _, _ := linkAtCell(pane.Terminal.GetGrid(), col, row); urlText != "" {
 						if err := openURL(urlText); err != nil {
 							log.Printf("failed to open url %q: %v", urlText, err)
 						}
@@ -1438,7 +1449,7 @@ func main() {
 			g := pane.Terminal.GetGrid()
 
 			if mods&glfw.ModControl != 0 {
-				if urlText, _, _ := urlAtCellRange(g, col, row); urlText != "" {
+				if urlText, _, _ := linkAtCell(g, col, row); urlText != "" {
 					if err := openURL(urlText); err != nil {
 						log.Printf("failed to open url %q: %v", urlText, err)
 					}
@@ -1552,11 +1563,27 @@ func main() {
 			return
 		}
 
-		if _, startCol, endCol := urlAtCellRange(pane.Terminal.GetGrid(), col, row); startCol <= endCol {
+		if _, startCol, endCol := linkAtCell(pane.Terminal.GetGrid(), col, row); startCol <= endCol {
 			renderer.SetHoverURL(pane.Terminal.GetGrid(), row, startCol, endCol)
 			return
 		}
 		renderer.ClearHoverURL()
+	})
+
+	// Focus reporting (?1004): tell apps that requested it when the window gains/loses focus.
+	win.GLFW().SetFocusCallback(func(w *glfw.Window, focused bool) {
+		activeTab := tabManager.ActiveTab()
+		if activeTab == nil || activeTab.Terminal == nil {
+			return
+		}
+		if !activeTab.Terminal.FocusReportingEnabled() {
+			return
+		}
+		if focused {
+			activeTab.Write([]byte("\x1b[I"))
+		} else {
+			activeTab.Write([]byte("\x1b[O"))
+		}
 	})
 
 	// Main loop
@@ -1565,6 +1592,15 @@ func main() {
 		tabManager.CleanupExited()
 		if tabManager.AllExited() {
 			break
+		}
+
+		// Show the tab bar only when there's more than one tab. When visibility flips
+		// (a tab is added or removed), the usable width changes, so re-fit the grid.
+		if wantTabBar := tabManager.TabCount() > 1; wantTabBar != renderer.TabBarVisible() {
+			renderer.SetTabBarVisible(wantTabBar)
+			width, height := win.GetFramebufferSize()
+			cols, rows := renderer.CalculateGridSize(width, height)
+			tabManager.ResizeAll(uint16(cols), uint16(rows))
 		}
 
 		if settingsMenu.Config != nil && settingsMenu.Config.Theme != currentTheme {
@@ -1781,13 +1817,48 @@ func main() {
 			renderer.DrawToast(toast.message, width, height)
 		}
 
-		// Swap buffers and poll events
-		win.SwapBuffers()
-		window.PollEvents()
+		// Drain any OSC 52 clipboard writes queued from PTY reader goroutines
+		// (GLFW clipboard access must happen on the main thread).
+		if text, ok := tab.DrainClipboard(); ok {
+			glfw.SetClipboardString(text)
+		}
 
-		// Small sleep to prevent 100% CPU usage
-		time.Sleep(time.Millisecond * 16) // ~60 FPS
+		// Swap buffers and poll events. While an app holds synchronized output
+		// (?2026), skip presenting the partial frame but keep polling input so the UI
+		// stays responsive; a watchdog in SyncActive() resumes within ~100ms.
+		skipPresent := false
+		if activeTab := tabManager.ActiveTab(); activeTab != nil && activeTab.Terminal != nil {
+			skipPresent = activeTab.Terminal.SyncActive()
+		}
+		if !skipPresent {
+			win.SwapBuffers()
+		}
+
+		// Event-driven wait: returns immediately when a key/mouse event arrives or a
+		// pane posts output (see SetWakeNotifier), so input is processed with near-zero
+		// latency. The timeout only bounds idle re-renders (cursor blink, toasts) and
+		// edge auto-scroll while dragging a selection. This replaces the old fixed
+		// PollEvents + 16ms sleep, which serialized input behind the frame timer and,
+		// stacked on vsync, doubled keystroke-to-pixel latency.
+		waitTimeout := 0.03
+		if selection.active {
+			waitTimeout = 0.016 // keep edge auto-scroll smooth during a drag
+		}
+		window.WaitEventsTimeout(waitTimeout)
 	}
+}
+
+// writePaste sends clipboard text to the active terminal, normalizing newlines and,
+// when the application has enabled bracketed paste (?2004), wrapping the text in
+// paste markers. Any embedded end-marker is stripped first to prevent paste-injection.
+func writePaste(activeTab *tab.Tab, clip string) {
+	clip = strings.ReplaceAll(clip, "\r\n", "\n")
+	clip = strings.ReplaceAll(clip, "\n", "\r")
+	if activeTab.Terminal.BracketedPasteEnabled() {
+		clip = strings.ReplaceAll(clip, "\x1b[201~", "")
+		clip = "\x1b[200~" + clip + "\x1b[201~"
+	}
+	activeTab.Write([]byte(clip))
 }
 
 func clampInt(value, min, max int) int {
@@ -1803,6 +1874,35 @@ func clampInt(value, min, max int) int {
 func urlAtCell(g *grid.Grid, col, row int) string {
 	urlText, _, _ := urlAtCellRange(g, col, row)
 	return urlText
+}
+
+// linkAtCell resolves a clickable URL at (col,row), preferring an explicit OSC 8
+// hyperlink and falling back to heuristic URL detection. The returned column range
+// spans the run of cells sharing the link, for hover underlining.
+func linkAtCell(g *grid.Grid, col, row int) (string, int, int) {
+	if g == nil || row < 0 || row >= g.Rows || col < 0 || col >= g.Cols {
+		return "", -1, -1
+	}
+	cell := g.DisplayCell(col, row)
+	if cell.Link != 0 {
+		if url := g.LinkURL(cell.Link); url != "" {
+			start, end := col, col
+			for c := col - 1; c >= 0; c-- {
+				if g.DisplayCell(c, row).Link != cell.Link {
+					break
+				}
+				start = c
+			}
+			for c := col + 1; c < g.Cols; c++ {
+				if g.DisplayCell(c, row).Link != cell.Link {
+					break
+				}
+				end = c
+			}
+			return url, start, end
+		}
+	}
+	return urlAtCellRange(g, col, row)
 }
 
 func urlAtCellRange(g *grid.Grid, col, row int) (string, int, int) {

@@ -1,8 +1,21 @@
 package keybindings
 
 import (
+	"runtime"
+
 	"github.com/go-gl/glfw/v3.3/glfw"
 )
+
+// isMacOS reports whether app shortcuts should use Cmd (Super) instead of Ctrl+Shift.
+var isMacOS = runtime.GOOS == "darwin"
+
+// digitForKey maps the top-row number keys 1..9 to their value, 0 otherwise.
+func digitForKey(key glfw.Key) int {
+	if key >= glfw.Key1 && key <= glfw.Key9 {
+		return int(key-glfw.Key1) + 1
+	}
+	return 0
+}
 
 // KeyAction represents the action to take for a key press
 type KeyAction int
@@ -37,12 +50,14 @@ const (
 	ActionCopy
 	ActionPaste
 	ActionToggleResizeMode
+	ActionSelectTab
 )
 
 // KeyResult contains the result of processing a key
 type KeyResult struct {
 	Action KeyAction
 	Data   []byte
+	Num    int // payload for actions that need a number (e.g. ActionSelectTab -> 1-based tab)
 }
 
 // TranslateKey translates a GLFW key event to terminal input
@@ -50,80 +65,97 @@ func TranslateKey(key glfw.Key, mods glfw.ModifierKey, appCursorMode bool) KeyRe
 	ctrl := mods&glfw.ModControl != 0
 	shift := mods&glfw.ModShift != 0
 	alt := mods&glfw.ModAlt != 0
+	super := mods&glfw.ModSuper != 0
 
-	// Special key combinations
-	if ctrl && key == glfw.KeyQ {
+	// primary is the platform's app-shortcut modifier: Cmd (Super) on macOS,
+	// Ctrl+Shift elsewhere. Keeping Ctrl out of it leaves the Control key free for
+	// terminal control characters (Ctrl+C, Ctrl+D, ...), matching iTerm2/Terminal.app.
+	primary := (isMacOS && super) || (!isMacOS && ctrl && shift)
+
+	// Exit: Ctrl+Q everywhere, plus Cmd+Q on macOS.
+	if (ctrl && key == glfw.KeyQ) || (isMacOS && super && key == glfw.KeyQ) {
 		return KeyResult{Action: ActionExit}
 	}
-	if ctrl && shift && key == glfw.KeyC {
+
+	// Quick tab access: primary + 1..9 (Cmd+1..9 on macOS, Ctrl+Shift+1..9 elsewhere).
+	if primary {
+		if n := digitForKey(key); n != 0 {
+			return KeyResult{Action: ActionSelectTab, Num: n}
+		}
+	}
+
+	// Copy follows the primary modifier on both platforms (Cmd+C / Ctrl+Shift+C).
+	if primary && key == glfw.KeyC {
 		return KeyResult{Action: ActionCopy}
 	}
-	if ctrl && shift && key == glfw.KeyP {
+	// Paste: Cmd+V on macOS (universal), Ctrl+Shift+P elsewhere (legacy binding kept).
+	if (isMacOS && super && key == glfw.KeyV) || (!isMacOS && ctrl && shift && key == glfw.KeyP) {
 		return KeyResult{Action: ActionPaste}
 	}
 
-	if ctrl && shift && key == glfw.KeyT {
+	if primary && key == glfw.KeyT {
 		return KeyResult{Action: ActionNewTab}
 	}
 
-	if ctrl && shift && key == glfw.KeyX {
+	if primary && key == glfw.KeyX {
 		return KeyResult{Action: ActionCloseTab}
 	}
 
-	if ctrl && shift && key == glfw.KeyV {
-		return KeyResult{Action: ActionSplitVertical}
-	}
-
-	if ctrl && shift && key == glfw.KeyH {
-		return KeyResult{Action: ActionSplitHorizontal}
-	}
-
-	if ctrl && shift && key == glfw.KeyW {
+	if primary && key == glfw.KeyW {
 		return KeyResult{Action: ActionClosePane}
 	}
 
-	if ctrl && shift && key == glfw.KeyK {
+	// Splits: on macOS Cmd+V is paste, so use iTerm-style Cmd+D / Cmd+Shift+D.
+	// Elsewhere keep Ctrl+Shift+V / Ctrl+Shift+H.
+	if (isMacOS && super && !shift && key == glfw.KeyD) || (!isMacOS && ctrl && shift && key == glfw.KeyV) {
+		return KeyResult{Action: ActionSplitVertical}
+	}
+	if (isMacOS && super && shift && key == glfw.KeyD) || (!isMacOS && ctrl && shift && key == glfw.KeyH) {
+		return KeyResult{Action: ActionSplitHorizontal}
+	}
+
+	if primary && key == glfw.KeyK {
 		return KeyResult{Action: ActionShowHelp}
 	}
 
-	if ctrl && shift && key == glfw.KeyRightBracket {
+	if primary && key == glfw.KeyRightBracket {
 		return KeyResult{Action: ActionNextPane}
 	}
 
-	if ctrl && shift && key == glfw.KeyLeftBracket {
+	if primary && key == glfw.KeyLeftBracket {
 		return KeyResult{Action: ActionPrevPane}
 	}
 
-	// Zoom controls: Ctrl+Shift++ (Equal key with shift), Ctrl+Shift+-, Ctrl+Shift+0
-	if ctrl && shift && key == glfw.KeyEqual {
+	// Zoom controls: primary + (= / - / 0).
+	if primary && key == glfw.KeyEqual {
 		return KeyResult{Action: ActionZoomIn}
 	}
 
-	if ctrl && shift && key == glfw.KeyMinus {
+	if primary && key == glfw.KeyMinus {
 		return KeyResult{Action: ActionZoomOut}
 	}
 
-	if ctrl && shift && key == glfw.Key0 {
+	if primary && key == glfw.Key0 {
 		return KeyResult{Action: ActionZoomReset}
 	}
 
-	// Ctrl+Shift+S to open settings menu (like command palette)
-	if ctrl && shift && key == glfw.KeyS {
+	if primary && key == glfw.KeyS {
 		return KeyResult{Action: ActionOpenMenu}
 	}
-	// Ctrl+Shift+F to toggle web search panel
-	if ctrl && shift && key == glfw.KeyF {
+	if primary && key == glfw.KeyF {
 		return KeyResult{Action: ActionToggleSearchPanel}
 	}
-	// Ctrl+Shift+A to toggle AI chat panel
-	if ctrl && shift && key == glfw.KeyA {
+	if primary && key == glfw.KeyA {
 		return KeyResult{Action: ActionToggleAIPanel}
 	}
 
-	if ctrl && !shift && key == glfw.KeyR {
+	// Resize mode: Ctrl+R everywhere, plus Cmd+R on macOS.
+	if (ctrl && !shift && key == glfw.KeyR) || (isMacOS && super && !shift && key == glfw.KeyR) {
 		return KeyResult{Action: ActionToggleResizeMode}
 	}
 
+	// Cycle tabs with Ctrl+Tab / Ctrl+Shift+Tab (works on all platforms; Ctrl here is
+	// the physical Control key, distinct from Cmd on macOS).
 	if ctrl && key == glfw.KeyTab {
 		if shift {
 			return KeyResult{Action: ActionPrevTab}
