@@ -1295,6 +1295,16 @@ func main() {
 					// Click is outside search panel
 					searchPanel.Focused = false
 				}
+				// Tab bar: click a chip to switch tabs, or the "+" to open a new one.
+				if idx, newTab, hit := renderer.HitTestTabBar(tabManager, x, y); hit {
+					lineBuf.clear()
+					if newTab {
+						tabManager.NewTab()
+					} else {
+						tabManager.SelectTab(idx)
+					}
+					return
+				}
 				pane, col, row, ok := renderer.HitTestPane(activeTab, x, y, width, height)
 				if !ok || pane == nil {
 					if selection.pane != nil {

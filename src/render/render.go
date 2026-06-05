@@ -12,6 +12,8 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
+	"math"
+	"os"
 	"runtime"
 	"strings"
 
@@ -191,7 +193,7 @@ func NewRenderer() (*Renderer, error) {
 		defaultFontSize: defaultFontSize,
 		paddingTop:      12.0,
 		paddingBottom:   12.0,
-		tabBarWidth:     135.0,
+		tabBarWidth:     200.0,
 		currentFont:     fonts.DefaultFontName(),
 		glyphs:          make(map[rune]Glyph),
 		// atlasSize calculated dynamically in loadFontData based on glyph count
@@ -1974,9 +1976,39 @@ func nextPowerOf2(n int) int {
 	return n + 1
 }
 
-// renderTabBar renders the left tab bar as a vertical stack of boxes. It is only
-// shown when there is more than one tab (see SetTabBarVisible), so a single tab uses
-// the full window width.
+// tabBarGeom holds the shared geometry for the vertical tab bar so rendering and
+// hit-testing stay in sync.
+type tabBarGeom struct {
+	boxX, boxW float32
+	topPad     float32
+	boxH       float32
+	gap        float32
+	plusH      float32
+	scale      float32
+	cellH      float32
+}
+
+func (r *Renderer) tabBarGeom() tabBarGeom {
+	scale := r.baseFontSize / r.fontSize
+	cellH := r.cellHeight * scale
+	const sidePad = 10.0
+	g := tabBarGeom{
+		boxX:   sidePad,
+		boxW:   r.tabBarWidth - 2*sidePad,
+		topPad: 12,
+		boxH:   cellH + 14,
+		gap:    6,
+		scale:  scale,
+		cellH:  cellH,
+	}
+	g.plusH = g.boxH * 0.8
+	return g
+}
+
+// renderTabBar renders the left tab bar as a vertical stack of tab "chips": each shows
+// the working-directory label and a ⌘N shortcut badge, with a rounded pill highlight on
+// the active tab and a "+" button at the bottom to open a new tab. It is only shown when
+// there is more than one tab (see SetTabBarVisible), so a single tab uses full width.
 func (r *Renderer) renderTabBar(tm *tab.TabManager, width, height int, proj [16]float32) {
 	if !r.tabBarVisible {
 		return
@@ -1984,61 +2016,183 @@ func (r *Renderer) renderTabBar(tm *tab.TabManager, width, height int, proj [16]
 
 	barW := r.tabBarWidth
 
-	// Tab bar background + right separator.
+	// Tab bar background + a hairline right edge.
 	r.drawRect(0, 0, barW, float32(height), r.theme.TabBar, proj)
-	r.drawRect(barW-2, 0, 2, float32(height), r.theme.Foreground, proj)
+	r.drawRect(barW-1, 0, 1, float32(height), withAlpha(r.theme.Foreground, 0.12), proj)
 
-	// Render labels at base size regardless of zoom.
-	scale := r.baseFontSize / r.fontSize
-	cellH := r.cellHeight * scale
-
+	g := r.tabBarGeom()
 	tabs := tm.GetTabs()
 	activeIdx := tm.ActiveIndex()
-
-	// Box geometry.
-	const (
-		sidePad = 8.0
-		topPad  = 10.0
-		gap     = 6.0
-		border  = 2.0
-	)
-	boxX := float32(sidePad)
-	boxW := barW - 2*sidePad
-	boxH := cellH*1.4 + 8
+	isMac := runtime.GOOS == "darwin"
+	home, _ := os.UserHomeDir()
+	charW := r.cellWidth * g.scale
 
 	for i, t := range tabs {
-		boxY := float32(topPad) + float32(i)*(boxH+gap)
+		boxY := g.topPad + float32(i)*(g.boxH+g.gap)
 		active := i == activeIdx
+		baseline := boxY + g.boxH*0.5 + g.cellH*0.30
 
-		// Box fill: active uses the accent color, inactive a subtle raised panel.
-		fill := r.theme.TabBar
-		fill[0] = clampUnit(fill[0] + 0.06)
-		fill[1] = clampUnit(fill[1] + 0.06)
-		fill[2] = clampUnit(fill[2] + 0.06)
+		if active {
+			// Rounded pill highlight for the active tab.
+			r.drawRoundedRect(g.boxX, boxY, g.boxW, g.boxH, 9, lighten(r.theme.TabBar, 0.11), proj)
+			// Accent strip on the leading edge.
+			r.drawRoundedRect(g.boxX, boxY+3, 3, g.boxH-6, 1.5, r.theme.TabActive, proj)
+		} else if i > 0 {
+			// Hairline separator between inactive tabs.
+			r.drawRect(g.boxX+10, boxY-g.gap*0.5, g.boxW-20, 1, withAlpha(r.theme.Foreground, 0.10), proj)
+		}
+
+		// ⌘N badge, right-aligned — only tabs 1..9 have a Cmd/primary shortcut.
+		labelRight := g.boxX + g.boxW - 12
+		if t.ID() <= 9 {
+			badge := fmt.Sprintf("%d", t.ID())
+			if isMac {
+				badge = "⌘" + badge
+			}
+			badgeW := float32(len([]rune(badge))) * charW
+			badgeX := g.boxX + g.boxW - badgeW - 12
+			badgeClr := withAlpha(r.theme.Foreground, 0.45)
+			if active {
+				badgeClr = withAlpha(r.theme.TabActive, 0.9)
+			}
+			r.drawTextScaled(badgeX, baseline, badge, badgeClr, proj, g.scale)
+			labelRight = badgeX - 6
+		}
+
+		// Directory label, truncated so it never collides with the badge.
+		label := tabLabel(t, home)
 		textClr := r.theme.Foreground
-		if active {
-			fill = r.theme.TabActive
-			fill[3] = 0.22
-			textClr = r.theme.TabActive
+		if !active {
+			textClr = withAlpha(textClr, 0.6)
 		}
-		r.drawRect(boxX, boxY, boxW, boxH, fill, proj)
-
-		// Border (accent for the active tab, faint otherwise).
-		borderClr := r.theme.Foreground
-		borderClr[3] = 0.25
-		if active {
-			borderClr = r.theme.TabActive
-		}
-		r.drawRect(boxX, boxY, boxW, border, borderClr, proj)             // top
-		r.drawRect(boxX, boxY+boxH-border, boxW, border, borderClr, proj) // bottom
-		r.drawRect(boxX, boxY, border, boxH, borderClr, proj)             // left
-		r.drawRect(boxX+boxW-border, boxY, border, boxH, borderClr, proj) // right
-
-		// Label, vertically centered within the box.
-		label := fmt.Sprintf("%d", t.ID())
-		baseline := boxY + boxH*0.5 + cellH*0.32
-		r.drawTextScaled(boxX+10, baseline, label, textClr, proj, scale)
+		maxLabelW := labelRight - (g.boxX + 14)
+		label = truncateToWidth(label, maxLabelW, charW)
+		r.drawTextScaled(g.boxX+14, baseline, label, textClr, proj, g.scale)
 	}
+
+	// "+" new-tab button below the last tab.
+	plusY := g.topPad + float32(len(tabs))*(g.boxH+g.gap)
+	r.drawRoundedRect(g.boxX, plusY, g.boxW, g.plusH, 9, lighten(r.theme.TabBar, 0.05), proj)
+	plusBaseline := plusY + g.plusH*0.5 + g.cellH*0.30
+	r.drawTextScaled(g.boxX+g.boxW*0.5-charW*0.5, plusBaseline, "+", withAlpha(r.theme.Foreground, 0.55), proj, g.scale)
+}
+
+// HitTestTabBar maps a click in the tab bar to a tab index, or the "+" button. ok is
+// false when the bar is hidden or the point is outside it.
+func (r *Renderer) HitTestTabBar(tm *tab.TabManager, x, y float64) (index int, newTab bool, ok bool) {
+	if !r.tabBarVisible {
+		return 0, false, false
+	}
+	fx, fy := float32(x), float32(y)
+	if fx < 0 || fx > r.tabBarWidth {
+		return 0, false, false
+	}
+	g := r.tabBarGeom()
+	n := tm.TabCount()
+	for i := 0; i < n; i++ {
+		boxY := g.topPad + float32(i)*(g.boxH+g.gap)
+		if fx >= g.boxX && fx <= g.boxX+g.boxW && fy >= boxY && fy <= boxY+g.boxH {
+			return i, false, true
+		}
+	}
+	plusY := g.topPad + float32(n)*(g.boxH+g.gap)
+	if fx >= g.boxX && fx <= g.boxX+g.boxW && fy >= plusY && fy <= plusY+g.plusH {
+		return 0, true, true
+	}
+	return 0, false, false
+}
+
+// tabLabel returns a compact directory-based label for a tab (e.g. "~/D/RavenTerminal").
+func tabLabel(t *tab.Tab, home string) string {
+	dir := t.ActiveDir()
+	if dir == "" {
+		return fmt.Sprintf("Tab %d", t.ID())
+	}
+	return abbreviatePath(dir, home)
+}
+
+// abbreviatePath shortens a path for display: the home prefix becomes "~", and every
+// intermediate component is collapsed to its first character, keeping the last full
+// (e.g. "/Users/me/Development/RavenTerminal" -> "~/D/RavenTerminal").
+func abbreviatePath(p, home string) string {
+	if home != "" {
+		if p == home {
+			return "~"
+		}
+		if strings.HasPrefix(p, home+"/") {
+			p = "~" + p[len(home):]
+		}
+	}
+	parts := strings.Split(p, "/")
+	for i := range parts {
+		if i == 0 || i == len(parts)-1 {
+			continue
+		}
+		if len(parts[i]) > 1 {
+			parts[i] = parts[i][:1]
+		}
+	}
+	return strings.Join(parts, "/")
+}
+
+// truncateToWidth shortens s with an ellipsis so it fits within maxW pixels.
+func truncateToWidth(s string, maxW, charW float32) string {
+	if maxW <= 0 || charW <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	maxChars := int(maxW / charW)
+	if maxChars <= 0 {
+		return ""
+	}
+	if len(runes) <= maxChars {
+		return s
+	}
+	if maxChars == 1 {
+		return "…"
+	}
+	return string(runes[:maxChars-1]) + "…"
+}
+
+// drawRoundedRect draws a filled rectangle with rounded corners of the given radius,
+// reusing drawRect for the body and per-row strips for the rounded caps.
+func (r *Renderer) drawRoundedRect(x, y, w, h, radius float32, clr [4]float32, proj [16]float32) {
+	if radius <= 0 {
+		r.drawRect(x, y, w, h, clr, proj)
+		return
+	}
+	if radius > w/2 {
+		radius = w / 2
+	}
+	if radius > h/2 {
+		radius = h / 2
+	}
+	// Body between the rounded caps.
+	r.drawRect(x, y+radius, w, h-2*radius, clr, proj)
+	// Rounded top/bottom caps: 1px strips inset along a circular arc.
+	steps := int(radius)
+	for i := 0; i < steps; i++ {
+		dy := radius - float32(i) - 0.5
+		dx := radius - float32(math.Sqrt(float64(radius*radius-dy*dy)))
+		stripX := x + dx
+		stripW := w - 2*dx
+		r.drawRect(stripX, y+float32(i), stripW, 1, clr, proj)     // top cap
+		r.drawRect(stripX, y+h-float32(i)-1, stripW, 1, clr, proj) // bottom cap
+	}
+}
+
+// withAlpha returns a copy of a color with its alpha replaced.
+func withAlpha(c [4]float32, a float32) [4]float32 {
+	c[3] = a
+	return c
+}
+
+// lighten returns a copy of a color with its RGB channels raised by amt (clamped).
+func lighten(c [4]float32, amt float32) [4]float32 {
+	c[0] = clampUnit(c[0] + amt)
+	c[1] = clampUnit(c[1] + amt)
+	c[2] = clampUnit(c[2] + amt)
+	return c
 }
 
 // clampUnit clamps a color channel to the [0,1] range.
