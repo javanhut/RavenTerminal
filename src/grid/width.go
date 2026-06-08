@@ -3,6 +3,7 @@ package grid
 import (
 	"unicode"
 
+	"github.com/rivo/uniseg"
 	"golang.org/x/text/width"
 )
 
@@ -46,4 +47,15 @@ func StringWidth(s string) int {
 		w += RuneWidth(r)
 	}
 	return w
+}
+
+// ClusterWidth returns the display width (in cells) of a single grapheme
+// cluster, using Unicode segmentation so that ZWJ sequences, VS16 emoji
+// presentation, regional-indicator flags, and base+combining sequences are
+// measured correctly (e.g. "👨‍👩‍👧"=2, "1️⃣"=2, "é"(decomposed)=1).
+func ClusterWidth(cluster string) int {
+	if cluster == "" {
+		return 0
+	}
+	return uniseg.StringWidth(cluster)
 }

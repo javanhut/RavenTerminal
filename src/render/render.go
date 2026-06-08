@@ -9,7 +9,6 @@ import (
 	"github.com/javanhut/RavenTerminal/src/parser"
 	"github.com/javanhut/RavenTerminal/src/searchpanel"
 	"github.com/javanhut/RavenTerminal/src/tab"
-	"image"
 	"image/color"
 	"image/draw"
 	"math"
@@ -20,7 +19,6 @@ import (
 	"github.com/go-gl/gl/v4.1-core/gl"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/opentype"
-	"golang.org/x/image/math/fixed"
 )
 
 // Theme colors
@@ -110,10 +108,15 @@ type Renderer struct {
 	tabBarWidth     float32
 	currentFont     string
 
-	// Font data
-	glyphs    map[rune]Glyph
-	fontAtlas uint32
-	atlasSize int
+	// Font data. The atlas is dynamic: glyphs are rasterized on demand into a
+	// growable RED texture (tile-per-glyph), replacing the old static bake.
+	glyphs        map[rune]Glyph
+	fontAtlas     uint32
+	atlasSize     int
+	atlasPix      []byte    // CPU-side mirror of the RED atlas (for grow/repack)
+	atlasNextSlot int       // next free tile slot
+	atlasAscent   int       // baseline offset within a tile (font ascent)
+	face          font.Face // current rasterization face (kept open)
 
 	// OpenGL resources
 	quadVAO     uint32
@@ -129,6 +132,23 @@ type Renderer struct {
 	texColorLoc int32
 	texProjLoc  int32
 	texLoc      int32
+
+	// Batched-rendering resources (per-vertex color). Used by renderGridAt to
+	// draw all cell backgrounds in one call and all glyphs in one call.
+	rectBatchProgram  uint32
+	rectBatchVAO      uint32
+	rectBatchVBO      uint32
+	rectBatchProjLoc  int32
+	rectBatchCap      int // current VBO capacity in floats
+	glyphBatchProgram uint32
+	glyphBatchVAO     uint32
+	glyphBatchVBO     uint32
+	glyphBatchProjLoc int32
+	glyphBatchTexLoc  int32
+	glyphBatchCap     int
+	// Reusable per-frame batch buffers (avoid re-allocation each frame).
+	gridRects  rectBatch
+	gridGlyphs glyphBatch
 
 	// Help panel scroll state
 	helpScrollOffset int
@@ -222,14 +242,15 @@ func (r *Renderer) loadFont() error {
 	return r.loadFontData(fonts.DefaultFont())
 }
 
-// loadFontData loads font from byte data and creates a glyph atlas
+// loadFontData parses a font, builds the rasterization face, and initializes an
+// empty dynamic glyph atlas. Glyphs are rasterized lazily by ensureGlyph; this
+// replaces the old startup bake of ~4000 fixed-range glyphs.
 func (r *Renderer) loadFontData(fontData []byte) error {
 	parsedFont, err := opentype.Parse(fontData)
 	if err != nil {
 		return fmt.Errorf("failed to parse font: %w", err)
 	}
 
-	// Create font face with desired size
 	face, err := opentype.NewFace(parsedFont, &opentype.FaceOptions{
 		Size:    float64(r.fontSize),
 		DPI:     96,
@@ -238,138 +259,26 @@ func (r *Renderer) loadFontData(fontData []byte) error {
 	if err != nil {
 		return fmt.Errorf("failed to create font face: %w", err)
 	}
-	defer face.Close()
 
-	// Get font metrics
+	// Close any previously-open face before replacing it.
+	if r.face != nil {
+		r.face.Close()
+	}
+	r.face = face
+
 	metrics := face.Metrics()
 	r.cellHeight = float32((metrics.Ascent + metrics.Descent).Ceil())
-
-	// Calculate cell width from 'M' character
 	advance, _ := face.GlyphAdvance('M')
 	r.cellWidth = float32(advance.Ceil())
+	r.atlasAscent = metrics.Ascent.Ceil()
 
-	// Character ranges to render (ASCII + Extended + Nerd Font icons)
-	// Defined BEFORE atlas creation so we can calculate required size
-	charRanges := []struct{ start, end rune }{
-		{32, 126},        // Printable ASCII
-		{160, 255},       // Extended Latin-1
-		{0x2000, 0x206F}, // General Punctuation (includes various spaces, dashes, dots)
-		{0x2100, 0x214F}, // Letterlike Symbols
-		{0x2190, 0x21FF}, // Arrows
-		{0x2200, 0x22FF}, // Mathematical Operators
-		{0x2300, 0x23FF}, // Miscellaneous Technical
-		{0x2500, 0x257F}, // Box Drawing
-		{0x2580, 0x259F}, // Block Elements
-		{0x25A0, 0x25FF}, // Geometric Shapes
-		{0x2600, 0x26FF}, // Miscellaneous Symbols
-		{0x2700, 0x27BF}, // Dingbats
-		{0x27C0, 0x27EF}, // Miscellaneous Mathematical Symbols-A
-		{0x27F0, 0x27FF}, // Supplemental Arrows-A
-		{0x2900, 0x297F}, // Supplemental Arrows-B
-		{0x2B00, 0x2BFF}, // Miscellaneous Symbols and Arrows
-		{0xE0A0, 0xE0D4}, // Powerline symbols
-		{0xE200, 0xE2A9}, // Pomicons
-		{0xE5FA, 0xE6B5}, // Seti-UI + Custom
-		{0xE700, 0xE7C5}, // Devicons
-		{0xEA60, 0xEC1E}, // Codicons
-		{0xED00, 0xEFC1}, // Font Logos
-		{0xF000, 0xF2E0}, // Font Awesome
-		{0xF300, 0xF372}, // Font Awesome Extension
-		{0xF400, 0xF533}, // Octicons
-		{0xF500, 0xFD46}, // Material Design Icons
+	// Reset the glyph cache and (re)create an empty atlas texture.
+	r.glyphs = make(map[rune]Glyph)
+	if r.fontAtlas != 0 {
+		gl.DeleteTextures(1, &r.fontAtlas)
+		r.fontAtlas = 0
 	}
-
-	// Calculate required atlas size based on glyph count
-	charHeight := int(r.cellHeight)
-	charWidth := int(r.cellWidth)
-
-	totalGlyphs := 0
-	for _, cr := range charRanges {
-		totalGlyphs += int(cr.end - cr.start + 1)
-	}
-
-	// Calculate atlas dimensions to fit all glyphs
-	glyphsPerRow := 64 // reasonable row width for GPU
-	rowsNeeded := (totalGlyphs + glyphsPerRow - 1) / glyphsPerRow
-
-	atlasWidth := glyphsPerRow * charWidth
-	atlasHeight := rowsNeeded * charHeight
-
-	// Round to next power of 2 for GPU efficiency
-	r.atlasSize = nextPowerOf2(max(atlasWidth, atlasHeight))
-
-	// Create atlas image (RGBA for anti-aliasing)
-	atlas := image.NewRGBA(image.Rect(0, 0, r.atlasSize, r.atlasSize))
-	// Fill with transparent
-	draw.Draw(atlas, atlas.Bounds(), image.Transparent, image.Point{}, draw.Src)
-
-	// Drawer for rendering text
-	drawer := &font.Drawer{
-		Dst:  atlas,
-		Src:  image.White,
-		Face: face,
-	}
-
-	x, y := 0, metrics.Ascent.Ceil()
-
-	for _, cr := range charRanges {
-		for c := cr.start; c <= cr.end; c++ {
-			// Check if we need to wrap to next row
-			if x+charWidth > r.atlasSize {
-				x = 0
-				y += charHeight
-			}
-			if y+charHeight > r.atlasSize {
-				// With dynamic sizing this shouldn't happen, but warn if it does
-				fmt.Printf("Warning: Atlas overflow at glyph U+%04X, atlas=%d\n", c, r.atlasSize)
-				continue
-			}
-
-			// Check if glyph exists in font
-			_, hasGlyph := face.GlyphAdvance(c)
-			if !hasGlyph {
-				continue
-			}
-
-			// Render glyph
-			drawer.Dot = fixed.P(x, y)
-			drawer.DrawString(string(c))
-
-			// Store glyph info (normalized coordinates)
-			r.glyphs[c] = Glyph{
-				X:           float32(x) / float32(r.atlasSize),
-				Y:           float32(y-metrics.Ascent.Ceil()) / float32(r.atlasSize),
-				Width:       float32(charWidth) / float32(r.atlasSize),
-				Height:      float32(charHeight) / float32(r.atlasSize),
-				PixelWidth:  charWidth,
-				PixelHeight: charHeight,
-			}
-
-			x += charWidth
-		}
-	}
-
-	// Convert RGBA to single-channel alpha for OpenGL
-	alphaAtlas := make([]byte, r.atlasSize*r.atlasSize)
-	for i := 0; i < r.atlasSize*r.atlasSize; i++ {
-		// Use the alpha channel for anti-aliased edges
-		alphaAtlas[i] = atlas.Pix[i*4+3]
-	}
-
-	// Create OpenGL texture
-	gl.GenTextures(1, &r.fontAtlas)
-	gl.BindTexture(gl.TEXTURE_2D, r.fontAtlas)
-	gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RED, int32(r.atlasSize), int32(r.atlasSize), 0,
-		gl.RED, gl.UNSIGNED_BYTE, gl.Ptr(alphaAtlas))
-
-	// Use LINEAR filtering for smooth scaling (anti-aliasing)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
-
-	gl.BindTexture(gl.TEXTURE_2D, 0)
-
+	r.initAtlas(atlasInitialSize)
 	return nil
 }
 
@@ -457,6 +366,10 @@ func (r *Renderer) initGL() error {
 	gl.VertexAttribPointerWithOffset(0, 4, gl.FLOAT, false, 4*4, 0)
 	gl.BindBuffer(gl.ARRAY_BUFFER, 0)
 	gl.BindVertexArray(0)
+
+	if err := r.initBatches(); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -1772,7 +1685,10 @@ func (r *Renderer) renderPanes(t *tab.Tab, width, height int, proj [16]float32, 
 		if layout.Pane != nil && layout.Pane.Terminal != nil {
 			cursorStyle = layout.Pane.Terminal.CursorStyle()
 		}
-		r.renderGridAt(layout.Pane.Terminal.GetGrid(), offsetX, offsetY, paneWidth, paneHeight, proj, showCursor, cursorStyle)
+		// One locked snapshot per pane per frame; the grid pointer is passed
+		// only for hover-URL identity matching.
+		snap := layout.Pane.Terminal.Snapshot()
+		r.renderGridAt(snap, layout.Pane.Terminal.GetGrid(), offsetX, offsetY, paneWidth, paneHeight, proj, showCursor, cursorStyle)
 	}
 }
 
@@ -2210,72 +2126,106 @@ func clampUnit(v float32) float32 {
 	return v
 }
 
-// renderGrid renders the terminal grid (backward compatible wrapper)
-func (r *Renderer) renderGrid(g *grid.Grid, width, height int, proj [16]float32, cursorVisible bool, cursorStyle parser.CursorStyle) {
-	tabBarW := r.layoutTabBarWidth()
-	offsetX := tabBarW + 5
-	offsetY := r.paddingTop
-	availableWidth := float32(width) - tabBarW - 10
-	availableHeight := float32(height) - r.paddingTop - r.paddingBottom
-	r.renderGridAt(g, offsetX, offsetY, availableWidth, availableHeight, proj, cursorVisible, cursorStyle)
-}
+// renderGridAt draws a terminal grid from a pre-resolved Snapshot (a single
+// locked copy of the visible region), so the per-cell loop is lock-free. The
+// grid pointer g is used only for hover-URL identity matching.
+func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offsetY, paneWidth, paneHeight float32, proj [16]float32, cursorVisible bool, cursorStyle parser.CursorStyle) {
+	cols := snap.Cols
+	rows := snap.Rows
 
-// renderGridAt renders the terminal grid at a specific position
-func (r *Renderer) renderGridAt(g *grid.Grid, offsetX, offsetY, paneWidth, paneHeight float32, proj [16]float32, cursorVisible bool, cursorStyle parser.CursorStyle) {
-	cols := g.Cols
-	rows := g.Rows
+	// Warm the glyph cache up front. ensureGlyph may grow and re-pack the atlas
+	// (changing every glyph's UVs); doing it before we record UVs into the batch
+	// guarantees the recorded coordinates stay valid for this frame.
+	for i := range snap.Cells {
+		c := snap.Cells[i]
+		if c.Char != ' ' && c.Char != 0 && c.Width != grid.CellWidthContinuation && !isBlockElement(c.Char) {
+			r.lookupGlyph(c.Char)
+		}
+	}
 
-	// Render cells
+	// Pass 1: accumulate all backgrounds/selection and all glyphs into two
+	// batches, then flush each in a single draw call.
+	r.gridRects.reset()
+	r.gridGlyphs.reset()
 	for row := 0; row < rows; row++ {
 		for col := 0; col < cols; col++ {
-			cell := g.DisplayCell(col, row)
+			cell := snap.Cells[row*cols+col]
 			x := offsetX + float32(col)*r.cellWidth
 			y := offsetY + float32(row)*r.cellHeight
-
-			// Skip if outside pane bounds
 			if x+r.cellWidth > offsetX+paneWidth || y+r.cellHeight > offsetY+paneHeight {
 				continue
 			}
 
-			// Draw background if not default
 			bgColor := r.colorToRGBA(cell.Bg, true)
 			if cell.Flags&grid.FlagInverse != 0 {
-				bgColor, _ = r.colorToRGBA(cell.Fg, false), r.colorToRGBA(cell.Bg, true)
+				bgColor = r.colorToRGBA(cell.Fg, false)
 			}
 			if bgColor != r.theme.Background {
-				// +0.5 horizontal overlap eliminates sub-pixel gaps between adjacent cells
-				r.drawRect(x, y, r.cellWidth+0.5, r.cellHeight, bgColor, proj)
+				r.gridRects.addRect(x, y, r.cellWidth+0.5, r.cellHeight, bgColor)
+			}
+			if snap.Selected(col, row) {
+				r.gridRects.addRect(x, y, r.cellWidth+0.5, r.cellHeight, r.theme.Selection)
 			}
 
-			// Draw selection highlight
-			if g.IsSelected(col, row) {
-				r.drawRect(x, y, r.cellWidth+0.5, r.cellHeight, r.theme.Selection, proj)
-			}
-
-			// Skip character and underline rendering for continuation cells (second half of wide char)
 			if cell.Width == grid.CellWidthContinuation {
 				continue
 			}
 
-			// Draw character
 			fgColor := r.colorToRGBA(cell.Fg, false)
 			if cell.Flags&grid.FlagInverse != 0 {
 				fgColor = r.colorToRGBA(cell.Bg, true)
 			}
-			// Apply dim effect (reduce alpha to 50%)
 			if cell.Flags&grid.FlagDim != 0 {
 				fgColor[3] = fgColor[3] / 2
 			}
 			hidden := cell.Flags&grid.FlagHidden != 0
-			if !hidden && cell.Char != ' ' && cell.Char != 0 {
-				if !r.drawBlockElement(x, y, cell.Char, fgColor, proj) {
-					bold := r.fauxBold && cell.Flags&grid.FlagBold != 0
-					italic := r.fauxItalic && cell.Flags&grid.FlagItalic != 0
-					r.drawCharStyled(x, y+r.cellHeight, cell.Char, fgColor, proj, bold, italic)
+			// Block-element chars and the cursor cell are drawn immediately in
+			// pass 2; everything else is a batched glyph.
+			if !hidden && cell.Char != ' ' && cell.Char != 0 && !isBlockElement(cell.Char) {
+				if gl, ok := r.lookupGlyph(cell.Char); ok {
+					var shear float32
+					if r.fauxItalic && cell.Flags&grid.FlagItalic != 0 {
+						shear = float32(gl.PixelHeight) * 0.2
+					}
+					gy := y + r.cellHeight
+					r.gridGlyphs.addGlyph(x, gy, float32(gl.PixelWidth), float32(gl.PixelHeight),
+						gl.X, gl.Y, gl.Width, gl.Height, fgColor, shear)
+					if r.fauxBold && cell.Flags&grid.FlagBold != 0 {
+						r.gridGlyphs.addGlyph(x+1, gy, float32(gl.PixelWidth), float32(gl.PixelHeight),
+							gl.X, gl.Y, gl.Width, gl.Height, fgColor, shear)
+					}
 				}
 			}
+		}
+	}
+	r.flushRects(&r.gridRects, proj)
+	r.flushGlyphs(&r.gridGlyphs, proj)
 
-			// Draw underline for ANSI styling or hovered URL
+	// Pass 2: immediate draws for the minority cases — block elements,
+	// underlines, strikethrough (drawn over the batched glyphs).
+	for row := 0; row < rows; row++ {
+		for col := 0; col < cols; col++ {
+			cell := snap.Cells[row*cols+col]
+			if cell.Width == grid.CellWidthContinuation {
+				continue
+			}
+			x := offsetX + float32(col)*r.cellWidth
+			y := offsetY + float32(row)*r.cellHeight
+			if x+r.cellWidth > offsetX+paneWidth || y+r.cellHeight > offsetY+paneHeight {
+				continue
+			}
+			hidden := cell.Flags&grid.FlagHidden != 0
+			fgColor := r.colorToRGBA(cell.Fg, false)
+			if cell.Flags&grid.FlagInverse != 0 {
+				fgColor = r.colorToRGBA(cell.Bg, true)
+			}
+			if cell.Flags&grid.FlagDim != 0 {
+				fgColor[3] = fgColor[3] / 2
+			}
+			if !hidden && isBlockElement(cell.Char) {
+				r.drawBlockElement(x, y, cell.Char, fgColor, proj)
+			}
+
 			drawUnderline := cell.Flags&grid.FlagUnderline != 0
 			hovered := r.hoverActive && r.hoverGrid == g && row == r.hoverRow && col >= r.hoverStartCol && col <= r.hoverEndCol
 			if hovered {
@@ -2283,9 +2233,7 @@ func (r *Renderer) renderGridAt(g *grid.Grid, offsetX, offsetY, paneWidth, paneH
 			}
 			if drawUnderline && !hidden {
 				ulColor := fgColor
-				style := uint8(1) // solid
-				// Honor the cell's underline color/style for real SGR underlines only;
-				// the synthetic hover-URL underline stays a flat foreground line.
+				style := uint8(1)
 				if cell.Flags&grid.FlagUnderline != 0 && !hovered {
 					if cell.UnderlineColor.Type != grid.ColorDefault {
 						ulColor = r.colorToRGBA(cell.UnderlineColor, false)
@@ -2294,27 +2242,26 @@ func (r *Renderer) renderGridAt(g *grid.Grid, offsetX, offsetY, paneWidth, paneH
 						style = cell.UnderlineStyle
 					}
 					if !r.undercurl {
-						style = 1 // styled underlines disabled -> solid
+						style = 1
 					}
 				}
 				r.drawUnderlineStyled(x, y, ulColor, proj, style)
 			}
 			if cell.Flags&grid.FlagStrikethrough != 0 && !hidden {
-				strikeY := y + r.cellHeight/2
-				r.drawRect(x, strikeY, r.cellWidth, 1, fgColor, proj)
+				r.drawRect(x, y+r.cellHeight/2, r.cellWidth, 1, fgColor, proj)
 			}
 		}
 	}
 
 	// Draw cursor
-	if cursorVisible && g.GetScrollOffset() == 0 {
-		cursorCol, cursorRow := g.GetCursor()
+	if cursorVisible && snap.ScrollOffset == 0 {
+		cursorCol, cursorRow := snap.CursorCol, snap.CursorRow
 		cursorX := offsetX + float32(cursorCol)*r.cellWidth
 		cursorY := offsetY + float32(cursorRow)*r.cellHeight
 
 		// Only draw cursor if within pane bounds
 		if cursorX+r.cellWidth <= offsetX+paneWidth && cursorY+r.cellHeight <= offsetY+paneHeight {
-			cell := g.DisplayCell(cursorCol, cursorRow)
+			cell := snap.At(cursorCol, cursorRow)
 			switch cursorStyle {
 			case parser.CursorStyleUnderline:
 				h := r.cellHeight / 6
@@ -2592,21 +2539,21 @@ func (r *Renderer) drawBlockElement(x, y float32, char rune, clr [4]float32, pro
 // lookupGlyph resolves a rune to a glyph, applying box-drawing and unicode-to-ASCII
 // fallbacks, then '?' as a last resort.
 func (r *Renderer) lookupGlyph(char rune) (Glyph, bool) {
-	glyph, ok := r.glyphs[char]
+	glyph, ok := r.ensureGlyph(char)
 	if !ok {
 		// Try box-drawing fallbacks first
 		if fallback, hasFallback := boxDrawingFallbacks[char]; hasFallback {
-			glyph, ok = r.glyphs[fallback]
+			glyph, ok = r.ensureGlyph(fallback)
 		}
 		// Try unicode-to-ASCII fallbacks
 		if !ok {
 			if fallback, hasFallback := unicodeFallbacks[char]; hasFallback {
-				glyph, ok = r.glyphs[fallback]
+				glyph, ok = r.ensureGlyph(fallback)
 			}
 		}
 		// If still not found, fallback to '?'
 		if !ok {
-			glyph, ok = r.glyphs['?']
+			glyph, ok = r.ensureGlyph('?')
 		}
 	}
 	return glyph, ok
@@ -2692,25 +2639,9 @@ func (r *Renderer) drawTextScaled(x, y float32, text string, clr [4]float32, pro
 
 // drawCharScaled draws a character at a specific scale
 func (r *Renderer) drawCharScaled(x, y float32, char rune, clr [4]float32, proj [16]float32, scale float32) {
-	glyph, ok := r.glyphs[char]
+	glyph, ok := r.lookupGlyph(char)
 	if !ok {
-		// Try box-drawing fallbacks first
-		if fallback, hasFallback := boxDrawingFallbacks[char]; hasFallback {
-			glyph, ok = r.glyphs[fallback]
-		}
-		// Try unicode-to-ASCII fallbacks
-		if !ok {
-			if fallback, hasFallback := unicodeFallbacks[char]; hasFallback {
-				glyph, ok = r.glyphs[fallback]
-			}
-		}
-		// If still not found, fallback to '?'
-		if !ok {
-			glyph, ok = r.glyphs['?']
-			if !ok {
-				return
-			}
-		}
+		return
 	}
 
 	// Calculate screen coordinates with scale
@@ -2840,15 +2771,7 @@ func (r *Renderer) ChangeFont(name string) error {
 		return fmt.Errorf("font '%s' not found", name)
 	}
 
-	// Delete old texture
-	if r.fontAtlas != 0 {
-		gl.DeleteTextures(1, &r.fontAtlas)
-	}
-
-	// Clear old glyphs
-	r.glyphs = make(map[rune]Glyph)
-
-	// Load new font
+	// loadFontData replaces the face, deletes the old atlas, and resets the cache.
 	if err := r.loadFontData(fontData); err != nil {
 		return err
 	}
@@ -2904,15 +2827,7 @@ func (r *Renderer) setFontSize(size float32) error {
 
 	r.fontSize = size
 
-	// Delete old texture
-	if r.fontAtlas != 0 {
-		gl.DeleteTextures(1, &r.fontAtlas)
-	}
-
-	// Clear old glyphs
-	r.glyphs = make(map[rune]Glyph)
-
-	// Reload font with new size
+	// Reload at the new size (loadFontData rebuilds face + atlas + cache).
 	fontData, ok := fonts.GetFont(r.currentFont)
 	if !ok {
 		fontData = fonts.DefaultFont()

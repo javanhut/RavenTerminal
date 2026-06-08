@@ -123,6 +123,15 @@ type Terminal struct {
 	charsetPending charsetTarget
 	// Origin mode (DECOM ?6)
 	originMode bool
+	// Insert/replace mode (IRM, mode 4) and line-feed/new-line mode (LNM, mode 20)
+	insertMode bool
+	lnmMode    bool
+	// Dynamic colors: OSC 10/11/12 foreground/background/cursor and OSC 4 palette
+	// overrides. Zero value (ColorDefault) means "not overridden".
+	fgColor      grid.Color
+	bgColor      grid.Color
+	cursorColor  grid.Color
+	paletteOverride map[int]grid.Color
 	// Cursor style (DECSCUSR)
 	cursorStyle CursorStyle
 	// Bracketed paste mode (?2004)
@@ -150,6 +159,8 @@ type Terminal struct {
 	// OSC 52 clipboard access (nil-guarded, wired by the host)
 	clipboardWriter func(string)
 	clipboardReader func() string
+	// Reusable render snapshot buffer (double-buffered across frames).
+	snapPrev *grid.Snapshot
 }
 
 // NewTerminal creates a new terminal parser
@@ -203,7 +214,10 @@ func (t *Terminal) processByte(b byte) {
 		t.setCharset(b)
 		t.state = StateGround
 	case StateHash:
-		// DEC special sequences like ESC # 8 (DECALN)
+		// DEC special sequences. ESC # 8 is DECALN (fill screen with 'E').
+		if b == '8' {
+			t.Grid.FillScreen('E')
+		}
 		t.state = StateGround
 	}
 }
@@ -218,7 +232,7 @@ func (t *Terminal) processGround(b byte) {
 			if t.utf8Remaining == 0 {
 				// Complete UTF-8 sequence - decode and write
 				r := t.mapCharsetRune(decodeUTF8(t.utf8Buf))
-				t.Grid.WriteChar(r, t.currentFg, t.currentBg, t.currentFlags, t.currentLinkID, t.currentUnderlineStyle, t.currentUnderlineColor)
+				t.printRune(r)
 				t.utf8Buf = nil
 			}
 		} else {
@@ -233,15 +247,9 @@ func (t *Terminal) processGround(b byte) {
 	switch b {
 	case 0x1b: // ESC
 		t.state = StateEscape
-	case 0x9b: // CSI (8-bit C1)
-		t.state = StateCSI
-		t.csiParams = ""
-	case 0x9d: // OSC (8-bit C1)
-		t.state = StateOSC
-		t.oscParams = ""
-	case 0x90: // DCS (8-bit C1)
-		t.state = StateDCS
-		t.dcsParams = ""
+	// NOTE: In a UTF-8 terminal, bytes 0x80-0x9F are UTF-8 continuation bytes,
+	// NOT 8-bit C1 controls. We therefore do NOT treat 0x9b/0x9d/0x90/0x9c as
+	// CSI/OSC/DCS/ST here; C1 controls only arrive via their ESC-prefixed forms.
 	case 0x07: // BEL
 		// Bell - ignore
 	case 0x08: // BS
@@ -253,17 +261,18 @@ func (t *Terminal) processGround(b byte) {
 	case 0x0f: // SI (Shift In) - select G0
 		t.activeCharset = 0
 	case 0x0a, 0x0b, 0x0c: // LF, VT, FF
+		if t.lnmMode { // LNM: LF also performs CR
+			t.Grid.CarriageReturn()
+		}
 		t.Grid.Newline()
 		// Scroll position preserved - reset happens on user input instead
 	case 0x0d: // CR
 		t.Grid.CarriageReturn()
-	case 0x9c: // ST (String Terminator) - ignore in ground
-		// No-op
 	default:
 		if b >= 0x20 && b < 0x7f {
 			// ASCII printable character
 			r := t.mapCharsetRune(rune(b))
-			t.Grid.WriteChar(r, t.currentFg, t.currentBg, t.currentFlags, t.currentLinkID, t.currentUnderlineStyle, t.currentUnderlineColor)
+			t.printRune(r)
 		} else if b >= 0xC0 && b < 0xE0 {
 			// Start of 2-byte UTF-8 sequence
 			t.utf8Buf = []byte{b}
@@ -281,30 +290,59 @@ func (t *Terminal) processGround(b byte) {
 	}
 }
 
+// printRune writes a printable rune at the cursor, honoring insert mode (IRM):
+// when insert mode is active, existing cells shift right to make room.
+func (t *Terminal) printRune(r rune) {
+	if t.insertMode {
+		if w := grid.RuneWidth(r); w > 0 {
+			t.Grid.InsertChars(w)
+		}
+	}
+	t.Grid.WriteChar(r, t.currentFg, t.currentBg, t.currentFlags, t.currentLinkID, t.currentUnderlineStyle, t.currentUnderlineColor)
+}
+
 // decodeUTF8 decodes a UTF-8 byte sequence to a rune
 func decodeUTF8(buf []byte) rune {
 	if len(buf) == 0 {
 		return 0xFFFD // Replacement character
 	}
 
+	var r rune
 	switch len(buf) {
 	case 1:
 		return rune(buf[0])
 	case 2:
-		if buf[0]&0xE0 == 0xC0 {
-			return rune(buf[0]&0x1F)<<6 | rune(buf[1]&0x3F)
+		if buf[0]&0xE0 != 0xC0 {
+			return 0xFFFD
+		}
+		r = rune(buf[0]&0x1F)<<6 | rune(buf[1]&0x3F)
+		if r < 0x80 { // overlong
+			return 0xFFFD
 		}
 	case 3:
-		if buf[0]&0xF0 == 0xE0 {
-			return rune(buf[0]&0x0F)<<12 | rune(buf[1]&0x3F)<<6 | rune(buf[2]&0x3F)
+		if buf[0]&0xF0 != 0xE0 {
+			return 0xFFFD
+		}
+		r = rune(buf[0]&0x0F)<<12 | rune(buf[1]&0x3F)<<6 | rune(buf[2]&0x3F)
+		if r < 0x800 { // overlong
+			return 0xFFFD
 		}
 	case 4:
-		if buf[0]&0xF8 == 0xF0 {
-			return rune(buf[0]&0x07)<<18 | rune(buf[1]&0x3F)<<12 | rune(buf[2]&0x3F)<<6 | rune(buf[3]&0x3F)
+		if buf[0]&0xF8 != 0xF0 {
+			return 0xFFFD
 		}
+		r = rune(buf[0]&0x07)<<18 | rune(buf[1]&0x3F)<<12 | rune(buf[2]&0x3F)<<6 | rune(buf[3]&0x3F)
+		if r < 0x10000 { // overlong
+			return 0xFFFD
+		}
+	default:
+		return 0xFFFD
 	}
-
-	return 0xFFFD // Replacement character for invalid sequences
+	// Reject surrogate halves and out-of-range code points.
+	if r > 0x10FFFF || (r >= 0xD800 && r <= 0xDFFF) {
+		return 0xFFFD
+	}
+	return r
 }
 
 // setCursorPos applies origin mode if enabled, then clamps to bounds.
@@ -459,6 +497,9 @@ func (t *Terminal) processEscape(b byte) {
 		t.state = StateGround
 	case '#': // DEC line drawing - need to consume next byte
 		t.state = StateHash
+	case 'H': // HTS - set tab stop at cursor
+		t.Grid.SetTabStop()
+		t.state = StateGround
 	default:
 		t.state = StateGround
 	}
@@ -588,6 +629,8 @@ func (t *Terminal) executeCSI(final byte) {
 		t.handleDSR(params)
 	case 'c': // DA - Device attributes
 		t.handleDA(params)
+	case 'g': // TBC - Tab clear (0=at cursor, 3=all)
+		t.Grid.ClearTabStop(t.getParam(params, 0, 0))
 	case 't': // Window manipulation (ignore)
 	case 'q': // DECSCUSR - Set cursor style (ignore for now)
 		t.setCursorStyle(params)
@@ -714,6 +757,16 @@ func (t *Terminal) setMode(params []int, set bool) {
 	private := strings.HasPrefix(t.csiParams, "?")
 
 	for _, p := range params {
+		if !private {
+			// ANSI (non-private) modes.
+			switch p {
+			case 4: // IRM - Insert/Replace mode
+				t.insertMode = set
+			case 20: // LNM - Line Feed/New Line mode
+				t.lnmMode = set
+			}
+			continue
+		}
 		if private {
 			switch p {
 			case 1: // DECCKM - Application cursor keys
@@ -798,7 +851,8 @@ func (t *Terminal) enterAlternateScreen() {
 		t.savedMainMouseSGRMode = t.mouseSGRMode
 
 		t.savedMainGrid = t.Grid
-		t.Grid = grid.NewGrid(t.Grid.Cols, t.Grid.Rows)
+		// The alternate screen has no scrollback (standard VT behavior).
+		t.Grid = grid.NewAltGrid(t.Grid.Cols, t.Grid.Rows)
 		t.alternateScreen = true
 
 		// Clear the alternate screen (standard behavior)
@@ -965,9 +1019,14 @@ func (t *Terminal) handleOSC(params string) {
 		t.iconName = value
 	case "2": // Set window title
 		t.windowTitle = value
-	case "4": // Query/set color palette
-		// We don't support dynamic palette changes
-		// Just ignore - no response needed for set operations
+	case "4": // Set/query a palette entry: 4;index;spec (or index;?)
+		t.handleOSC4(value)
+	case "10": // Set/query default foreground
+		t.handleColorOSC("10", value, &t.fgColor)
+	case "11": // Set/query default background
+		t.handleColorOSC("11", value, &t.bgColor)
+	case "12": // Set/query cursor color
+		t.handleColorOSC("12", value, &t.cursorColor)
 	case "7": // Working directory
 		path := parseOSC7Path(value)
 		if path != "" {
@@ -1013,6 +1072,70 @@ func (t *Terminal) handleOSC52(value string) {
 		return // ignore malformed data silently
 	}
 	t.clipboardWriter(string(decoded))
+}
+
+// handleColorOSC implements OSC 10/11/12 dynamic color set and query. A value
+// of "?" queries the current color and replies with the X11 rgb form.
+func (t *Terminal) handleColorOSC(code, value string, target *grid.Color) {
+	if value == "?" {
+		if t.responseWriter == nil || target.Type != grid.ColorRGB {
+			return
+		}
+		t.responseWriter([]byte("\x1b]" + code + ";" + formatXColor(*target) + "\x1b\\"))
+		return
+	}
+	if c, ok := parseXColor(value); ok {
+		*target = c
+	}
+}
+
+// handleOSC4 implements OSC 4 palette set/query: "index;spec" (set) or
+// "index;?" (query). Only a single index;value pair is handled per call.
+func (t *Terminal) handleOSC4(value string) {
+	parts := strings.SplitN(value, ";", 2)
+	if len(parts) != 2 {
+		return
+	}
+	idx, err := strconv.Atoi(parts[0])
+	if err != nil || idx < 0 || idx > 255 {
+		return
+	}
+	spec := parts[1]
+	if spec == "?" {
+		if t.responseWriter == nil {
+			return
+		}
+		if t.paletteOverride != nil {
+			if c, ok := t.paletteOverride[idx]; ok && c.Type == grid.ColorRGB {
+				t.responseWriter([]byte(fmt.Sprintf("\x1b]4;%d;%s\x1b\\", idx, formatXColor(c))))
+			}
+		}
+		return
+	}
+	if c, ok := parseXColor(spec); ok {
+		if t.paletteOverride == nil {
+			t.paletteOverride = make(map[int]grid.Color)
+		}
+		t.paletteOverride[idx] = c
+	}
+}
+
+// ForegroundColor / BackgroundColor / CursorColor expose any OSC-set colors
+// (Type == ColorRGB when set; ColorDefault otherwise). PaletteOverride returns
+// any OSC 4 palette entry overrides. The renderer consults these.
+func (t *Terminal) ForegroundColor() grid.Color { t.mu.Lock(); defer t.mu.Unlock(); return t.fgColor }
+func (t *Terminal) BackgroundColor() grid.Color { t.mu.Lock(); defer t.mu.Unlock(); return t.bgColor }
+func (t *Terminal) CursorColor() grid.Color     { t.mu.Lock(); defer t.mu.Unlock(); return t.cursorColor }
+
+// PaletteOverride returns the OSC 4 color override for an index, if any.
+func (t *Terminal) PaletteOverride(idx int) (grid.Color, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.paletteOverride == nil {
+		return grid.Color{}, false
+	}
+	c, ok := t.paletteOverride[idx]
+	return c, ok
 }
 
 func parseOSC7Path(value string) string {
@@ -1237,6 +1360,8 @@ func (t *Terminal) reset() {
 	t.activeCharset = 0
 	t.charsetPending = charsetTargetNone
 	t.originMode = false
+	t.insertMode = false
+	t.lnmMode = false
 	t.cursorStyle = CursorStyleBlock
 	t.currentLinkID = 0
 	t.currentUnderlineStyle = 0
@@ -1289,6 +1414,19 @@ func (t *Terminal) GetGrid() *grid.Grid {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.Grid
+}
+
+// Snapshot produces a fully-resolved copy of the visible grid for the renderer,
+// taken under the terminal lock so the active/alternate grid pointer cannot
+// swap mid-copy. The renderer consumes the returned value lock-free. The buffer
+// is reused across frames to avoid per-frame allocation.
+func (t *Terminal) Snapshot() *grid.Snapshot {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	s := t.Grid.Snapshot(t.snapPrev)
+	s.CursorVisible = t.cursorVisible
+	t.snapPrev = s
+	return s
 }
 
 func (t *Terminal) handleDSR(params []int) {
