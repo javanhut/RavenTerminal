@@ -78,5 +78,6 @@ func (g *Grid) pushHistory(r *Row) {
 		g.releaseRow(g.history[0])
 		g.history[0] = nil
 		g.history = g.history[1:]
+		g.scrolledOut++ // a row left the top of history (for image anchoring)
 	}
 }

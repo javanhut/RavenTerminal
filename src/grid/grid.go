@@ -153,6 +153,11 @@ type Grid struct {
 
 	// Tab stops (HTS/TBC). Lazily initialized to every 8th column per width.
 	tabStops []bool
+
+	// scrolledOut counts rows that have left the top of history (trimmed). Used
+	// to give image placements a stable absolute-row anchor that scrolls with
+	// content even as scrollback is trimmed.
+	scrolledOut int
 }
 
 // NewGrid creates a new grid with the given dimensions and a full scrollback.
@@ -1229,6 +1234,22 @@ func (g *Grid) GetCursor() (col, row int) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	return g.CursorCol, g.CursorRow
+}
+
+// AbsoluteCursorRow returns the cursor's row in absolute coordinates (rows ever
+// scrolled out + current history + active offset), for anchoring image
+// placements so they scroll with content.
+func (g *Grid) AbsoluteCursorRow() int {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.scrolledOut + len(g.history) + g.CursorRow
+}
+
+// LinesScrolledOut returns the number of rows trimmed off the top of history.
+func (g *Grid) LinesScrolledOut() int {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.scrolledOut
 }
 
 func min(a, b int) int {

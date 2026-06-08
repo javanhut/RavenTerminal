@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"github.com/javanhut/RavenTerminal/src/grid"
+	"github.com/javanhut/RavenTerminal/src/images"
 	"net/url"
 	"strconv"
 	"strings"
@@ -24,6 +25,8 @@ const (
 	StateDCSEscape // ESC within DCS
 	StateCharset
 	StateHash
+	StateAPC       // Application Program Command (ESC _ ... ST) — Kitty graphics
+	StateAPCEscape // ESC within APC
 )
 
 // Charset represents a character set designation (G0/G1).
@@ -129,6 +132,12 @@ type Terminal struct {
 	// Kitty keyboard protocol: per-screen stack of enhancement flag sets.
 	kittyStack    []uint8
 	altKittyStack []uint8
+	// Kitty graphics: per-screen image stores, APC accumulation, and chunked-
+	// transmission assembly state.
+	images       *images.Store
+	altImages    *images.Store
+	apcBuf       []byte
+	pendingKitty *kittyTransmit
 	// Dynamic colors: OSC 10/11/12 foreground/background/cursor and OSC 4 palette
 	// overrides. Zero value (ColorDefault) means "not overridden".
 	fgColor      grid.Color
@@ -184,6 +193,8 @@ func NewTerminal(cols, rows int) *Terminal {
 		charsetPending:        charsetTargetNone,
 		cursorStyle:           CursorStyleBlock,
 		cursorBlinking:        true, // default cursor blinks (DECSCUSR 0)
+		images:                images.NewStore(256 << 20),
+		altImages:             images.NewStore(256 << 20),
 	}
 }
 
@@ -214,6 +225,10 @@ func (t *Terminal) processByte(b byte) {
 		t.processDCS(b)
 	case StateDCSEscape:
 		t.processDCSEscape(b)
+	case StateAPC:
+		t.processAPC(b)
+	case StateAPCEscape:
+		t.processAPCEscape(b)
 	case StateCharset:
 		// Character set designation - consume the designator byte
 		t.setCharset(b)
@@ -507,6 +522,9 @@ func (t *Terminal) processEscape(b byte) {
 	case 'H': // HTS - set tab stop at cursor
 		t.Grid.SetTabStop()
 		t.state = StateGround
+	case '_': // APC - Application Program Command (Kitty graphics)
+		t.state = StateAPC
+		t.apcBuf = t.apcBuf[:0]
 	default:
 		t.state = StateGround
 	}
