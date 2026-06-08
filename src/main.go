@@ -17,6 +17,7 @@ import (
 	"github.com/javanhut/RavenTerminal/src/config"
 	"github.com/javanhut/RavenTerminal/src/grid"
 	"github.com/javanhut/RavenTerminal/src/keybindings"
+	"github.com/javanhut/RavenTerminal/src/parser"
 	"github.com/javanhut/RavenTerminal/src/menu"
 	"github.com/javanhut/RavenTerminal/src/ollama"
 	"github.com/javanhut/RavenTerminal/src/render"
@@ -147,8 +148,11 @@ func main() {
 	// Set up input callbacks
 	var currentMods glfw.ModifierKey
 	cursorVisible := true
+	cursorBlinkOn := true
 	lastBlink := time.Now()
-	blinkInterval := 500 * time.Millisecond
+	lastInput := time.Now()
+	windowFocused := true
+	blinkInterval := 530 * time.Millisecond
 	lineBuf := &lineBuffer{}
 	showHelp := false
 	resizeMode := false
@@ -1071,6 +1075,7 @@ func main() {
 		data := keybindings.TranslateChar(char, currentMods)
 		activeTab.Write(data)
 		activeTab.Terminal.GetGrid().ResetScrollOffset()
+		lastInput = time.Now() // hold the cursor solid right after typing
 	})
 
 	win.GLFW().SetFramebufferSizeCallback(func(w *glfw.Window, width, height int) {
@@ -1582,6 +1587,7 @@ func main() {
 
 	// Focus reporting (?1004): tell apps that requested it when the window gains/loses focus.
 	win.GLFW().SetFocusCallback(func(w *glfw.Window, focused bool) {
+		windowFocused = focused // drives cursor-blink pausing on focus loss
 		activeTab := tabManager.ActiveTab()
 		if activeTab == nil || activeTab.Terminal == nil {
 			return
@@ -1746,12 +1752,30 @@ func main() {
 		}
 	modelLoadDone:
 
-		// Handle cursor blinking
+		// Handle cursor blinking. Blink only when enabled in config, the active
+		// terminal's DECSCUSR style requests it, the window is focused, and the
+		// user hasn't just typed (typing forces a solid cursor). Otherwise the
+		// cursor is held solid.
 		now := time.Now()
-		if now.Sub(lastBlink) >= blinkInterval {
-			cursorVisible = !cursorVisible
+		blinkCfg := true
+		if settingsMenu.Config != nil {
+			blinkCfg = settingsMenu.Config.Appearance.CursorBlink
+		}
+		styleBlinks := true
+		if at := tabManager.ActiveTab(); at != nil && at.Terminal != nil {
+			styleBlinks = at.Terminal.CursorBlinking()
+		}
+		recentlyTyped := now.Sub(lastInput) < blinkInterval
+		if parser.EffectiveBlink(blinkCfg, styleBlinks, windowFocused, recentlyTyped) {
+			if now.Sub(lastBlink) >= blinkInterval {
+				cursorBlinkOn = !cursorBlinkOn
+				lastBlink = now
+			}
+		} else {
+			cursorBlinkOn = true // solid
 			lastBlink = now
 		}
+		cursorVisible = cursorBlinkOn
 
 		if selection.active && selection.pane != nil && haveCursorPos {
 			if now.Sub(lastAutoScroll) >= time.Millisecond*50 {

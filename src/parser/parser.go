@@ -126,14 +126,18 @@ type Terminal struct {
 	// Insert/replace mode (IRM, mode 4) and line-feed/new-line mode (LNM, mode 20)
 	insertMode bool
 	lnmMode    bool
+	// Kitty keyboard protocol: per-screen stack of enhancement flag sets.
+	kittyStack    []uint8
+	altKittyStack []uint8
 	// Dynamic colors: OSC 10/11/12 foreground/background/cursor and OSC 4 palette
 	// overrides. Zero value (ColorDefault) means "not overridden".
 	fgColor      grid.Color
 	bgColor      grid.Color
 	cursorColor  grid.Color
 	paletteOverride map[int]grid.Color
-	// Cursor style (DECSCUSR)
-	cursorStyle CursorStyle
+	// Cursor style (DECSCUSR) and whether it blinks
+	cursorStyle    CursorStyle
+	cursorBlinking bool
 	// Bracketed paste mode (?2004)
 	bracketedPaste bool
 	// Window title (OSC 0/2) and icon name (OSC 0/1)
@@ -179,6 +183,7 @@ func NewTerminal(cols, rows int) *Terminal {
 		activeCharset:         0,
 		charsetPending:        charsetTargetNone,
 		cursorStyle:           CursorStyleBlock,
+		cursorBlinking:        true, // default cursor blinks (DECSCUSR 0)
 	}
 }
 
@@ -428,6 +433,8 @@ func (t *Terminal) setCursorStyle(params []int) {
 	if len(params) > 0 {
 		p = params[0]
 	}
+	// Odd/default values blink; even values are steady (DECSCUSR).
+	t.cursorBlinking = (p == 0 || p == 1 || p == 3 || p == 5)
 	switch p {
 	case 0, 1, 2: // Default/blink/steady block
 		t.cursorStyle = CursorStyleBlock
@@ -623,8 +630,21 @@ func (t *Terminal) executeCSI(final byte) {
 		}
 	case 's': // SCP - Save cursor position
 		t.saveCursor()
-	case 'u': // RCP - Restore cursor position
-		t.restoreCursor()
+	case 'u':
+		// Kitty keyboard protocol uses CSI with a >/</=/? prefix and final 'u';
+		// the unprefixed form is RCP (restore cursor position).
+		switch {
+		case strings.HasPrefix(t.csiParams, ">"):
+			t.kittyPush(uint8(t.getParam(params, 0, 0)))
+		case strings.HasPrefix(t.csiParams, "<"):
+			t.kittyPop(t.getParam(params, 0, 1))
+		case strings.HasPrefix(t.csiParams, "="):
+			t.kittySet(uint8(t.getParam(params, 0, 0)), t.getParam(params, 1, 1))
+		case strings.HasPrefix(t.csiParams, "?"):
+			t.kittyQuery()
+		default:
+			t.restoreCursor()
+		}
 	case 'n': // DSR - Device status report (ignore for now)
 		t.handleDSR(params)
 	case 'c': // DA - Device attributes
@@ -849,6 +869,8 @@ func (t *Terminal) enterAlternateScreen() {
 		t.savedMainBracketedPaste = t.bracketedPaste
 		t.savedMainMouseMode = t.mouseMode
 		t.savedMainMouseSGRMode = t.mouseSGRMode
+		// Swap in the alt screen's own kitty-keyboard flag stack.
+		t.kittyStack, t.altKittyStack = t.altKittyStack, t.kittyStack
 
 		t.savedMainGrid = t.Grid
 		// The alternate screen has no scrollback (standard VT behavior).
@@ -896,6 +918,8 @@ func (t *Terminal) exitAlternateScreen() {
 		t.bracketedPaste = t.savedMainBracketedPaste
 		t.mouseMode = t.savedMainMouseMode
 		t.mouseSGRMode = t.savedMainMouseSGRMode
+		// Swap the main screen's kitty-keyboard flag stack back in.
+		t.kittyStack, t.altKittyStack = t.altKittyStack, t.kittyStack
 
 		// Clear stale wrap state from the restored grid
 		t.Grid.ResetWrapPending()
@@ -1310,10 +1334,15 @@ func (t *Terminal) parseSGRParams(s string) []int {
 
 // parseParams parses CSI parameters
 func (t *Terminal) parseParams(s string) []int {
-	// Remove private mode indicator
+	// Remove private/prefix indicators (?, >, <, =, !).
 	s = strings.TrimPrefix(s, "?")
 	s = strings.TrimPrefix(s, ">")
+	s = strings.TrimPrefix(s, "<")
+	s = strings.TrimPrefix(s, "=")
 	s = strings.TrimPrefix(s, "!")
+	// Strip trailing intermediate bytes (0x20-0x2f), e.g. the space in the
+	// DECSCUSR sequence "CSI Ps SP q", so the parameter parses cleanly.
+	s = strings.TrimRight(s, " !\"#$%&'()*+,-./")
 
 	if s == "" {
 		return nil
@@ -1362,7 +1391,10 @@ func (t *Terminal) reset() {
 	t.originMode = false
 	t.insertMode = false
 	t.lnmMode = false
+	t.kittyStack = nil
+	t.altKittyStack = nil
 	t.cursorStyle = CursorStyleBlock
+	t.cursorBlinking = true
 	t.currentLinkID = 0
 	t.currentUnderlineStyle = 0
 	t.currentUnderlineColor = grid.Color{}
@@ -1392,6 +1424,13 @@ func (t *Terminal) CursorStyle() CursorStyle {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.cursorStyle
+}
+
+// CursorBlinking reports whether the cursor style requests blinking (DECSCUSR).
+func (t *Terminal) CursorBlinking() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.cursorBlinking
 }
 
 // AppCursorKeys returns whether application cursor keys mode is enabled
