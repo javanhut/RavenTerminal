@@ -13,6 +13,7 @@ func ThemeOptions() []ThemeOption {
 		{Name: "crow-black", Label: "Crow Black"},
 		{Name: "magpie-black-white-grey", Label: "Magpie Black/White/Grey"},
 		{Name: "catppuccin-mocha", Label: "Catppuccin Mocha"},
+		{Name: "ghostty", Label: "Ghostty"},
 	}
 }
 

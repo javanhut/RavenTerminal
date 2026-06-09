@@ -57,6 +57,17 @@ func ThemeByName(name string) Theme {
 			TabActive:  [4]float32{0.816, 0.816, 0.816, 1.0}, // #d0d0d0
 			Selection:  [4]float32{0.816, 0.816, 0.816, 0.35},
 		}
+	case "ghostty":
+		// Matches Ghostty's out-of-the-box look: One Dark-style #282C34
+		// background with white text (cursor defaults to the foreground).
+		return Theme{
+			Background: [4]float32{0.157, 0.173, 0.204, 1.0}, // #282C34
+			Foreground: [4]float32{1.000, 1.000, 1.000, 1.0}, // #FFFFFF
+			Cursor:     [4]float32{1.000, 1.000, 1.000, 1.0}, // #FFFFFF (= fg)
+			TabBar:     [4]float32{0.129, 0.141, 0.169, 1.0}, // #21242B
+			TabActive:  [4]float32{0.380, 0.686, 0.937, 1.0}, // #61AFEF (One Dark blue)
+			Selection:  [4]float32{0.380, 0.686, 0.937, 0.35},
+		}
 	case "catppuccin-mocha", "catppuccin", "catpuccin":
 		return Theme{
 			Background: [4]float32{0.118, 0.118, 0.180, 1.0}, // #1e1e2e
