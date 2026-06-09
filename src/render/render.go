@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/go-gl/gl/v4.1-core/gl"
+	gtfont "github.com/go-text/typesetting/font"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/opentype"
 )
@@ -161,6 +162,19 @@ type Renderer struct {
 	gridRects  rectBatch
 	gridGlyphs glyphBatch
 
+	// Color emoji: system color-emoji font decoded to per-glyph RGBA textures,
+	// drawn with a dedicated non-tinting shader (see coloremoji.go). colorDraws
+	// collects emoji quads during the batched grid pass to draw after the
+	// monochrome glyph batch flushes.
+	colorFace     *gtfont.Face
+	colorFontFile *os.File
+	colorGlyphs   map[rune]colorGlyph
+	colorProgram  uint32
+	colorProjLoc  int32
+	colorTexLoc   int32
+	colorAlphaLoc int32
+	colorDraws    []colorDrawItem
+
 	// Help panel scroll state
 	helpScrollOffset int
 
@@ -240,6 +254,9 @@ func NewRenderer() (*Renderer, error) {
 	if err := r.loadFont(); err != nil {
 		return nil, err
 	}
+
+	// Load the system color-emoji font (optional; nil if none is available).
+	r.loadColorFont()
 
 	// Store base cell dimensions for UI elements
 	r.baseCellWidth = r.cellWidth
@@ -379,6 +396,10 @@ func (r *Renderer) initGL() error {
 	gl.BindVertexArray(0)
 
 	if err := r.initBatches(); err != nil {
+		return err
+	}
+
+	if err := r.initColorEmoji(); err != nil {
 		return err
 	}
 
@@ -2158,6 +2179,7 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 	// batches, then flush each in a single draw call.
 	r.gridRects.reset()
 	r.gridGlyphs.reset()
+	r.colorDraws = r.colorDraws[:0]
 	for row := 0; row < rows; row++ {
 		for col := 0; col < cols; col++ {
 			cell := snap.Cells[row*cols+col]
@@ -2191,19 +2213,35 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 			}
 			hidden := cell.Flags&grid.FlagHidden != 0
 			// Block-element chars and the cursor cell are drawn immediately in
-			// pass 2; everything else is a batched glyph.
+			// pass 2; everything else is a batched glyph. A glyph missing from
+			// the monochrome font is tried as a color emoji before the '?'
+			// fallback.
 			if !hidden && cell.Char != ' ' && cell.Char != 0 && !isBlockElement(cell.Char) {
-				if gl, ok := r.lookupGlyph(cell.Char); ok {
+				g, ok := r.resolveGlyph(cell.Char)
+				if !ok {
+					if cg, isColor := r.ensureColorGlyph(cell.Char); isColor {
+						span := 1
+						if cell.Width == grid.CellWidthWide {
+							span = 2
+						}
+						r.colorDraws = append(r.colorDraws, colorDrawItem{
+							x: x, yTop: y, span: span, cg: cg, alpha: fgColor[3],
+						})
+					} else {
+						g, ok = r.ensureGlyph('?')
+					}
+				}
+				if ok {
 					var shear float32
 					if r.fauxItalic && cell.Flags&grid.FlagItalic != 0 {
-						shear = float32(gl.PixelHeight) * 0.2
+						shear = float32(g.PixelHeight) * 0.2
 					}
 					gy := y + r.cellHeight
-					r.gridGlyphs.addGlyph(x, gy, float32(gl.PixelWidth), float32(gl.PixelHeight),
-						gl.X, gl.Y, gl.Width, gl.Height, fgColor, shear)
+					r.gridGlyphs.addGlyph(x, gy, float32(g.PixelWidth), float32(g.PixelHeight),
+						g.X, g.Y, g.Width, g.Height, fgColor, shear)
 					if r.fauxBold && cell.Flags&grid.FlagBold != 0 {
-						r.gridGlyphs.addGlyph(x+1, gy, float32(gl.PixelWidth), float32(gl.PixelHeight),
-							gl.X, gl.Y, gl.Width, gl.Height, fgColor, shear)
+						r.gridGlyphs.addGlyph(x+1, gy, float32(g.PixelWidth), float32(g.PixelHeight),
+							g.X, g.Y, g.Width, g.Height, fgColor, shear)
 					}
 				}
 			}
@@ -2211,6 +2249,13 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 	}
 	r.flushRects(&r.gridRects, proj)
 	r.flushGlyphs(&r.gridGlyphs, proj)
+
+	// Color emoji: drawn after the monochrome batch (each is its own RGBA
+	// texture, so they can't share the alpha-atlas draw call).
+	for i := range r.colorDraws {
+		cd := &r.colorDraws[i]
+		r.drawColorGlyph(cd.x, cd.yTop, cd.span, cd.cg, cd.alpha, proj)
+	}
 
 	// Pass 2: immediate draws for the minority cases — block elements,
 	// underlines, strikethrough (drawn over the batched glyphs).
@@ -2291,7 +2336,17 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 				// Redraw character under cursor in inverse
 				if cell.Char != ' ' && cell.Char != 0 && cell.Flags&grid.FlagHidden == 0 {
 					if !r.drawBlockElement(cursorX, cursorY, cell.Char, r.theme.Background, proj) {
-						r.drawChar(cursorX, cursorY+r.cellHeight, cell.Char, r.theme.Background, proj)
+						if _, ok := r.resolveGlyph(cell.Char); ok {
+							r.drawChar(cursorX, cursorY+r.cellHeight, cell.Char, r.theme.Background, proj)
+						} else if cg, ok := r.ensureColorGlyph(cell.Char); ok {
+							span := 1
+							if cell.Width == grid.CellWidthWide {
+								span = 2
+							}
+							r.drawColorGlyph(cursorX, cursorY, span, cg, 1.0, proj)
+						} else {
+							r.drawChar(cursorX, cursorY+r.cellHeight, cell.Char, r.theme.Background, proj)
+						}
 					}
 				}
 			}
@@ -2546,28 +2601,34 @@ func (r *Renderer) drawBlockElement(x, y float32, char rune, clr [4]float32, pro
 	return false
 }
 
-// drawChar draws a single character using the font atlas
-// lookupGlyph resolves a rune to a glyph, applying box-drawing and unicode-to-ASCII
-// fallbacks, then '?' as a last resort.
-func (r *Renderer) lookupGlyph(char rune) (Glyph, bool) {
-	glyph, ok := r.ensureGlyph(char)
-	if !ok {
-		// Try box-drawing fallbacks first
-		if fallback, hasFallback := boxDrawingFallbacks[char]; hasFallback {
-			glyph, ok = r.ensureGlyph(fallback)
-		}
-		// Try unicode-to-ASCII fallbacks
-		if !ok {
-			if fallback, hasFallback := unicodeFallbacks[char]; hasFallback {
-				glyph, ok = r.ensureGlyph(fallback)
-			}
-		}
-		// If still not found, fallback to '?'
-		if !ok {
-			glyph, ok = r.ensureGlyph('?')
+// resolveGlyph resolves a rune to a monochrome glyph, applying box-drawing and
+// unicode-to-ASCII fallbacks, but WITHOUT the '?' last resort — so callers can
+// try the color-emoji path before giving up on a missing glyph.
+func (r *Renderer) resolveGlyph(char rune) (Glyph, bool) {
+	if glyph, ok := r.ensureGlyph(char); ok {
+		return glyph, true
+	}
+	if fallback, has := boxDrawingFallbacks[char]; has {
+		if glyph, ok := r.ensureGlyph(fallback); ok {
+			return glyph, true
 		}
 	}
-	return glyph, ok
+	if fallback, has := unicodeFallbacks[char]; has {
+		if glyph, ok := r.ensureGlyph(fallback); ok {
+			return glyph, true
+		}
+	}
+	return Glyph{}, false
+}
+
+// lookupGlyph resolves a rune to a monochrome glyph, falling back to '?' when
+// the font (and its box-drawing/unicode fallbacks) has no glyph. Callers that
+// want to try color emoji first should use resolveGlyph + ensureColorGlyph.
+func (r *Renderer) lookupGlyph(char rune) (Glyph, bool) {
+	if glyph, ok := r.resolveGlyph(char); ok {
+		return glyph, true
+	}
+	return r.ensureGlyph('?')
 }
 
 func (r *Renderer) drawChar(x, y float32, char rune, clr [4]float32, proj [16]float32) {
@@ -2883,6 +2944,7 @@ func (r *Renderer) Destroy() {
 	gl.DeleteProgram(r.program)
 	gl.DeleteProgram(r.fontProgram)
 	gl.DeleteTextures(1, &r.fontAtlas)
+	r.destroyColorEmoji()
 }
 
 // orthoMatrix creates an orthographic projection matrix

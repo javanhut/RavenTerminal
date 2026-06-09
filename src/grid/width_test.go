@@ -21,6 +21,46 @@ func TestClusterWidth(t *testing.T) {
 	}
 }
 
+func TestRuneWidth(t *testing.T) {
+	cases := []struct {
+		name string
+		r    rune
+		want int
+	}{
+		{"ascii", 'T', 1},
+		{"cjk", '好', 2},
+		{"nerd branch icon (PUA U+E0A0)", 0xE0A0, 1},
+		{"powerline (PUA U+E0B0)", 0xE0B0, 1},
+		{"devicon node (PUA U+E718)", 0xE718, 1},
+		{"PUA-A plane-15 (U+F0001)", 0xF0001, 1},
+		{"combining acute", 0x0301, 0},
+		{"variation selector 16", 0xFE0F, 0},
+		{"null", 0x0000, 0},
+		{"C0 control", 0x0007, 0},
+	}
+	for _, c := range cases {
+		if got := RuneWidth(c.r); got != c.want {
+			t.Errorf("RuneWidth(%s, U+%04X) = %d, want %d", c.name, c.r, got, c.want)
+		}
+	}
+}
+
+// A starship-style prompt mixes a Private-Use branch icon with normal text.
+// The PUA glyph must advance the cursor by one cell (not be swallowed as a
+// zero-width combining mark), keeping the grid column aligned with the app.
+func TestPrivateUseIconAdvancesCursor(t *testing.T) {
+	g := NewGrid(10, 1)
+	for _, r := range []rune{'a', 0xE0A0, 'b'} { // 'a', branch icon, 'b'
+		g.WriteChar(r, DefaultFg(), DefaultBg(), 0, 0, 0, Color{})
+	}
+	if col, _ := g.GetCursor(); col != 3 {
+		t.Fatalf("cursor col = %d, want 3 (PUA icon must occupy its own cell)", col)
+	}
+	if c := g.GetCell(1, 0); c.Char != 0xE0A0 {
+		t.Fatalf("cell[1] char = U+%04X, want U+E0A0 (icon must own the cell)", c.Char)
+	}
+}
+
 func TestCombiningAttachesToBase(t *testing.T) {
 	g := NewGrid(10, 1)
 	g.WriteChar('e', DefaultFg(), DefaultBg(), 0, 0, 0, Color{})

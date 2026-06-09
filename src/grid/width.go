@@ -4,7 +4,6 @@ import (
 	"unicode"
 
 	"github.com/rivo/uniseg"
-	"golang.org/x/text/width"
 )
 
 // RuneWidth returns the display width of a rune (0, 1, or 2 cells)
@@ -15,6 +14,14 @@ func RuneWidth(r rune) int {
 	// Null character has zero width
 	if r == '\x00' {
 		return 0
+	}
+
+	// Private Use Area glyphs (nerd-font / powerline / devicon icons used by
+	// prompts like starship) occupy a single cell. unicode.IsPrint reports
+	// false for the Private Use category, so handle these before that check to
+	// avoid treating them as zero-width and desyncing the cursor column.
+	if unicode.Is(unicode.Co, r) {
+		return 1
 	}
 
 	// Non-printable characters have zero width
@@ -30,14 +37,10 @@ func RuneWidth(r rune) int {
 		return 0
 	}
 
-	// Use East Asian Width properties from x/text/width
-	k := width.LookupRune(r)
-	switch k.Kind() {
-	case width.EastAsianWide, width.EastAsianFullwidth:
-		return 2
-	default:
-		return 1
-	}
+	// Measure with the grapheme-aware width table (uniseg) so emoji are sized
+	// the same way applications expect (emoji-presentation pictographs = 2),
+	// matching ClusterWidth. This keeps the cursor column in sync with the TUI.
+	return uniseg.StringWidth(string(r))
 }
 
 // StringWidth returns the total display width of a string
