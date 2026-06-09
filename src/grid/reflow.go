@@ -98,32 +98,42 @@ func (g *Grid) reflow(newCols, newRows int) {
 	for len(newSeq) < newRows {
 		newSeq = append(newSeq, newRow(newCols))
 	}
+	// activeStart is the PRE-TRIM boundary between history and the active
+	// region. The active region is always the last newRows rows of newSeq, and
+	// front-trimming history never moves it, so the cursor's offset within the
+	// active region is computed against this boundary (invariant to trimming).
 	activeStart := len(newSeq) - newRows
 	if activeStart < 0 {
 		activeStart = 0
 	}
 
-	// Trim history beyond the cap (releasing the dropped rows).
+	// Compute the cursor's row within the active region now, using the pre-trim
+	// boundary. The found case anchors to its content row; the not-found
+	// fallback parks the cursor on the last active row.
+	cursorInActive := newRows - 1
+	if cursorFound {
+		cursorInActive = cursorNewAbsRow - activeStart
+	}
+
+	// Capture the active region as its own slice BEFORE trimming history, so the
+	// in-place front-trim below cannot alias or clobber the active rows.
+	active := append([]*Row(nil), newSeq[activeStart:]...)
 	histRows := newSeq[:activeStart]
+
+	// Trim history beyond the cap (releasing the dropped front rows).
 	if len(histRows) > g.maxScroll {
 		drop := len(histRows) - g.maxScroll
 		for i := 0; i < drop; i++ {
 			g.releaseRow(histRows[i])
 		}
 		histRows = histRows[drop:]
-		activeStart = len(histRows)
-		newSeq = append(histRows, newSeq[len(newSeq)-newRows:]...)
 	}
 
-	g.history = append([]*Row(nil), newSeq[:activeStart]...)
-	g.rows = append([]*Row(nil), newSeq[activeStart:]...)
+	g.history = append([]*Row(nil), histRows...)
+	g.rows = active
 
 	// 5. Restore cursor (clamped to the active area).
-	if !cursorFound {
-		cursorNewAbsRow = len(newSeq) - 1
-		cursorNewCol = 0
-	}
-	g.CursorRow = cursorNewAbsRow - activeStart
+	g.CursorRow = cursorInActive
 	if g.CursorRow < 0 {
 		g.CursorRow = 0
 	}
@@ -131,6 +141,9 @@ func (g *Grid) reflow(newCols, newRows int) {
 		g.CursorRow = newRows - 1
 	}
 	g.CursorCol = cursorNewCol
+	if g.CursorCol < 0 {
+		g.CursorCol = 0
+	}
 	if g.CursorCol >= newCols {
 		g.CursorCol = newCols - 1
 	}
