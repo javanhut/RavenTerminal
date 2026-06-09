@@ -1168,12 +1168,15 @@ func (g *Grid) Resize(cols, rows int) {
 	oldScrollTop := g.scrollTop
 	oldScrollBottom := g.scrollBottom
 
-	// Clamp/truncate path (alternate screen): copy the overlap region.
+	// Clamp/truncate path (alternate screen): copy the overlap region. keepCols/
+	// keepRows are computed from the OLD dimensions; new rows are allocated at
+	// the NEW width (g.Cols isn't updated until below, so we must pass cols
+	// explicitly — otherwise grown rows would be too short and overflow cellAt).
 	newRows := make([]*Row, rows)
 	keepCols := min(cols, g.Cols)
 	keepRows := min(rows, g.Rows)
 	for row := 0; row < rows; row++ {
-		nr := g.blankRow(g.eraseBg)
+		nr := g.blankRowN(cols, g.eraseBg)
 		if row < keepRows {
 			src := g.rows[row]
 			for col := 0; col < keepCols; col++ {

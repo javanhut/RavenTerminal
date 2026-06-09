@@ -1,9 +1,12 @@
 package tab
 
 import (
+	"fmt"
+	"os"
+	"sync"
+
 	"github.com/javanhut/RavenTerminal/src/parser"
 	"github.com/javanhut/RavenTerminal/src/shell"
-	"sync"
 )
 
 const MaxTabs = 10
@@ -140,15 +143,28 @@ func (p *Pane) readLoop() {
 			return
 		}
 
-		p.readerMu.Lock()
-		p.Terminal.Process(buf[:n])
-		p.readerMu.Unlock()
+		p.processChunk(buf[:n])
 
 		// Wake the main loop so this output renders without waiting for the idle timeout.
 		if wakeNotifier != nil {
 			wakeNotifier()
 		}
 	}
+}
+
+// processChunk feeds one chunk of PTY output to the parser under the reader
+// lock, recovering from any panic so a single malformed/edge sequence degrades
+// gracefully instead of crashing the whole terminal. The lock is released by
+// the deferred unlock even during a panic unwind.
+func (p *Pane) processChunk(data []byte) {
+	p.readerMu.Lock()
+	defer p.readerMu.Unlock()
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "raven: recovered from terminal parse panic: %v\n", r)
+		}
+	}()
+	p.Terminal.Process(data)
 }
 
 // Write writes data to the PTY

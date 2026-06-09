@@ -242,6 +242,37 @@ func TestAltGridNoScrollback(t *testing.T) {
 	}
 }
 
+// TestAltResizeGrowThenWrite reproduces the panic where the alternate-screen
+// clamp resize allocated rows at the old (narrower) width while g.Cols grew,
+// causing cellAt to index past the short row when a TUI wrote near the new edge.
+func TestAltResizeGrowThenWrite(t *testing.T) {
+	g := NewAltGrid(20, 5)
+	g.Resize(100, 10) // grow wider (clamp path, no scrollback)
+	for i, r := range g.rows {
+		if len(r.cells) != g.Cols {
+			t.Fatalf("row %d has %d cells, want %d after grow", i, len(r.cells), g.Cols)
+		}
+	}
+	// Absolute-position the cursor near the new right edge and write.
+	g.SetCursorPos(95, 5)
+	g.WriteChar('X', IndexedColor(2), DefaultBg(), 0, 0, 0, Color{})
+	if c := g.GetCell(94, 4).Char; c != 'X' {
+		t.Fatalf("write after alt grow = %q, want X", c)
+	}
+}
+
+// TestReflowGrowThenWriteHighColumn covers the main-screen reflow grow path
+// writing at a high column (the 142-vs-74 shape from the crash report).
+func TestReflowGrowThenWriteHighColumn(t *testing.T) {
+	g := NewGrid(74, 5)
+	g.Resize(150, 10)
+	g.SetCursorPos(143, 1) // col 142 (1-based)
+	g.WriteChar('Y', DefaultFg(), DefaultBg(), 0, 0, 0, Color{})
+	if c := g.GetCell(142, 0).Char; c != 'Y' {
+		t.Fatalf("reflow grow write = %q, want Y", c)
+	}
+}
+
 func TestColorConstructors(t *testing.T) {
 	if c := IndexedColor(5); c.Type != ColorIndexed || c.Index != 5 {
 		t.Fatalf("IndexedColor wrong: %+v", c)

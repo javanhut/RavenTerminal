@@ -31,6 +31,7 @@ const (
 	MenuConfirmExport
 	MenuConfirmDelete // Confirmation before deleting items
 	MenuCursorStyle   // Cursor style selection
+	MenuShellPaths    // PATH directories editor
 )
 
 // InputState tracks what we're currently inputting
@@ -60,6 +61,8 @@ const (
 	InputFontSize
 	// Panel width input state
 	InputPanelWidth
+	// Shell PATH directory input state
+	InputShellPath
 )
 
 // MenuItem represents a menu item
@@ -277,6 +280,7 @@ func (m *Menu) buildMainMenu() {
 		{Label: "Commands (" + itoa(len(m.Config.Commands)) + ")..."},
 		{Label: "Aliases (" + itoa(len(m.Config.Aliases)) + ")..."},
 		{Label: "Exports (" + itoa(len(m.Config.Exports)) + ")..."},
+		{Label: "PATH Directories (" + itoa(len(m.Config.Shell.Paths)) + ")..."},
 		// Appearance
 		{Label: "APPEARANCE", IsHeader: true},
 		{Label: "Theme: " + themeLabel},
@@ -445,6 +449,33 @@ func (m *Menu) buildExportsMenu() {
 	m.Items = append(m.Items, MenuItem{Label: "Back"})
 }
 
+// buildShellPathsMenu builds the PATH directories editor.
+func (m *Menu) buildShellPathsMenu() {
+	m.Items = []MenuItem{
+		{Label: "+ Add Directory"},
+	}
+	for _, dir := range m.Config.Shell.Paths {
+		m.Items = append(m.Items, MenuItem{Label: dir, Value: dir})
+	}
+	if len(m.Config.Shell.Paths) == 0 {
+		m.Items = append(m.Items, MenuItem{Label: "(none — applies to new shells)", Disabled: true})
+	}
+	m.Items = append(m.Items, MenuItem{Label: ""})
+	m.Items = append(m.Items, MenuItem{Label: "Back"})
+}
+
+// handleShellPathsSelect handles selection in the PATH directories editor.
+func (m *Menu) handleShellPathsSelect(item MenuItem) {
+	if item.Label == "Back" {
+		m.goBack()
+		return
+	}
+	if m.SelectedIndex == 0 { // Add new directory
+		m.startInputWithValue(InputShellPath, "Directory to add to PATH:", "")
+	}
+	// Existing entries are removed with Delete; no edit action.
+}
+
 // buildOllamaModelsMenu builds the Ollama models list menu.
 func (m *Menu) buildOllamaModelsMenu() {
 	m.Items = []MenuItem{}
@@ -530,6 +561,9 @@ func (m *Menu) buildDeleteConfirmMenu() {
 		if val, ok := m.Config.Exports[m.DeleteTarget]; ok {
 			itemLabel = m.DeleteTarget + " = " + truncate(val, 30)
 		}
+	case "path":
+		typeLabel = "PATH Directory"
+		itemLabel = m.DeleteTarget
 	}
 
 	m.Items = []MenuItem{
@@ -645,6 +679,8 @@ func (m *Menu) Select() {
 		m.handleAliasesSelect(item)
 	case MenuExports:
 		m.handleExportsSelect(item)
+	case MenuShellPaths:
+		m.handleShellPathsSelect(item)
 	case MenuConfirmCommand:
 		m.handleCommandConfirmSelect()
 	case MenuConfirmAlias:
@@ -659,71 +695,62 @@ func (m *Menu) Select() {
 }
 
 func (m *Menu) handleMainSelect() {
-	// Menu indices after reorganization with category headers:
-	// 0: SHELL & ENVIRONMENT (header)
-	// 1: Shell, 2: Source RC, 3: Scripts, 4: Commands, 5: Aliases, 6: Exports
-	// 7: APPEARANCE (header)
-	// 8: Theme, 9: Font Size, 10: Cursor Style, 11: Cursor Blink, 12: Panel Width
-	// 13: Prompt Style, 14: Prompt Options
-	// 15: AI FEATURES (header)
-	// 16: Web Search, 17: Reader Proxy, 18: Ollama Chat, 19: Ollama URL, 20: Ollama Model
-	// 21: Test Ollama, 22: Load Model, 23: Refresh Models, 24: Ollama Models
-	// 25: Thinking Mode, 26: Show Thinking
-	// 27: ACTIONS (header)
-	// 28: Reload Config, 29: Save and Close, 30: Cancel
-
-	switch m.SelectedIndex {
-	case 1: // Shell
+	// Dispatch by label prefix so the menu is robust to item insertions/order.
+	label := m.Items[m.SelectedIndex].Label
+	switch {
+	case strings.HasPrefix(label, "Shell:"):
 		m.navigateTo(MenuShellSelect, m.buildShellMenu)
-	case 2: // Source RC
+	case label == "Source RC Files":
 		m.Config.Shell.SourceRC = !m.Config.Shell.SourceRC
 		m.buildMainMenu()
 		m.StatusMessage = "Updated (restart tab to apply)"
-	case 3: // Scripts
+	case label == "Scripts...":
 		m.navigateTo(MenuScripts, m.buildScriptsMenu)
-	case 4: // Commands
+	case strings.HasPrefix(label, "Commands ("):
 		m.navigateTo(MenuCommands, m.buildCommandsMenu)
-	case 5: // Aliases
+	case strings.HasPrefix(label, "Aliases ("):
 		m.navigateTo(MenuAliases, m.buildAliasesMenu)
-	case 6: // Exports
+	case strings.HasPrefix(label, "Exports ("):
 		m.navigateTo(MenuExports, m.buildExportsMenu)
-	case 8: // Theme
+	case strings.HasPrefix(label, "PATH Directories"):
+		m.navigateTo(MenuShellPaths, m.buildShellPathsMenu)
+	case strings.HasPrefix(label, "Theme:"):
 		m.navigateTo(MenuThemeSelect, m.buildThemeMenu)
-	case 9: // Font Size
+	case strings.HasPrefix(label, "Font Size:"):
 		m.startInputWithValue(InputFontSize, "Font size (8-32):", formatFloat(m.Config.FontSize))
-	case 10: // Cursor Style
+	case strings.HasPrefix(label, "Cursor Style:"):
 		m.navigateTo(MenuCursorStyle, m.buildCursorStyleMenu)
-	case 11: // Cursor Blink
+	case label == "Cursor Blink":
 		m.Config.Appearance.CursorBlink = !m.Config.Appearance.CursorBlink
 		m.buildMainMenu()
 		m.StatusMessage = "Updated (save to persist)"
-	case 12: // Panel Width
+	case strings.HasPrefix(label, "Panel Width:"):
 		pw := m.Config.Appearance.PanelWidthPercent
 		if pw == 0 {
 			pw = 35.0
 		}
 		m.startInputWithValue(InputPanelWidth, "Panel width (25-50%):", formatFloat(pw))
-	case 13: // Prompt Style
+	case strings.HasPrefix(label, "Prompt Style:"):
 		m.navigateTo(MenuPromptStyle, m.buildPromptStyleMenu)
-	case 14: // Prompt Options
+	case label == "Prompt Options...":
 		m.navigateTo(MenuPromptSettings, m.buildPromptSettingsMenu)
-	case 16: // Web Search
+	case label == "Web Search":
 		m.Config.WebSearch.Enabled = !m.Config.WebSearch.Enabled
 		m.buildMainMenu()
 		m.StatusMessage = "Updated (save to persist)"
-	case 17: // Reader Proxy
+	case label == "Reader Proxy":
 		m.Config.WebSearch.UseReaderProxy = !m.Config.WebSearch.UseReaderProxy
 		m.buildMainMenu()
 		m.StatusMessage = "Updated (save to persist)"
-	case 18: // Ollama Chat
+	case label == "Ollama Chat":
 		m.Config.Ollama.Enabled = !m.Config.Ollama.Enabled
 		m.buildMainMenu()
 		m.StatusMessage = "Updated (save to persist)"
-	case 19: // Ollama URL
+	case strings.HasPrefix(label, "Ollama URL:"):
 		m.startInputWithValue(InputOllamaURL, "Ollama base URL:", m.Config.Ollama.URL)
-	case 20: // Ollama Model
+	case strings.HasPrefix(label, "Ollama Model:"):
 		m.startInputWithValue(InputOllamaModel, "Ollama model name:", m.Config.Ollama.Model)
-	case 21: // Test Ollama Connection
+	case label == "Test Ollama Connection":
 		if m.OnOllamaTest == nil {
 			m.StatusMessage = "Ollama test unavailable"
 			return
@@ -733,7 +760,7 @@ func (m *Menu) handleMainSelect() {
 			return
 		}
 		m.StatusMessage = "Ollama connection OK"
-	case 22: // Load Model
+	case label == "Load Model":
 		if m.OnOllamaLoadModel == nil {
 			m.StatusMessage = "Ollama load unavailable"
 			return
@@ -744,7 +771,7 @@ func (m *Menu) handleMainSelect() {
 		}
 		m.OnOllamaLoadModel(m.Config.Ollama.URL, m.Config.Ollama.Model)
 		m.StatusMessage = "Loading model..."
-	case 23: // Refresh Ollama Models
+	case label == "Refresh Ollama Models":
 		if m.OnOllamaFetchModels == nil {
 			m.StatusMessage = "Ollama fetch unavailable"
 			return
@@ -760,17 +787,17 @@ func (m *Menu) handleMainSelect() {
 			return
 		}
 		m.StatusMessage = "Models loaded (" + itoa(len(models)) + ")"
-	case 24: // Ollama Models
+	case label == "Ollama Models...":
 		m.navigateTo(MenuOllamaModels, m.buildOllamaModelsMenu)
-	case 25: // Thinking Mode
+	case label == "Thinking Mode":
 		m.Config.Ollama.ThinkingMode = !m.Config.Ollama.ThinkingMode
 		m.buildMainMenu()
 		m.StatusMessage = "Updated (save to persist)"
-	case 26: // Show Thinking
+	case label == "Show Thinking":
 		m.Config.Ollama.ShowThinking = !m.Config.Ollama.ShowThinking
 		m.buildMainMenu()
 		m.StatusMessage = "Updated (save to persist)"
-	case 28: // Reload Config
+	case label == "Reload Config":
 		cfg, err := config.Load()
 		if err != nil {
 			m.StatusMessage = "Failed to reload config"
@@ -791,7 +818,7 @@ func (m *Menu) handleMainSelect() {
 		if m.StatusMessage == "" {
 			m.StatusMessage = "Config reloaded"
 		}
-	case 29: // Save and Close
+	case label == "Save and Close":
 		if !m.saveConfigWithInitScript("Saved") {
 			m.buildMainMenu()
 			return
@@ -804,7 +831,7 @@ func (m *Menu) handleMainSelect() {
 			}
 		}
 		m.Close()
-	case 30: // Cancel
+	case label == "Cancel":
 		m.Config, _ = config.Load()
 		m.Close()
 	}
@@ -1110,6 +1137,27 @@ func (m *Menu) HandleEnter() bool {
 		m.SelectedIndex = m.firstSelectableIndex()
 		m.debugf("confirm export name=%q value=%q", m.PendingName, m.PendingExport)
 
+	case InputShellPath:
+		dir := strings.TrimSpace(value)
+		if dir == "" {
+			m.InputState = InputNone
+			m.buildShellPathsMenu()
+			return false
+		}
+		// Skip if already present.
+		exists := false
+		for _, p := range m.Config.Shell.Paths {
+			if p == dir {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			m.Config.Shell.Paths = append(m.Config.Shell.Paths, dir)
+		}
+		_ = m.saveConfigWithInitScript("PATH directory added (new shells; current tab updated)")
+		m.buildShellPathsMenu()
+
 	case InputScriptInit:
 		m.Config.Scripts.Init = value
 		m.StatusMessage = "Script updated"
@@ -1194,6 +1242,8 @@ func (m *Menu) HandleEscape() {
 			m.buildScriptsMenu()
 		case MenuExports:
 			m.buildExportsMenu()
+		case MenuShellPaths:
+			m.buildShellPathsMenu()
 		}
 		return
 	}
@@ -1248,6 +1298,20 @@ func (m *Menu) HandleDelete() {
 				m.ScrollOffset = 0
 			}
 		}
+	case MenuShellPaths:
+		if m.SelectedIndex > 0 {
+			item := m.Items[m.SelectedIndex]
+			if item.Value != "" {
+				m.DeleteType = "path"
+				m.DeleteTarget = item.Value
+				m.DeleteIndex = -1
+				m.savePosition()
+				m.State = MenuConfirmDelete
+				m.buildDeleteConfirmMenu()
+				m.SelectedIndex = m.firstSelectableIndex()
+				m.ScrollOffset = 0
+			}
+		}
 	}
 }
 
@@ -1272,6 +1336,16 @@ func (m *Menu) handleDeleteConfirmSelect() {
 			m.Config.RemoveExport(m.DeleteTarget)
 			_ = m.saveConfigWithInitScript("Export deleted")
 			m.navigateTo(MenuExports, m.buildExportsMenu)
+		case "path":
+			kept := m.Config.Shell.Paths[:0]
+			for _, p := range m.Config.Shell.Paths {
+				if p != m.DeleteTarget {
+					kept = append(kept, p)
+				}
+			}
+			m.Config.Shell.Paths = kept
+			_ = m.saveConfigWithInitScript("PATH directory removed")
+			m.navigateTo(MenuShellPaths, m.buildShellPathsMenu)
 		}
 		// Adjust selection if needed
 		if m.SelectedIndex >= len(m.Items) {
@@ -1286,6 +1360,8 @@ func (m *Menu) handleDeleteConfirmSelect() {
 			m.navigateTo(MenuAliases, m.buildAliasesMenu)
 		case "export":
 			m.navigateTo(MenuExports, m.buildExportsMenu)
+		case "path":
+			m.navigateTo(MenuShellPaths, m.buildShellPathsMenu)
 		}
 	}
 	// Clear delete tracking
@@ -1297,7 +1373,7 @@ func (m *Menu) handleDeleteConfirmSelect() {
 // goBack goes back to previous menu
 func (m *Menu) goBack() {
 	switch m.State {
-	case MenuShellSelect, MenuThemeSelect, MenuPromptStyle, MenuPromptSettings, MenuScripts, MenuOllamaModels, MenuCommands, MenuAliases, MenuExports, MenuCursorStyle:
+	case MenuShellSelect, MenuThemeSelect, MenuPromptStyle, MenuPromptSettings, MenuScripts, MenuOllamaModels, MenuCommands, MenuAliases, MenuExports, MenuCursorStyle, MenuShellPaths:
 		m.navigateTo(MenuMain, m.buildMainMenu)
 		m.debugf("go back to main")
 	case MenuConfirmCommand:
@@ -1321,6 +1397,8 @@ func (m *Menu) goBack() {
 			m.navigateTo(MenuAliases, m.buildAliasesMenu)
 		case "export":
 			m.navigateTo(MenuExports, m.buildExportsMenu)
+		case "path":
+			m.navigateTo(MenuShellPaths, m.buildShellPathsMenu)
 		default:
 			m.navigateTo(MenuMain, m.buildMainMenu)
 		}

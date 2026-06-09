@@ -58,6 +58,8 @@ type ShellConfig struct {
 	Path string `toml:"path"`
 	// SourceRC whether to source user's rc files (.bashrc, .zshrc, etc.)
 	SourceRC bool `toml:"source_rc"`
+	// Paths are extra directories prepended to PATH for every shell.
+	Paths []string `toml:"paths"`
 	// AdditionalEnv extra environment variables
 	AdditionalEnv map[string]string `toml:"env"`
 }
@@ -279,6 +281,7 @@ func DefaultConfig() *Config {
 		Shell: ShellConfig{
 			Path:          "",
 			SourceRC:      true,
+			Paths:         []string{},
 			AdditionalEnv: map[string]string{},
 		},
 		Prompt: PromptConfig{
@@ -533,6 +536,18 @@ func (c *Config) WriteInitScript() (string, error) {
 		for name, value := range c.Exports {
 			script += "export " + name + "=\"" + escapeDoubleQuotes(value) + "\"\n"
 		}
+	}
+
+	// Prepend user PATH directories (guarded so re-sourcing never duplicates an
+	// entry). New shells also get these via the PTY env; this block lets the
+	// active tab pick up edits immediately when the init script is re-sourced.
+	if len(c.Shell.Paths) > 0 {
+		script += "\n# Raven PATH additions\n"
+		for _, dir := range c.Shell.Paths {
+			d := escapeDoubleQuotes(dir)
+			script += "case \":$PATH:\" in *\":" + d + ":\"*) ;; *) PATH=\"" + d + ":$PATH\";; esac\n"
+		}
+		script += "export PATH\n"
 	}
 
 	if err := os.WriteFile(initPath, []byte(script), 0644); err != nil {

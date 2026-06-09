@@ -30,10 +30,15 @@ func newRow(cols int) *Row {
 	return r
 }
 
-// blankRow allocates a blank row whose cells carry the given background (BCE).
-// Each cell takes one reference to the (shared, interned) fill style.
-func (g *Grid) blankRow(bg Color) *Row {
-	r := &Row{cells: make([]storedCell, g.Cols), flags: RowDirty}
+// blankRow allocates a blank row at the grid's current width.
+func (g *Grid) blankRow(bg Color) *Row { return g.blankRowN(g.Cols, bg) }
+
+// blankRowN allocates a blank row of exactly cols cells, each carrying the given
+// background (BCE). Each cell takes one reference to the shared interned fill
+// style. Use this (not blankRow) when g.Cols may not yet match the target width,
+// e.g. mid-resize before g.Cols is updated.
+func (g *Grid) blankRowN(cols int, bg Color) *Row {
+	r := &Row{cells: make([]storedCell, cols), flags: RowDirty}
 	id := g.styles.intern(styleOf(NewCellWithBg(bg))) // ref=1 owner
 	for i := range r.cells {
 		g.styles.retain(id)
