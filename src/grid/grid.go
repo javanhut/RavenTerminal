@@ -298,6 +298,9 @@ func (g *Grid) WriteChar(c rune, fg, bg Color, flags CellFlags, link uint16, ulS
 				Bg:    g.lastBg,
 				Width: CellWidthNormal,
 			})
+			// The line continues onto the next row: mark it soft-wrapped so
+			// reflow can rejoin it on resize.
+			g.rows[g.CursorRow].flags |= RowSoftWrapped
 			g.cursorNewline()
 		} else {
 			// No auto-wrap: treat wide char as single width at last column
@@ -386,12 +389,14 @@ func (g *Grid) cursorNewline() {
 	g.wrapPending = false
 	g.CursorCol = 0
 	g.CursorRow++
-	// Check if we're at the bottom of the scroll region
-	if g.CursorRow >= g.scrollBottom {
+	// Scroll only when the cursor crosses the bottom margin from inside the
+	// scroll region. A cursor positioned below the region (possible when a TUI
+	// keeps a status area outside the margins) moves down without scrolling and
+	// stops at the last screen row.
+	if g.CursorRow == g.scrollBottom {
 		g.scrollUpRegionWithBg(g.eraseBg)
 		g.CursorRow = g.scrollBottom - 1
 	} else if g.CursorRow >= g.Rows {
-		g.scrollUpInternalWithBg(g.eraseBg)
 		g.CursorRow = g.Rows - 1
 	}
 }
@@ -1008,6 +1013,15 @@ func (g *Grid) DeleteChars(n int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
+	// Clamp to the space right of the cursor; an oversized count would index
+	// negative columns in the shift/clear loops below.
+	if n > g.Cols-g.CursorCol {
+		n = g.Cols - g.CursorCol
+	}
+	if n <= 0 {
+		return
+	}
+
 	// If cursor is on a continuation cell, clear the wide char first
 	if g.CursorCol > 0 {
 		idx := g.index(g.CursorCol, g.CursorRow)
@@ -1042,6 +1056,13 @@ func (g *Grid) DeleteChars(n int) {
 func (g *Grid) InsertChars(n int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+
+	if n > g.Cols-g.CursorCol {
+		n = g.Cols - g.CursorCol
+	}
+	if n <= 0 {
+		return
+	}
 
 	// If cursor is on a continuation cell, clear the wide char first
 	if g.CursorCol > 0 {

@@ -14,16 +14,34 @@ type logicalLine struct {
 // reflow rebuilds the grid at (newCols,newRows), rewrapping soft-wrapped lines.
 // Caller holds g.mu. Used for the main screen; the alternate screen clamps.
 func (g *Grid) reflow(newCols, newRows int) {
-	// 1. Gather logical lines from history + active rows, tracking the cursor's
-	//    logical position so it can be restored afterward.
-	var lines []logicalLine
-	cur := logicalLine{}
+	// 0. Trim fully-blank rows below the cursor. They are the unused area under
+	//    the shell prompt, not content: treating them as content pushes the real
+	//    content into scrollback on shrink and leaves a duplicated, stale copy
+	//    visible at the top after the next grow. Never trim a row that continues
+	//    a soft-wrapped line.
 	cursorAbsRow := len(g.history) + g.CursorRow
-	cursorLine, cursorOffset := -1, 0
-
 	seq := make([]*Row, 0, len(g.history)+len(g.rows))
 	seq = append(seq, g.history...)
 	seq = append(seq, g.rows...)
+	keep := len(seq)
+	for keep-1 > cursorAbsRow &&
+		g.rowIsBlank(seq[keep-1]) &&
+		seq[keep-2].flags&RowSoftWrapped == 0 {
+		keep--
+	}
+	for _, r := range seq[keep:] {
+		g.releaseRow(r)
+	}
+	seq = seq[:keep]
+
+	// 1. Gather logical lines from history + active rows, tracking the cursor's
+	//    logical position AND the history/active boundary so both can be
+	//    restored afterward.
+	var lines []logicalLine
+	cur := logicalLine{}
+	cursorLine, cursorOffset := -1, 0
+	boundaryAbsRow := len(g.history) // first active row
+	boundaryLine, boundaryOffset := 0, 0
 
 	for absRow, r := range seq {
 		offsetInLine := len(cur.cells)
@@ -33,6 +51,10 @@ func (g *Grid) reflow(newCols, newRows int) {
 		if absRow == cursorAbsRow {
 			cursorLine = len(lines)
 			cursorOffset = offsetInLine + g.CursorCol
+		}
+		if absRow == boundaryAbsRow {
+			boundaryLine = len(lines)
+			boundaryOffset = offsetInLine
 		}
 		if r.flags&RowSoftWrapped == 0 {
 			cur.hardEnd = true
@@ -53,6 +75,8 @@ func (g *Grid) reflow(newCols, newRows int) {
 	var newSeq []*Row
 	var cursorNewAbsRow, cursorNewCol int
 	cursorFound := false
+	boundaryNewAbsRow := 0
+	boundaryFound := false
 	for li, ln := range lines {
 		trimLogicalTrailingBlanks(&ln)
 		segments := wrapCells(ln.cells, newCols)
@@ -64,6 +88,14 @@ func (g *Grid) reflow(newCols, newRows int) {
 			// Mark soft-wrapped unless this is the final segment of the line.
 			if si < len(segments)-1 {
 				r.flags |= RowSoftWrapped
+			}
+			// Locate the history/active boundary's new row.
+			if li == boundaryLine && !boundaryFound {
+				start := si * newCols
+				if boundaryOffset >= start && boundaryOffset < start+newCols || si == len(segments)-1 {
+					boundaryNewAbsRow = len(newSeq)
+					boundaryFound = true
+				}
 			}
 			// Locate the cursor's new row/col.
 			if li == cursorLine && !cursorFound {
@@ -85,6 +117,10 @@ func (g *Grid) reflow(newCols, newRows int) {
 		// An empty hard line still occupies one row.
 		if len(segments) == 0 {
 			r := newRow(newCols)
+			if li == boundaryLine && !boundaryFound {
+				boundaryNewAbsRow = len(newSeq)
+				boundaryFound = true
+			}
 			if li == cursorLine && !cursorFound {
 				cursorNewAbsRow = len(newSeq)
 				cursorNewCol = 0
@@ -94,17 +130,26 @@ func (g *Grid) reflow(newCols, newRows int) {
 		}
 	}
 
-	// 4. Ensure at least newRows rows exist; split into history + active.
-	for len(newSeq) < newRows {
-		newSeq = append(newSeq, newRow(newCols))
+	// 4. Choose the active window. Keep the old history/active boundary where
+	//    possible so resizing doesn't shuffle content between the screen and
+	//    scrollback (a prompt at the top of the screen stays at the top); the
+	//    boundary is only forced down when the rewrapped content needs more
+	//    rows than the new screen has. activeStart is the PRE-TRIM boundary:
+	//    front-trimming history below never moves it, so cursor math against
+	//    it is invariant to trimming.
+	activeStart := boundaryNewAbsRow
+	if !boundaryFound {
+		activeStart = len(newSeq) - newRows
 	}
-	// activeStart is the PRE-TRIM boundary between history and the active
-	// region. The active region is always the last newRows rows of newSeq, and
-	// front-trimming history never moves it, so the cursor's offset within the
-	// active region is computed against this boundary (invariant to trimming).
-	activeStart := len(newSeq) - newRows
+	if floor := len(newSeq) - newRows; activeStart < floor {
+		activeStart = floor
+	}
 	if activeStart < 0 {
 		activeStart = 0
+	}
+	// Pad with blank rows so the active region is exactly newRows tall.
+	for len(newSeq) < activeStart+newRows {
+		newSeq = append(newSeq, newRow(newCols))
 	}
 
 	// Compute the cursor's row within the active region now, using the pre-trim
@@ -117,7 +162,7 @@ func (g *Grid) reflow(newCols, newRows int) {
 
 	// Capture the active region as its own slice BEFORE trimming history, so the
 	// in-place front-trim below cannot alias or clobber the active rows.
-	active := append([]*Row(nil), newSeq[activeStart:]...)
+	active := append([]*Row(nil), newSeq[activeStart:activeStart+newRows]...)
 	histRows := newSeq[:activeStart]
 
 	// Trim history beyond the cap (releasing the dropped front rows).
@@ -216,6 +261,17 @@ func trimLogicalTrailingBlanks(ln *logicalLine) {
 		n--
 	}
 	ln.cells = ln.cells[:n]
+}
+
+// rowIsBlank reports whether every cell in a row is an unstyled, link-free blank.
+func (g *Grid) rowIsBlank(r *Row) bool {
+	for _, sc := range r.cells {
+		c := g.inflate(sc)
+		if !isBlankCell(c) || c.Link != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func isBlankCell(c Cell) bool {

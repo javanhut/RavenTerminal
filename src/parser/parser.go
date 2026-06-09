@@ -532,18 +532,29 @@ func (t *Terminal) processEscape(b byte) {
 
 // processCSI handles bytes in CSI state
 func (t *Terminal) processCSI(b byte) {
-	if b >= 0x30 && b <= 0x3f {
+	switch {
+	case b >= 0x30 && b <= 0x3f:
 		// Parameter byte
 		t.csiParams += string(b)
-	} else if b >= 0x20 && b <= 0x2f {
+	case b >= 0x20 && b <= 0x2f:
 		// Intermediate byte
 		t.csiParams += string(b)
-	} else if b >= 0x40 && b <= 0x7e {
+	case b >= 0x40 && b <= 0x7e:
 		// Final byte
 		t.executeCSI(b)
 		t.csiParams = "" // Clear params after execution
 		t.state = StateGround
-	} else {
+	case b == 0x1b: // ESC aborts the sequence and starts a new one
+		t.csiParams = ""
+		t.state = StateEscape
+	case b == 0x18 || b == 0x1a: // CAN/SUB abort
+		t.csiParams = ""
+		t.state = StateGround
+	case b < 0x20:
+		// C0 controls embedded in a CSI sequence execute immediately without
+		// aborting it (VT behavior; curses output relies on this).
+		t.processGround(b)
+	default:
 		t.csiParams = "" // Clear params on abort
 		t.state = StateGround
 	}
@@ -669,9 +680,20 @@ func (t *Terminal) executeCSI(final byte) {
 		t.handleDA(params)
 	case 'g': // TBC - Tab clear (0=at cursor, 3=all)
 		t.Grid.ClearTabStop(t.getParam(params, 0, 0))
-	case 't': // Window manipulation (ignore)
+	case 't': // Window manipulation: report text-area size in chars (18)
+		if t.getParam(params, 0, 0) == 18 && t.responseWriter != nil {
+			t.responseWriter([]byte(fmt.Sprintf("\x1b[8;%d;%dt", t.Grid.Rows, t.Grid.Cols)))
+		}
 	case 'q': // DECSCUSR - Set cursor style (ignore for now)
 		t.setCursorStyle(params)
+	case 'p':
+		if strings.HasSuffix(t.csiParams, "!") {
+			// DECSTR - soft terminal reset
+			t.softReset()
+		} else if strings.HasPrefix(t.csiParams, "?") && strings.HasSuffix(t.csiParams, "$") {
+			// DECRQM - request DEC private mode state
+			t.handleDECRQM(params)
+		}
 	}
 }
 
@@ -1391,6 +1413,70 @@ func (t *Terminal) getParam(params []int, index, defaultVal int) int {
 	return defaultVal
 }
 
+// softReset implements DECSTR (CSI ! p): reset modes and attributes without
+// clearing the screen. TUI apps (vim among them) issue this on startup/exit.
+func (t *Terminal) softReset() {
+	t.currentFg = grid.DefaultFg()
+	t.currentBg = grid.DefaultBg()
+	t.currentFlags = 0
+	t.currentUnderlineStyle = 0
+	t.currentUnderlineColor = grid.Color{}
+	t.currentLinkID = 0
+	t.Grid.SetEraseBackground(grid.DefaultBg())
+	t.originMode = false
+	t.insertMode = false
+	t.appCursorKeys = false
+	t.cursorVisible = true
+	t.cursorStyle = CursorStyleBlock
+	t.cursorBlinking = true
+	t.Grid.SetAutoWrap(true)
+	// Margins reset to the full screen; DECSTR does not move the cursor.
+	t.Grid.RestoreScrollRegion(1, t.Grid.Rows)
+	t.charsetG0 = charsetASCII
+	t.charsetG1 = charsetASCII
+	t.activeCharset = 0
+	t.charsetPending = charsetTargetNone
+}
+
+// handleDECRQM responds to DECRQM (CSI ? Ps $ p) private-mode state requests
+// with CSI ? Ps ; Pm $ y where Pm is 1=set, 2=reset, 0=not recognized.
+func (t *Terminal) handleDECRQM(params []int) {
+	if t.responseWriter == nil {
+		return
+	}
+	mode := t.getParam(params, 0, 0)
+	report := func(set bool) int {
+		if set {
+			return 1
+		}
+		return 2
+	}
+	state := 0 // not recognized
+	switch mode {
+	case 1:
+		state = report(t.appCursorKeys)
+	case 6:
+		state = report(t.originMode)
+	case 7:
+		state = report(t.Grid.GetAutoWrap())
+	case 25:
+		state = report(t.cursorVisible)
+	case 47, 1047, 1049:
+		state = report(t.alternateScreen)
+	case 1000, 1002, 1003:
+		state = report(t.mouseMode == mode)
+	case 1004:
+		state = report(t.focusReporting)
+	case 1006:
+		state = report(t.mouseSGRMode)
+	case 2004:
+		state = report(t.bracketedPaste)
+	case 2026:
+		state = report(t.syncActive)
+	}
+	t.responseWriter([]byte(fmt.Sprintf("\x1b[?%d;%d$y", mode, state)))
+}
+
 // reset resets the terminal state
 func (t *Terminal) reset() {
 	t.Grid.ClearAll()
@@ -1424,10 +1510,26 @@ func (t *Terminal) reset() {
 func (t *Terminal) Resize(cols, rows int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.Grid.Resize(cols, rows)
 	if t.savedMainGrid != nil {
+		// Resizing while on the alternate screen (e.g. inside vim): keep the
+		// saved main-screen scroll region in sync with the new height, otherwise
+		// exiting the alternate screen restores a stale region sized for the old
+		// grid and the shell scrolls inside a partial window.
+		oldRows := t.savedMainGrid.Rows
+		wasFull := t.savedMainScrollTop == 1 && t.savedMainScrollBottom == oldRows
 		t.savedMainGrid.Resize(cols, rows)
+		if wasFull {
+			t.savedMainScrollTop, t.savedMainScrollBottom = 1, rows
+		} else {
+			if t.savedMainScrollBottom > rows {
+				t.savedMainScrollBottom = rows
+			}
+			if t.savedMainScrollTop >= t.savedMainScrollBottom {
+				t.savedMainScrollTop, t.savedMainScrollBottom = 1, rows
+			}
+		}
 	}
+	t.Grid.Resize(cols, rows)
 }
 
 // IsCursorVisible returns whether the cursor should be visible

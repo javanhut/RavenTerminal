@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"os/user"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -220,8 +219,12 @@ func NewPtySession(cols, rows uint16, startDir string) (*PtySession, error) {
 	env = replaceEnv(env, "HOME", currentUser.HomeDir)
 	env = replaceEnv(env, "USER", currentUser.Username)
 	env = replaceEnv(env, "SHELL", shell)
-	env = replaceEnv(env, "COLUMNS", strconv.Itoa(int(cols)))
-	env = replaceEnv(env, "LINES", strconv.Itoa(int(rows)))
+	// NOTE: deliberately do NOT export COLUMNS/LINES. ncurses (use_env) and many
+	// TUI apps prefer those env vars over the PTY's TIOCGWINSZ size, and env vars
+	// never update on resize — exporting them freezes apps at the startup size.
+	// The PTY winsize (set below and on every Resize) is the source of truth.
+	env = removeEnv(env, "COLUMNS")
+	env = removeEnv(env, "LINES")
 	env = replaceEnv(env, "LANG", "en_US.UTF-8")
 	env = replaceEnv(env, "LC_ALL", "en_US.UTF-8")
 	if xdgRuntimeDir != "" {
@@ -292,13 +295,17 @@ func NewPtySession(cols, rows uint16, startDir string) (*PtySession, error) {
 }
 
 func replaceEnv(env []string, key, value string) []string {
+	return append(removeEnv(env, key), key+"="+value)
+}
+
+func removeEnv(env []string, key string) []string {
 	prefix := key + "="
 	for i := len(env) - 1; i >= 0; i-- {
 		if strings.HasPrefix(env[i], prefix) {
 			env = append(env[:i], env[i+1:]...)
 		}
 	}
-	return append(env, prefix+value)
+	return env
 }
 
 // CurrentDir returns the process working directory if available.

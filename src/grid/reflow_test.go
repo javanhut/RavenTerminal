@@ -94,3 +94,67 @@ func TestReflowCursorStaysOnContent(t *testing.T) {
 		t.Fatalf("cursor out of bounds after reflow: (%d,%d)", col, row)
 	}
 }
+
+// TestReflowGrowShrinkKeepsPromptAtTop reproduces the "ghost prompt" bug: with
+// a two-row prompt at the top of an otherwise blank screen, growing then
+// shrinking the window must not push the prompt into scrollback (shrink) and
+// then pull the stale copy back in above a redrawn prompt (grow). The blank
+// area under the cursor is unused space, not content.
+func TestReflowGrowShrinkKeepsPromptAtTop(t *testing.T) {
+	g := NewGrid(20, 10)
+	writeStr(g, "~")
+	g.CarriageReturn()
+	g.Newline()
+	writeStr(g, "> ") // cursor at (2,1)
+
+	g.Resize(20, 30) // grow
+	if col, row := g.GetCursor(); col != 2 || row != 1 {
+		t.Fatalf("after grow: cursor = (%d,%d), want (2,1)", col, row)
+	}
+	if len(g.history) != 0 {
+		t.Fatalf("after grow: history has %d rows, want 0", len(g.history))
+	}
+
+	g.Resize(20, 10) // shrink back
+	if col, row := g.GetCursor(); col != 2 || row != 1 {
+		t.Fatalf("after shrink: cursor = (%d,%d), want (2,1)", col, row)
+	}
+	if len(g.history) != 0 {
+		t.Fatalf("after shrink: history has %d rows, want 0 (prompt pushed to scrollback)", len(g.history))
+	}
+	if got := line(g, 0); got != "~" {
+		t.Fatalf("after shrink: row 0 = %q, want %q", got, "~")
+	}
+	// Exactly one copy of the prompt may exist across history+active.
+	if txt := allText(g); strings.Count(txt, "~") != 1 {
+		t.Fatalf("prompt duplicated after resize cycle: %q", txt)
+	}
+}
+
+// TestReflowShrinkAfterClearKeepsPromptAtTop: with scrollback present (e.g.
+// after `clear`) and the prompt at the top of the screen, shrinking must keep
+// the prompt at the top rather than pulling history back into view or pushing
+// the prompt out.
+func TestReflowShrinkAfterClearKeepsPromptAtTop(t *testing.T) {
+	g := NewGrid(20, 10)
+	for i := 0; i < 30; i++ {
+		writeStr(g, "old")
+		g.CarriageReturn()
+		g.Newline()
+	}
+	g.ClearAll() // push content to history, blank screen
+	g.SetCursorPos(1, 1)
+	writeStr(g, "> ") // prompt redrawn at top, cursor (2,0)
+	hist := len(g.history)
+
+	g.Resize(20, 6) // shrink
+	if got := line(g, 0); got != ">" {
+		t.Fatalf("after shrink: row 0 = %q, want %q", got, ">")
+	}
+	if col, row := g.GetCursor(); col != 2 || row != 0 {
+		t.Fatalf("after shrink: cursor = (%d,%d), want (2,0)", col, row)
+	}
+	if len(g.history) != hist {
+		t.Fatalf("after shrink: history = %d rows, want %d (boundary must not move)", len(g.history), hist)
+	}
+}

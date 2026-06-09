@@ -149,3 +149,91 @@ func TestScrollRegion(t *testing.T) {
 		t.Fatalf("scroll region = (%d,%d), want (2,4)", top, bottom)
 	}
 }
+
+func TestLinefeedBelowScrollRegionDoesNotScroll(t *testing.T) {
+	term := NewTerminal(10, 6)
+	term.Process([]byte("\x1b[1;4r")) // region rows 1-4
+	term.Process([]byte("\x1b[5;1Hstatus"))
+	term.Process([]byte("\x1b[6;1H")) // cursor on last screen row, below region
+	term.Process([]byte("\n"))        // LF below the region must not scroll it
+	_, row := term.Grid.GetCursor()
+	if row != 5 {
+		t.Fatalf("cursor row = %d, want 5 (clamped at screen bottom)", row)
+	}
+	if got := term.Grid.GetCell(0, 4).Char; got != 's' {
+		t.Fatalf("row 5 cell = %q, want 's' (status line must not move)", got)
+	}
+}
+
+func TestResizeInAltScreenRestoresFullScrollRegion(t *testing.T) {
+	term := NewTerminal(10, 10)
+	term.Process([]byte("\x1b[?1049h")) // enter alt screen (saves main region 1-10)
+	term.Resize(10, 20)                 // grow while in alt screen
+	term.Process([]byte("\x1b[?1049l")) // exit alt screen
+	top, bottom := term.Grid.GetScrollRegion()
+	if top != 1 || bottom != 20 {
+		t.Fatalf("scroll region after resize+alt-exit = (%d,%d), want (1,20)", top, bottom)
+	}
+}
+
+func TestC0ControlsInsideCSI(t *testing.T) {
+	term := NewTerminal(10, 3)
+	term.Process([]byte("ab"))
+	// BS embedded mid-CSI executes immediately; the CSI still completes.
+	term.Process([]byte("\x1b[\x081m"))
+	col, _ := term.Grid.GetCursor()
+	if col != 1 {
+		t.Fatalf("cursor col = %d, want 1 (BS inside CSI must execute)", col)
+	}
+	if term.currentFlags&grid.FlagBold == 0 {
+		t.Fatal("SGR 1 after embedded BS should still apply")
+	}
+}
+
+func TestDECRQMReportsModes(t *testing.T) {
+	term := NewTerminal(10, 5)
+	var out []byte
+	term.SetResponseWriter(func(b []byte) { out = append(out, b...) })
+	term.Process([]byte("\x1b[?2004h"))
+	term.Process([]byte("\x1b[?2004$p"))
+	if got := string(out); got != "\x1b[?2004;1$y" {
+		t.Fatalf("DECRQM reply = %q, want set (1)", got)
+	}
+	out = nil
+	term.Process([]byte("\x1b[?2004l"))
+	term.Process([]byte("\x1b[?2004$p"))
+	if got := string(out); got != "\x1b[?2004;2$y" {
+		t.Fatalf("DECRQM reply = %q, want reset (2)", got)
+	}
+	out = nil
+	term.Process([]byte("\x1b[?9999$p"))
+	if got := string(out); got != "\x1b[?9999;0$y" {
+		t.Fatalf("DECRQM reply = %q, want not-recognized (0)", got)
+	}
+}
+
+func TestDECSTRSoftReset(t *testing.T) {
+	term := NewTerminal(10, 5)
+	term.Process([]byte("\x1b[2;4r\x1b[?6h\x1b[?25l\x1b[1;31m\x1b[4h"))
+	term.Process([]byte("\x1b[!p"))
+	top, bottom := term.Grid.GetScrollRegion()
+	if top != 1 || bottom != 5 {
+		t.Fatalf("scroll region after DECSTR = (%d,%d), want (1,5)", top, bottom)
+	}
+	if term.originMode || term.insertMode || !term.cursorVisible {
+		t.Fatal("DECSTR should reset origin/insert modes and re-enable the cursor")
+	}
+	if term.currentFlags != 0 {
+		t.Fatal("DECSTR should reset SGR attributes")
+	}
+}
+
+func TestWindowSizeReport(t *testing.T) {
+	term := NewTerminal(80, 24)
+	var out []byte
+	term.SetResponseWriter(func(b []byte) { out = append(out, b...) })
+	term.Process([]byte("\x1b[18t"))
+	if got := string(out); got != "\x1b[8;24;80t" {
+		t.Fatalf("CSI 18t reply = %q, want \\x1b[8;24;80t", got)
+	}
+}
