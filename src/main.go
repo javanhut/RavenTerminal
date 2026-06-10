@@ -214,8 +214,13 @@ func main() {
 		// Source the script matching the shell in the active pane: init.sh is
 		// bash syntax and breaks fish, which gets its own init.fish.
 		cmd := ". " + shellQuote(initPath) + "\n"
-		if activeTab.ShellName() == "fish" {
+		switch activeTab.ShellName() {
+		case "fish":
 			cmd = "source " + config.FishQuote(config.FishInitPath()) + "\n"
+		case "ravenshell":
+			// rsh has no source command; the regenerated init.rsh applies to
+			// new shells via $RAVEN_INIT_SCRIPT.
+			return nil
 		}
 		return activeTab.Write([]byte(cmd))
 	}

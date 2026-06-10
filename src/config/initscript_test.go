@@ -235,3 +235,57 @@ func TestFishCustomPromptFallsBackToFull(t *testing.T) {
 		t.Errorf("custom style did not fall back to full prompt: %q", out)
 	}
 }
+
+// The generated rsh script must parse and run with ravenshell: define the
+// detect/prompt functions, then produce a prompt containing the Lang segment
+// (full style) without errors.
+func TestInitScriptRshSyntax(t *testing.T) {
+	for _, style := range []string{"full", "simple", "minimal", "custom"} {
+		t.Run(style, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Prompt.Style = style
+			cfg.Exports = map[string]string{"RAVEN_TEST": "plain value"}
+			writeScripts(t, cfg)
+			rshPath := RavenInitPath()
+			content, err := os.ReadFile(rshPath)
+			if err != nil {
+				t.Fatalf("rsh init script not written: %v", err)
+			}
+
+			ravenshell := shellPath(t, "ravenshell")
+
+			// The prompt function takes a status parameter only in the full
+			// style (custom without a script degrades to minimal).
+			call := "prompt()"
+			if style == "full" {
+				call = "prompt(0)"
+			}
+			driver := string(content) + "\nprint __raven_detect_lang()\nprint __raven_detect_vcs()\nprint " + call + "\n"
+			driverPath := filepath.Join(t.TempDir(), "driver.rsh")
+			if err := os.WriteFile(driverPath, []byte(driver), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			workDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(workDir, "go.mod"), []byte("module x\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			cmd := exec.Command(ravenshell, driverPath)
+			cmd.Dir = workDir
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("ravenshell failed: %v\n%s", err, out)
+			}
+			if strings.Contains(string(out), "parse error") || strings.Contains(string(out), "error:") {
+				t.Fatalf("ravenshell reported errors:\n%s", out)
+			}
+			if !strings.Contains(string(out), "Go") {
+				t.Errorf("language detection did not report Go:\n%s", out)
+			}
+			if style == "full" && !strings.Contains(string(out), "Lang:") {
+				t.Errorf("full prompt missing Lang segment:\n%s", out)
+			}
+		})
+	}
+}

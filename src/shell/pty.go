@@ -53,6 +53,11 @@ func resolveBasePath(shell string) string {
 			base = linuxDefaultPath
 		}
 	}
+	// Per-user bin dirs (claude, bun, cargo, ...) are normally added by login
+	// rc files, but a custom shell (e.g. ravenshell) may not source any.
+	if local := userLocalBinDirs(); len(local) > 0 {
+		base = composePath(nil, base+":"+strings.Join(local, ":"))
+	}
 
 	basePathCacheMu.Lock()
 	basePathCache[shell] = base
@@ -60,14 +65,15 @@ func resolveBasePath(shell string) string {
 	return base
 }
 
-// darwinLoginPath runs the login shell non-interactively to capture its PATH,
+// darwinLoginPath runs a login shell non-interactively to capture its PATH,
 // falling back to a sensible default (incl. Homebrew) on error or timeout.
 func darwinLoginPath(shell string) string {
 	fallback := darwinDefaultPath
 	if inherited := os.Getenv("PATH"); inherited != "" {
 		fallback = composePath(nil, darwinDefaultPath+":"+inherited)
 	}
-	if shell == "" {
+	probe := probeShellFor(shell)
+	if probe == "" {
 		return fallback
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -76,20 +82,75 @@ func darwinLoginPath(shell string) string {
 	// user's ~/.zprofile/~/.bash_profile/fish config -> Homebrew) and prints
 	// PATH colon-joined. fish stores PATH as a list joined by spaces, so it needs
 	// a different command to produce the colon-separated form.
-	shellBase := shell[strings.LastIndex(shell, "/")+1:]
+	probeBase := probe[strings.LastIndex(probe, "/")+1:]
 	var args []string
-	if shellBase == "fish" {
+	if probeBase == "fish" {
 		args = []string{"-l", "-c", "string join : $PATH"}
 	} else {
 		args = []string{"-l", "-c", "printf %s \"$PATH\""}
 	}
-	out, err := exec.CommandContext(ctx, shell, args...).Output()
+	out, err := exec.CommandContext(ctx, probe, args...).Output()
 	if err == nil {
-		if p := strings.TrimSpace(string(out)); p != "" {
+		if p := strings.TrimSpace(string(out)); looksLikePathList(p) {
 			return p
 		}
 	}
 	return fallback
+}
+
+// probeShellFor returns a shell safe to query for the login PATH. A custom
+// shell (e.g. ravenshell) may not implement `-l -c` or POSIX printf, and a
+// usage error printed with exit 0 would be taken for the PATH — so anything
+// outside the known set is probed via a standard shell instead (zsh first:
+// its /etc/zprofile runs path_helper on macOS).
+func probeShellFor(shell string) string {
+	switch shell[strings.LastIndex(shell, "/")+1:] {
+	case "bash", "zsh", "fish", "sh", "dash", "ksh":
+		return shell
+	}
+	for _, s := range []string{"/bin/zsh", "/bin/bash", "/bin/sh"} {
+		if _, err := os.Stat(s); err == nil {
+			return s
+		}
+	}
+	return ""
+}
+
+// looksLikePathList reports whether s plausibly is a colon-separated PATH:
+// no newlines, and every entry an absolute path. Shell usage/error text
+// captured by the probe must not be mistaken for a PATH.
+func looksLikePathList(s string) bool {
+	if s == "" || strings.ContainsAny(s, "\n\r") {
+		return false
+	}
+	for _, entry := range strings.Split(s, ":") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if !strings.HasPrefix(entry, "/") {
+			return false
+		}
+	}
+	return true
+}
+
+// userLocalBinDirs returns common per-user bin directories that exist on disk
+// (native installers put tools like claude in ~/.local/bin; bun and cargo use
+// their own homes).
+func userLocalBinDirs() []string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return nil
+	}
+	var dirs []string
+	for _, sub := range []string{".local/bin", ".bun/bin", ".cargo/bin", "go/bin"} {
+		dir := home + "/" + sub
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			dirs = append(dirs, dir)
+		}
+	}
+	return dirs
 }
 
 // composePath prepends custom directories to base and de-duplicates entries,
@@ -122,6 +183,16 @@ func composePath(custom []string, base string) string {
 // when the fish-side write failed.
 func fishInitIfPresent() string {
 	path := config.FishInitPath()
+	if _, err := os.Stat(path); err != nil {
+		return ""
+	}
+	return path
+}
+
+// ravenInitIfPresent returns the rsh init script path when the file exists,
+// "" otherwise. RavenShell loads it itself via $RAVEN_INIT_SCRIPT.
+func ravenInitIfPresent() string {
+	path := config.RavenInitPath()
 	if _, err := os.Stat(path); err != nil {
 		return ""
 	}
@@ -198,6 +269,10 @@ func NewPtySession(cols, rows uint16, startDir string) (*PtySession, error) {
 			} else {
 				cmd = exec.Command(shell, "-i")
 			}
+		case "ravenshell":
+			// RavenShell reads ~/.ravenrc itself and loads the rsh-syntax
+			// init script via $RAVEN_INIT_SCRIPT (set below).
+			cmd = exec.Command(shell)
 		default:
 			cmd = exec.Command(shell, "-i")
 		}
@@ -218,6 +293,10 @@ func NewPtySession(cols, rows uint16, startDir string) (*PtySession, error) {
 			} else {
 				cmd = exec.Command(shell, "--no-config", "-i")
 			}
+		case "ravenshell":
+			// RavenShell has no --no-config equivalent; it always reads
+			// ~/.ravenrc. The rsh init script still applies (set below).
+			cmd = exec.Command(shell)
 		default:
 			cmd = exec.Command(shell, "-i")
 		}
@@ -284,6 +363,14 @@ func NewPtySession(cols, rows uint16, startDir string) (*PtySession, error) {
 	// For bash without sourcing rc, we need to run the init script
 	if shellBase == "bash" && !cfg.Shell.SourceRC && initScriptPath != "" {
 		env = replaceEnv(env, "BASH_ENV", initScriptPath)
+	}
+
+	// RavenShell loads the rsh-syntax init script (prompt + detect functions)
+	// from this variable after ~/.ravenrc.
+	if shellBase == "ravenshell" {
+		if ravenInit := ravenInitIfPresent(); ravenInit != "" {
+			env = replaceEnv(env, "RAVEN_INIT_SCRIPT", ravenInit)
+		}
 	}
 
 	cmd.Env = env

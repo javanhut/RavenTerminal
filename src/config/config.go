@@ -556,10 +556,12 @@ func (c *Config) WriteInitScript() (string, error) {
 		return "", err
 	}
 
-	// Also write the fish-syntax variant; fish cannot source init.sh. A fish
-	// write failure must not disable the (already written) bash init, so it
-	// is not propagated; fish launch checks the file exists before sourcing.
+	// Also write the fish- and rsh-syntax variants; neither shell can source
+	// init.sh. A write failure must not disable the (already written) bash
+	// init, so it is not propagated; each launch path checks its file exists
+	// before using it.
 	c.writeFishInitScript()
+	c.writeRavenInitScript()
 
 	return initPath, nil
 }
