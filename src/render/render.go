@@ -101,8 +101,14 @@ func (r *Renderer) SetThemeByName(name string) {
 type Glyph struct {
 	X, Y          float32 // Position in atlas (normalized 0-1)
 	Width, Height float32 // Size in atlas (normalized 0-1)
-	PixelWidth    int     // Actual pixel width
+	PixelWidth    int     // Actual pixel width (0 for inkless glyphs, e.g. space)
 	PixelHeight   int     // Actual pixel height
+	// Bitmap placement relative to the pen position: OffsetX from the cell
+	// origin, OffsetY from the baseline (negative above it). Recording the
+	// bearings here lets wide glyphs (Nerd Font icons) render unclipped
+	// instead of being cut off at the cell boundary.
+	OffsetX float32
+	OffsetY float32
 }
 
 // Renderer handles OpenGL rendering with smooth fonts
@@ -120,15 +126,22 @@ type Renderer struct {
 	tabBarWidth     float32
 	currentFont     string
 
-	// Font data. The atlas is dynamic: glyphs are rasterized on demand into a
-	// growable RED texture (tile-per-glyph), replacing the old static bake.
-	glyphs        map[rune]Glyph
-	fontAtlas     uint32
-	atlasSize     int
-	atlasPix      []byte    // CPU-side mirror of the RED atlas (for grow/repack)
-	atlasNextSlot int       // next free tile slot
-	atlasAscent   int       // baseline offset within a tile (font ascent)
-	face          font.Face // current rasterization face (kept open)
+	// Font data. The atlas is dynamic: glyphs are rasterized on demand at
+	// their natural ink bounds and shelf-packed into a growable RED texture.
+	glyphs         map[rune]Glyph
+	glyphMisses    map[rune]bool // runes no font in the chain covers (negative cache)
+	fontAtlas      uint32
+	atlasSize      int
+	atlasPix       []byte    // CPU-side mirror of the RED atlas (for grow/repack)
+	shelfX, shelfY int       // shelf packer cursor
+	shelfH         int       // height of the current shelf
+	atlasAscent    int       // baseline offset from the cell top (font ascent)
+	face           font.Face // current rasterization face (kept open)
+	// Font fallback chain (see fallback.go): tried in order when the active
+	// font misses a glyph, before the substitution tables and the '?' resort.
+	fallbackFonts         []fallbackFont
+	fallbackFaces         []font.Face
+	systemFallbacksLoaded bool
 
 	// OpenGL resources
 	quadVAO     uint32
@@ -241,6 +254,7 @@ func NewRenderer() (*Renderer, error) {
 		tabBarWidth:     200.0,
 		currentFont:     fonts.DefaultFontName(),
 		glyphs:          make(map[rune]Glyph),
+		glyphMisses:     make(map[rune]bool),
 		// atlasSize calculated dynamically in loadFontData based on glyph count
 		fauxBold:   true,
 		fauxItalic: true,
@@ -300,8 +314,12 @@ func (r *Renderer) loadFontData(fontData []byte) error {
 	r.cellWidth = float32(advance.Ceil())
 	r.atlasAscent = metrics.Ascent.Ceil()
 
+	// Rebuild the fallback faces at the (possibly new) font size.
+	r.rebuildFallbackFaces()
+
 	// Reset the glyph cache and (re)create an empty atlas texture.
 	r.glyphs = make(map[rune]Glyph)
+	r.glyphMisses = make(map[rune]bool)
 	if r.fontAtlas != 0 {
 		gl.DeleteTextures(1, &r.fontAtlas)
 		r.fontAtlas = 0
@@ -2231,16 +2249,31 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 						g, ok = r.ensureGlyph('?')
 					}
 				}
-				if ok {
+				if ok && g.PixelWidth > 0 {
+					// Available span: wide chars own two cells; icons may
+					// also use a following blank cell (Ghostty-style), which
+					// is how Nerd Font icons are typically spaced in TUIs.
+					span := 1
+					if cell.Width == grid.CellWidthWide {
+						span = 2
+					} else if isIconRune(cell.Char) && col+1 < cols {
+						next := snap.Cells[row*cols+col+1]
+						if next.Char == ' ' || next.Char == 0 {
+							span = 2
+						}
+					}
+					if span == 2 && x+2*r.cellWidth > offsetX+paneWidth {
+						span = 1
+					}
+					gx, gyTop, gw, gh := r.glyphQuad(cell.Char, g, x, y, span)
 					var shear float32
 					if r.fauxItalic && cell.Flags&grid.FlagItalic != 0 {
-						shear = float32(g.PixelHeight) * 0.2
+						shear = gh * 0.2
 					}
-					gy := y + r.cellHeight
-					r.gridGlyphs.addGlyph(x, gy, float32(g.PixelWidth), float32(g.PixelHeight),
+					r.gridGlyphs.addGlyph(gx, gyTop+gh, gw, gh,
 						g.X, g.Y, g.Width, g.Height, fgColor, shear)
 					if r.fauxBold && cell.Flags&grid.FlagBold != 0 {
-						r.gridGlyphs.addGlyph(x+1, gy, float32(g.PixelWidth), float32(g.PixelHeight),
+						r.gridGlyphs.addGlyph(gx+1, gyTop+gh, gw, gh,
 							g.X, g.Y, g.Width, g.Height, fgColor, shear)
 					}
 				}
@@ -2511,6 +2544,23 @@ var unicodeFallbacks = map[rune]rune{
 	'\u2022': '*',  // BULLET
 	'\u2023': '>',  // TRIANGULAR BULLET
 	'\u25CF': '*',  // BLACK CIRCLE
+	// Dingbat arrows (e.g. nvim-tree's symlink arrow U+279B) degrade to the
+	// plain rightwards arrow, which every embedded font except Ubuntu Mono
+	// has; these only apply when no font in the fallback chain covers them.
+	'\u2794': '\u2192', // HEAVY WIDE-HEADED RIGHTWARDS ARROW
+	'\u2799': '\u2192', // HEAVY RIGHTWARDS ARROW
+	'\u279B': '\u2192', // DRAFTING POINT RIGHTWARDS ARROW
+	'\u279C': '\u2192', // HEAVY ROUND-TIPPED RIGHTWARDS ARROW
+	'\u279D': '\u2192', // TRIANGLE-HEADED RIGHTWARDS ARROW
+	'\u279E': '\u2192', // HEAVY TRIANGLE-HEADED RIGHTWARDS ARROW
+	'\u27A1': '\u2192', // BLACK RIGHTWARDS ARROW
+	'\u27A4': '\u2192', // BLACK RIGHTWARDS ARROWHEAD
+	'\u2192': '>',      // RIGHTWARDS ARROW (Ubuntu Mono lacks even this)
+	'\u2190': '<',      // LEFTWARDS ARROW
+	'\u276E': '<',      // HEAVY LEFT-POINTING ANGLE QUOTATION MARK
+	'\u276F': '>',      // HEAVY RIGHT-POINTING ANGLE QUOTATION MARK
+	'\u2713': 'v',      // CHECK MARK
+	'\u2717': 'x',      // BALLOT X
 }
 
 var quadrantBlockMasks = map[rune]uint8{
@@ -2640,13 +2690,14 @@ func (r *Renderer) drawChar(x, y float32, char rune, clr [4]float32, proj [16]fl
 // plain drawChar.
 func (r *Renderer) drawCharStyled(x, y float32, char rune, clr [4]float32, proj [16]float32, bold, italic bool) {
 	glyph, ok := r.lookupGlyph(char)
-	if !ok {
+	if !ok || glyph.PixelWidth == 0 {
 		return
 	}
 
-	// Calculate screen coordinates
-	w := float32(glyph.PixelWidth)
-	h := float32(glyph.PixelHeight)
+	// y is the cell bottom; place the glyph at its bearings relative to the
+	// cell box (with icon constraint applied).
+	gx, gyTop, w, h := r.glyphQuad(char, glyph, x, y-r.cellHeight, 1)
+	gy := gyTop + h
 
 	// Texture coordinates
 	tx := glyph.X
@@ -2661,12 +2712,12 @@ func (r *Renderer) drawCharStyled(x, y float32, char rune, clr [4]float32, proj 
 	}
 
 	vertices := []float32{
-		x + shear, y - h, tx, ty,
-		x + w + shear, y - h, tx + tw, ty,
-		x + w, y, tx + tw, ty + th,
-		x + shear, y - h, tx, ty,
-		x + w, y, tx + tw, ty + th,
-		x, y, tx, ty + th,
+		gx + shear, gyTop, tx, ty,
+		gx + w + shear, gyTop, tx + tw, ty,
+		gx + w, gy, tx + tw, ty + th,
+		gx + shear, gyTop, tx, ty,
+		gx + w, gy, tx + tw, ty + th,
+		gx, gy, tx, ty + th,
 	}
 
 	gl.UseProgram(r.fontProgram)
@@ -2712,13 +2763,18 @@ func (r *Renderer) drawTextScaled(x, y float32, text string, clr [4]float32, pro
 // drawCharScaled draws a character at a specific scale
 func (r *Renderer) drawCharScaled(x, y float32, char rune, clr [4]float32, proj [16]float32, scale float32) {
 	glyph, ok := r.lookupGlyph(char)
-	if !ok {
+	if !ok || glyph.PixelWidth == 0 {
 		return
 	}
 
-	// Calculate screen coordinates with scale
+	// Calculate screen coordinates with scale; y is the (scaled) cell bottom,
+	// so the baseline sits ascent-from-top within the scaled cell box.
 	w := float32(glyph.PixelWidth) * scale
 	h := float32(glyph.PixelHeight) * scale
+	baseline := y - r.cellHeight*scale + float32(r.atlasAscent)*scale
+	gx := x + glyph.OffsetX*scale
+	gyTop := baseline + glyph.OffsetY*scale
+	gy := gyTop + h
 
 	// Texture coordinates
 	tx := glyph.X
@@ -2727,12 +2783,12 @@ func (r *Renderer) drawCharScaled(x, y float32, char rune, clr [4]float32, proj 
 	th := glyph.Height
 
 	vertices := []float32{
-		x, y - h, tx, ty,
-		x + w, y - h, tx + tw, ty,
-		x + w, y, tx + tw, ty + th,
-		x, y - h, tx, ty,
-		x + w, y, tx + tw, ty + th,
-		x, y, tx, ty + th,
+		gx, gyTop, tx, ty,
+		gx + w, gyTop, tx + tw, ty,
+		gx + w, gy, tx + tw, ty + th,
+		gx, gyTop, tx, ty,
+		gx + w, gy, tx + tw, ty + th,
+		gx, gy, tx, ty + th,
 	}
 
 	gl.UseProgram(r.fontProgram)
@@ -2843,12 +2899,16 @@ func (r *Renderer) ChangeFont(name string) error {
 		return fmt.Errorf("font '%s' not found", name)
 	}
 
+	// Set the name first so the fallback chain rebuild excludes the new
+	// active font; restore it if the load fails.
+	prev := r.currentFont
+	r.currentFont = name
+
 	// loadFontData replaces the face, deletes the old atlas, and resets the cache.
 	if err := r.loadFontData(fontData); err != nil {
+		r.currentFont = prev
 		return err
 	}
-
-	r.currentFont = name
 	return nil
 }
 
@@ -2944,6 +3004,12 @@ func (r *Renderer) Destroy() {
 	gl.DeleteProgram(r.program)
 	gl.DeleteProgram(r.fontProgram)
 	gl.DeleteTextures(1, &r.fontAtlas)
+	if r.face != nil {
+		r.face.Close()
+	}
+	for _, f := range r.fallbackFaces {
+		f.Close()
+	}
 	r.destroyColorEmoji()
 }
 
