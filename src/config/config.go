@@ -178,6 +178,22 @@ fi
 echo "$_vcs"
 `
 
+const defaultLanguageDetect = `# Detect project language
+[ -f go.mod ] && echo "Go" && return 0
+[ -f Cargo.toml ] && echo "Rust" && return 0
+[ -f package.json ] && echo "JavaScript" && return 0
+[ -f pyproject.toml ] && echo "Python" && return 0
+[ -f requirements.txt ] && echo "Python" && return 0
+[ -f Pipfile ] && echo "Python" && return 0
+[ -f Gemfile ] && echo "Ruby" && return 0
+[ -f pom.xml ] && echo "Java" && return 0
+[ -f build.gradle ] && echo "Java" && return 0
+[ -f CMakeLists.txt ] && echo "C/C++" && return 0
+[ -f Makefile ] && echo "C/C++" && return 0
+ls *.crl >/dev/null 2>&1 && echo "Carrion" && return 0
+echo "None"
+`
+
 const defaultVCSDetect = `# Detect VCS (Git + Ivaldi)
 _vcs=""
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -293,24 +309,10 @@ func DefaultConfig() *Config {
 			ShowVCS:      true,
 		},
 		Scripts: ScriptsConfig{
-			Init:      "",
-			PrePrompt: "",
-			LanguageDetect: `# Detect project language
-[ -f go.mod ] && echo "Go" && return 0
-[ -f Cargo.toml ] && echo "Rust" && return 0
-[ -f package.json ] && echo "JavaScript" && return 0
-[ -f pyproject.toml ] && echo "Python" && return 0
-[ -f requirements.txt ] && echo "Python" && return 0
-[ -f Pipfile ] && echo "Python" && return 0
-[ -f Gemfile ] && echo "Ruby" && return 0
-[ -f pom.xml ] && echo "Java" && return 0
-[ -f build.gradle ] && echo "Java" && return 0
-[ -f CMakeLists.txt ] && echo "C/C++" && return 0
-[ -f Makefile ] && echo "C/C++" && return 0
-ls *.crl >/dev/null 2>&1 && echo "Carrion" && return 0
-echo "None"
-`,
-			VCSDetect: defaultVCSDetect,
+			Init:           "",
+			PrePrompt:      "",
+			LanguageDetect: defaultLanguageDetect,
+			VCSDetect:      defaultVCSDetect,
 		},
 		WebSearch: WebSearchConfig{
 			Enabled:        false,
@@ -553,6 +555,11 @@ func (c *Config) WriteInitScript() (string, error) {
 	if err := os.WriteFile(initPath, []byte(script), 0644); err != nil {
 		return "", err
 	}
+
+	// Also write the fish-syntax variant; fish cannot source init.sh. A fish
+	// write failure must not disable the (already written) bash init, so it
+	// is not propagated; fish launch checks the file exists before sourcing.
+	c.writeFishInitScript()
 
 	return initPath, nil
 }

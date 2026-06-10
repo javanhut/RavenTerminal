@@ -211,7 +211,12 @@ func main() {
 		if activeTab == nil {
 			return nil
 		}
+		// Source the script matching the shell in the active pane: init.sh is
+		// bash syntax and breaks fish, which gets its own init.fish.
 		cmd := ". " + shellQuote(initPath) + "\n"
+		if activeTab.ShellName() == "fish" {
+			cmd = "source " + config.FishQuote(config.FishInitPath()) + "\n"
+		}
 		return activeTab.Write([]byte(cmd))
 	}
 	settingsMenu.OnOllamaTest = func(baseURL string) error {

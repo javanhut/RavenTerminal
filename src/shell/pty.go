@@ -117,13 +117,31 @@ func composePath(custom []string, base string) string {
 	return strings.Join(out, ":")
 }
 
+// fishInitIfPresent returns the fish init script path when the file exists,
+// "" otherwise — so fish never starts with a "source: no such file" error
+// when the fish-side write failed.
+func fishInitIfPresent() string {
+	path := config.FishInitPath()
+	if _, err := os.Stat(path); err != nil {
+		return ""
+	}
+	return path
+}
+
 // PtySession manages a pseudo-terminal connection to a shell
 type PtySession struct {
-	cmd      *exec.Cmd
-	pty      *os.File
-	mu       sync.Mutex
-	exited   bool
-	exitedMu sync.Mutex
+	cmd       *exec.Cmd
+	pty       *os.File
+	mu        sync.Mutex
+	exited    bool
+	exitedMu  sync.Mutex
+	shellName string // basename of the launched shell (e.g. "bash", "fish")
+}
+
+// ShellName returns the basename of the shell this session runs (e.g.
+// "bash", "zsh", "fish"). Callers use it to send shell-appropriate commands.
+func (p *PtySession) ShellName() string {
+	return p.shellName
 }
 
 // NewPtySession creates a new PTY session with a login shell
@@ -173,7 +191,13 @@ func NewPtySession(cols, rows uint16, startDir string) (*PtySession, error) {
 			// Zsh will source .zshrc automatically
 			cmd = exec.Command(shell, "-i")
 		case "fish":
-			cmd = exec.Command(shell, "-i")
+			// Fish reads its own config, then -C sources the fish-syntax
+			// init script (init.sh is bash and unusable for fish).
+			if fishInit := fishInitIfPresent(); fishInit != "" {
+				cmd = exec.Command(shell, "-i", "-C", "source "+config.FishQuote(fishInit))
+			} else {
+				cmd = exec.Command(shell, "-i")
+			}
 		default:
 			cmd = exec.Command(shell, "-i")
 		}
@@ -189,7 +213,11 @@ func NewPtySession(cols, rows uint16, startDir string) (*PtySession, error) {
 		case "zsh":
 			cmd = exec.Command(shell, "--no-rcs", "-i")
 		case "fish":
-			cmd = exec.Command(shell, "--no-config", "-i")
+			if fishInit := fishInitIfPresent(); fishInit != "" {
+				cmd = exec.Command(shell, "--no-config", "-i", "-C", "source "+config.FishQuote(fishInit))
+			} else {
+				cmd = exec.Command(shell, "--no-config", "-i")
+			}
 		default:
 			cmd = exec.Command(shell, "-i")
 		}
@@ -278,9 +306,10 @@ func NewPtySession(cols, rows uint16, startDir string) (*PtySession, error) {
 	}
 
 	session := &PtySession{
-		cmd:    cmd,
-		pty:    ptmx,
-		exited: false,
+		cmd:       cmd,
+		pty:       ptmx,
+		exited:    false,
+		shellName: shellBase,
 	}
 
 	// Monitor for process exit

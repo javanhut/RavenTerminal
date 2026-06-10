@@ -212,6 +212,15 @@ func (p *Pane) ID() int {
 	return p.id
 }
 
+// ShellName returns the basename of the shell this pane runs, or "" when
+// unknown.
+func (p *Pane) ShellName() string {
+	if p == nil || p.pty == nil {
+		return ""
+	}
+	return p.pty.ShellName()
+}
+
 // PaneLayout contains layout information for rendering a pane
 type PaneLayout struct {
 	Pane   *Pane
@@ -759,6 +768,18 @@ func (t *Tab) Write(data []byte) error {
 		return t.activeNode.Pane.Write(data)
 	}
 	return nil
+}
+
+// ShellName returns the shell basename of the active pane (e.g. "bash",
+// "fish"), or "" when unknown.
+func (t *Tab) ShellName() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.activeNode != nil && t.activeNode.IsLeaf() && t.activeNode.Pane != nil {
+		return t.activeNode.Pane.ShellName()
+	}
+	return ""
 }
 
 // HasExited returns true if all panes have exited
