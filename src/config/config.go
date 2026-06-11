@@ -51,6 +51,7 @@ type OllamaConfig struct {
 	ThinkingBudget  int    `toml:"thinking_budget"`  // Max tokens for thinking (0 = no limit)
 	ShowThinking    bool   `toml:"show_thinking"`    // Show thinking content in UI (collapsible)
 	ExtendedTimeout int    `toml:"extended_timeout"` // Extended timeout in seconds for thinking models (0 = default 300s)
+	Tools           bool   `toml:"tools"`            // Let the model call read-only tools (web search, file/dir reads, read-only commands)
 }
 
 // ShellConfig holds shell-specific settings
@@ -330,6 +331,7 @@ func DefaultConfig() *Config {
 			ThinkingBudget:  0,    // No limit
 			ShowThinking:    true, // Show thinking by default
 			ExtendedTimeout: 600,  // 10 minutes for thinking models
+			Tools:           true, // Read-only tools on by default
 		},
 		Appearance: AppearanceConfig{
 			CursorStyle:       "block",

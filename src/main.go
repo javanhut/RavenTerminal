@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/javanhut/RavenTerminal/src/aipanel"
+	"github.com/javanhut/RavenTerminal/src/aitools"
 	"github.com/javanhut/RavenTerminal/src/commands"
 	"github.com/javanhut/RavenTerminal/src/config"
 	"github.com/javanhut/RavenTerminal/src/grid"
@@ -85,12 +86,29 @@ type aiResponse struct {
 	loaded   bool
 	token    string // For streaming: incremental token
 	done     bool   // For streaming: indicates final response
+	toolNote string // Tool activity line to surface in the panel ("web_search: ...")
 }
 
 type modelLoadResponse struct {
 	url   string
 	model string
 	err   error
+}
+
+// summarizeToolArgs renders tool-call arguments as a short human-readable
+// suffix for the panel's activity line, e.g. `: rust async runtime`.
+func summarizeToolArgs(args map[string]any) string {
+	// Prefer the primary argument each tool has.
+	for _, key := range []string{"query", "url", "path", "command"} {
+		if v, ok := args[key].(string); ok && strings.TrimSpace(v) != "" {
+			v = strings.TrimSpace(v)
+			if len([]rune(v)) > 60 {
+				v = string([]rune(v)[:57]) + "..."
+			}
+			return ": " + v
+		}
+	}
+	return ""
 }
 
 func shellQuote(value string) string {
@@ -337,12 +355,34 @@ func main() {
 		requestID := aiPanel.RequestID
 		needLoad := !aiPanel.ModelLoaded
 
-		messages := make([]ollama.Message, 0, len(aiPanel.Messages))
+		// History for the API: only the actual conversation. Tool-activity
+		// notes and error lines are panel UI, not chat turns.
+		messages := make([]ollama.Message, 0, len(aiPanel.Messages)+1)
+		toolsEnabled := settingsMenu.Config.Ollama.Tools
+		if toolsEnabled {
+			messages = append(messages, ollama.Message{Role: "system", Content: aitools.SystemPrompt()})
+		}
 		for _, msg := range aiPanel.Messages {
+			if msg.Role != "user" && msg.Role != "assistant" {
+				continue
+			}
 			messages = append(messages, ollama.Message{
 				Role:    msg.Role,
 				Content: msg.Content,
 			})
+		}
+
+		// Tool execution context (working dir follows the active pane).
+		workDir := ""
+		if at := tabManager.ActiveTab(); at != nil {
+			if pane := at.GetActivePane(); pane != nil {
+				workDir = pane.CurrentDir()
+			}
+		}
+		toolCfg := aitools.Config{
+			UseReaderProxy: settingsMenu.Config.WebSearch.UseReaderProxy,
+			ProxyURLs:      settingsMenu.Config.WebSearch.ReaderProxyURLs,
+			WorkDir:        workDir,
 		}
 
 		// Configure timeout based on thinking mode
@@ -351,7 +391,7 @@ func main() {
 			timeout = time.Duration(cfg.ExtendedTimeout) * time.Second
 		}
 
-		go func(id int, baseURL, model string, messages []ollama.Message, loadModel bool, thinkingEnabled bool, thinkingBudget int) {
+		go func(id int, baseURL, model string, messages []ollama.Message, loadModel bool, thinkingEnabled bool, thinkingBudget int, useTools bool, toolCfg aitools.Config) {
 			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
 
@@ -374,12 +414,65 @@ func main() {
 				aiResponses <- aiResponse{id: id, token: "", done: false, loaded: true}
 			}
 
-			// Use streaming chat with thinking support
-			result, err := client.ChatStreamWithThinking(ctx, messages, func(token string) {
+			var toolDefs []ollama.ToolDef
+			var registry *aitools.Registry
+			if useTools {
+				registry = aitools.NewRegistry(toolCfg)
+				for _, t := range registry.Tools() {
+					toolDefs = append(toolDefs, ollama.ToolDef{
+						Type: "function",
+						Function: ollama.ToolDefFunction{
+							Name:        t.Name,
+							Description: t.Description,
+							Parameters:  t.Parameters,
+						},
+					})
+				}
+			}
+
+			onToken := func(token string) {
 				aiResponses <- aiResponse{id: id, token: token, done: false}
-			}, nil)
+			}
+
+			// Agent loop: stream a response; if the model calls tools, run
+			// them (read-only by construction) and continue with the results
+			// until it answers in plain text or the round budget runs out.
+			const maxToolRounds = 6
+			var result ollama.ChatResult
+			var err error
+			for round := 0; ; round++ {
+				result, err = client.ChatStreamWithTools(ctx, messages, toolDefs, onToken, nil)
+				if err != nil && len(toolDefs) > 0 && strings.Contains(strings.ToLower(err.Error()), "does not support tools") {
+					// Model can't do tool calls; degrade to a plain chat
+					// rather than failing the whole conversation.
+					toolDefs = nil
+					result, err = client.ChatStreamWithTools(ctx, messages, nil, onToken, nil)
+				}
+				if err != nil || len(result.ToolCalls) == 0 || round >= maxToolRounds {
+					break
+				}
+
+				messages = append(messages, ollama.Message{
+					Role:      "assistant",
+					Content:   result.Content,
+					ToolCalls: result.ToolCalls,
+				})
+				for _, call := range result.ToolCalls {
+					name := call.Function.Name
+					aiResponses <- aiResponse{id: id, toolNote: name + summarizeToolArgs(call.Function.Arguments)}
+					output, terr := registry.Execute(ctx, name, call.Function.Arguments)
+					if terr != nil {
+						output = "Error: " + terr.Error()
+					}
+					messages = append(messages, ollama.Message{
+						Role:     "tool",
+						Content:  output,
+						ToolName: name,
+					})
+				}
+			}
 			aiResponses <- aiResponse{id: id, thinking: result.Thinking, err: err, done: true, loaded: loadSuccess}
-		}(requestID, cfg.URL, cfg.Model, messages, needLoad, cfg.ThinkingMode, cfg.ThinkingBudget)
+		}(requestID, cfg.URL, cfg.Model, messages, needLoad, cfg.ThinkingMode, cfg.ThinkingBudget, toolsEnabled, toolCfg)
 	}
 
 	win.GLFW().SetKeyCallback(func(w *glfw.Window, key glfw.Key, scancode int, action glfw.Action, mods glfw.ModifierKey) {
@@ -1702,6 +1795,13 @@ func main() {
 					if resp.loaded {
 						// Model finished loading, now generating
 						aiPanel.Status = "Thinking..."
+					}
+					if resp.toolNote != "" {
+						// Tool activity: show as its own dim line in the
+						// conversation and keep the spinner running.
+						aiPanel.AddMessage("tool", resp.toolNote)
+						aiPanel.Status = "Running tools..."
+						break
 					}
 					// Streaming token - append to assistant message
 					if resp.token != "" {

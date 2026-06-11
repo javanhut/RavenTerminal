@@ -17,6 +17,11 @@ type MenuState int
 const (
 	MenuClosed MenuState = iota
 	MenuMain
+	MenuBasic        // Basic Settings category
+	MenuAppearance   // Appearance category
+	MenuAI           // AI Features category
+	MenuWeb          // Web Features category
+	MenuExperimental // Experimental Features category
 	MenuShellSelect
 	MenuThemeSelect
 	MenuPromptSettings
@@ -239,29 +244,49 @@ func (m *Menu) GetInputBuffer() string {
 	return m.InputBuffer
 }
 
-// buildMainMenu builds the main menu items
+// buildMainMenu builds the top-level category list. Settings live in
+// category submenus so it's clear where a change is being made.
 func (m *Menu) buildMainMenu() {
+	m.Items = []MenuItem{
+		{Label: "SETTINGS", IsHeader: true},
+		{Label: "Basic Settings..."},
+		{Label: "Appearance..."},
+		{Label: "AI Features..."},
+		{Label: "Web Features..."},
+		{Label: "Experimental Features..."},
+		{Label: "ACTIONS", IsHeader: true},
+		{Label: "Reload Config"},
+		{Label: "Save and Close"},
+		{Label: "Cancel"},
+	}
+}
+
+// buildBasicMenu: shell and environment configuration.
+func (m *Menu) buildBasicMenu() {
 	currentShell := m.Config.Shell.Path
 	if currentShell == "" {
 		currentShell = "(system default)"
 	}
+	m.Items = []MenuItem{
+		{Label: "BASIC SETTINGS", IsHeader: true},
+		{Label: "Shell: " + currentShell},
+		{Label: "Source RC Files", IsToggle: true, Toggled: m.Config.Shell.SourceRC},
+		{Label: "Scripts..."},
+		{Label: "Commands (" + itoa(len(m.Config.Commands)) + ")..."},
+		{Label: "Aliases (" + itoa(len(m.Config.Aliases)) + ")..."},
+		{Label: "Exports (" + itoa(len(m.Config.Exports)) + ")..."},
+		{Label: "PATH Directories (" + itoa(len(m.Config.Shell.Paths)) + ")..."},
+		{Label: "Back"},
+	}
+}
 
+// buildAppearanceMenu: visual configuration.
+func (m *Menu) buildAppearanceMenu() {
 	themeLabel := config.ThemeLabel(m.Config.Theme)
 	promptStyle := m.Config.Prompt.Style
 	if promptStyle == "" {
 		promptStyle = "full"
 	}
-
-	ollamaURL := m.Config.Ollama.URL
-	if ollamaURL == "" {
-		ollamaURL = "(not set)"
-	}
-	ollamaModel := m.Config.Ollama.Model
-	if ollamaModel == "" {
-		ollamaModel = "(not set)"
-	}
-
-	// Get appearance values with defaults
 	cursorStyle := m.Config.Appearance.CursorStyle
 	if cursorStyle == "" {
 		cursorStyle = "block"
@@ -270,18 +295,7 @@ func (m *Menu) buildMainMenu() {
 	if panelWidth == 0 {
 		panelWidth = 35.0
 	}
-
 	m.Items = []MenuItem{
-		// Shell & Environment
-		{Label: "SHELL & ENVIRONMENT", IsHeader: true},
-		{Label: "Shell: " + currentShell},
-		{Label: "Source RC Files", IsToggle: true, Toggled: m.Config.Shell.SourceRC},
-		{Label: "Scripts..."},
-		{Label: "Commands (" + itoa(len(m.Config.Commands)) + ")..."},
-		{Label: "Aliases (" + itoa(len(m.Config.Aliases)) + ")..."},
-		{Label: "Exports (" + itoa(len(m.Config.Exports)) + ")..."},
-		{Label: "PATH Directories (" + itoa(len(m.Config.Shell.Paths)) + ")..."},
-		// Appearance
 		{Label: "APPEARANCE", IsHeader: true},
 		{Label: "Theme: " + themeLabel},
 		{Label: "Font Size: " + formatFloat(m.Config.FontSize)},
@@ -290,10 +304,22 @@ func (m *Menu) buildMainMenu() {
 		{Label: "Panel Width: " + formatFloat(panelWidth) + "%"},
 		{Label: "Prompt Style: " + promptStyle},
 		{Label: "Prompt Options..."},
-		// AI Features
+		{Label: "Back"},
+	}
+}
+
+// buildAIMenu: Ollama chat configuration.
+func (m *Menu) buildAIMenu() {
+	ollamaURL := m.Config.Ollama.URL
+	if ollamaURL == "" {
+		ollamaURL = "(not set)"
+	}
+	ollamaModel := m.Config.Ollama.Model
+	if ollamaModel == "" {
+		ollamaModel = "(not set)"
+	}
+	m.Items = []MenuItem{
 		{Label: "AI FEATURES", IsHeader: true},
-		{Label: "Web Search", IsToggle: true, Toggled: m.Config.WebSearch.Enabled},
-		{Label: "Reader Proxy", IsToggle: true, Toggled: m.Config.WebSearch.UseReaderProxy},
 		{Label: "Ollama Chat", IsToggle: true, Toggled: m.Config.Ollama.Enabled},
 		{Label: "Ollama URL: " + truncate(ollamaURL, 25)},
 		{Label: "Ollama Model: " + truncate(ollamaModel, 25)},
@@ -303,11 +329,49 @@ func (m *Menu) buildMainMenu() {
 		{Label: "Ollama Models..."},
 		{Label: "Thinking Mode", IsToggle: true, Toggled: m.Config.Ollama.ThinkingMode},
 		{Label: "Show Thinking", IsToggle: true, Toggled: m.Config.Ollama.ShowThinking},
-		// Actions
-		{Label: "ACTIONS", IsHeader: true},
-		{Label: "Reload Config"},
-		{Label: "Save and Close"},
-		{Label: "Cancel"},
+		{Label: "AI Tools (read-only)", IsToggle: true, Toggled: m.Config.Ollama.Tools},
+		{Label: "Back"},
+	}
+}
+
+// buildWebMenu: web search configuration.
+func (m *Menu) buildWebMenu() {
+	m.Items = []MenuItem{
+		{Label: "WEB FEATURES", IsHeader: true},
+		{Label: "Web Search", IsToggle: true, Toggled: m.Config.WebSearch.Enabled},
+		{Label: "Reader Proxy", IsToggle: true, Toggled: m.Config.WebSearch.UseReaderProxy},
+		{Label: "Back"},
+	}
+}
+
+// buildExperimentalMenu: rendering experiments that may not suit every font.
+func (m *Menu) buildExperimentalMenu() {
+	m.Items = []MenuItem{
+		{Label: "EXPERIMENTAL FEATURES", IsHeader: true},
+		{Label: "Faux Bold", IsToggle: true, Toggled: m.Config.Appearance.FauxBold},
+		{Label: "Faux Italic", IsToggle: true, Toggled: m.Config.Appearance.FauxItalic},
+		{Label: "Undercurl", IsToggle: true, Toggled: m.Config.Appearance.Undercurl},
+		{Label: "Back"},
+	}
+}
+
+// rebuildCurrent rebuilds the items for whichever menu is showing, so toggle
+// and input handlers refresh in place regardless of which category they live
+// in.
+func (m *Menu) rebuildCurrent() {
+	switch m.State {
+	case MenuBasic:
+		m.buildBasicMenu()
+	case MenuAppearance:
+		m.buildAppearanceMenu()
+	case MenuAI:
+		m.buildAIMenu()
+	case MenuWeb:
+		m.buildWebMenu()
+	case MenuExperimental:
+		m.buildExperimentalMenu()
+	default:
+		m.rebuildCurrent()
 	}
 }
 
@@ -659,7 +723,9 @@ func (m *Menu) Select() {
 	m.debugf("select state=%s index=%d label=%q value=%q", m.stateName(), m.SelectedIndex, item.Label, item.Value)
 
 	switch m.State {
-	case MenuMain:
+	case MenuMain, MenuBasic, MenuAppearance, MenuAI, MenuWeb, MenuExperimental:
+		// Labels are unique across the category menus, so they share the
+		// label-dispatch handler.
 		m.handleMainSelect()
 	case MenuShellSelect:
 		m.handleShellSelect(item)
@@ -698,11 +764,35 @@ func (m *Menu) handleMainSelect() {
 	// Dispatch by label prefix so the menu is robust to item insertions/order.
 	label := m.Items[m.SelectedIndex].Label
 	switch {
+	case label == "Basic Settings...":
+		m.navigateTo(MenuBasic, m.buildBasicMenu)
+	case label == "Appearance...":
+		m.navigateTo(MenuAppearance, m.buildAppearanceMenu)
+	case label == "AI Features...":
+		m.navigateTo(MenuAI, m.buildAIMenu)
+	case label == "Web Features...":
+		m.navigateTo(MenuWeb, m.buildWebMenu)
+	case label == "Experimental Features...":
+		m.navigateTo(MenuExperimental, m.buildExperimentalMenu)
+	case label == "Back":
+		m.goBack()
+	case label == "Faux Bold":
+		m.Config.Appearance.FauxBold = !m.Config.Appearance.FauxBold
+		m.rebuildCurrent()
+		m.StatusMessage = "Updated (save to persist)"
+	case label == "Faux Italic":
+		m.Config.Appearance.FauxItalic = !m.Config.Appearance.FauxItalic
+		m.rebuildCurrent()
+		m.StatusMessage = "Updated (save to persist)"
+	case label == "Undercurl":
+		m.Config.Appearance.Undercurl = !m.Config.Appearance.Undercurl
+		m.rebuildCurrent()
+		m.StatusMessage = "Updated (save to persist)"
 	case strings.HasPrefix(label, "Shell:"):
 		m.navigateTo(MenuShellSelect, m.buildShellMenu)
 	case label == "Source RC Files":
 		m.Config.Shell.SourceRC = !m.Config.Shell.SourceRC
-		m.buildMainMenu()
+		m.rebuildCurrent()
 		m.StatusMessage = "Updated (restart tab to apply)"
 	case label == "Scripts...":
 		m.navigateTo(MenuScripts, m.buildScriptsMenu)
@@ -722,7 +812,7 @@ func (m *Menu) handleMainSelect() {
 		m.navigateTo(MenuCursorStyle, m.buildCursorStyleMenu)
 	case label == "Cursor Blink":
 		m.Config.Appearance.CursorBlink = !m.Config.Appearance.CursorBlink
-		m.buildMainMenu()
+		m.rebuildCurrent()
 		m.StatusMessage = "Updated (save to persist)"
 	case strings.HasPrefix(label, "Panel Width:"):
 		pw := m.Config.Appearance.PanelWidthPercent
@@ -736,15 +826,15 @@ func (m *Menu) handleMainSelect() {
 		m.navigateTo(MenuPromptSettings, m.buildPromptSettingsMenu)
 	case label == "Web Search":
 		m.Config.WebSearch.Enabled = !m.Config.WebSearch.Enabled
-		m.buildMainMenu()
+		m.rebuildCurrent()
 		m.StatusMessage = "Updated (save to persist)"
 	case label == "Reader Proxy":
 		m.Config.WebSearch.UseReaderProxy = !m.Config.WebSearch.UseReaderProxy
-		m.buildMainMenu()
+		m.rebuildCurrent()
 		m.StatusMessage = "Updated (save to persist)"
 	case label == "Ollama Chat":
 		m.Config.Ollama.Enabled = !m.Config.Ollama.Enabled
-		m.buildMainMenu()
+		m.rebuildCurrent()
 		m.StatusMessage = "Updated (save to persist)"
 	case strings.HasPrefix(label, "Ollama URL:"):
 		m.startInputWithValue(InputOllamaURL, "Ollama base URL:", m.Config.Ollama.URL)
@@ -791,11 +881,15 @@ func (m *Menu) handleMainSelect() {
 		m.navigateTo(MenuOllamaModels, m.buildOllamaModelsMenu)
 	case label == "Thinking Mode":
 		m.Config.Ollama.ThinkingMode = !m.Config.Ollama.ThinkingMode
-		m.buildMainMenu()
+		m.rebuildCurrent()
 		m.StatusMessage = "Updated (save to persist)"
 	case label == "Show Thinking":
 		m.Config.Ollama.ShowThinking = !m.Config.Ollama.ShowThinking
-		m.buildMainMenu()
+		m.rebuildCurrent()
+		m.StatusMessage = "Updated (save to persist)"
+	case label == "AI Tools (read-only)":
+		m.Config.Ollama.Tools = !m.Config.Ollama.Tools
+		m.rebuildCurrent()
 		m.StatusMessage = "Updated (save to persist)"
 	case label == "Reload Config":
 		cfg, err := config.Load()
@@ -814,19 +908,19 @@ func (m *Menu) handleMainSelect() {
 			}
 		}
 		m.Config = cfg
-		m.buildMainMenu()
+		m.rebuildCurrent()
 		if m.StatusMessage == "" {
 			m.StatusMessage = "Config reloaded"
 		}
 	case label == "Save and Close":
 		if !m.saveConfigWithInitScript("Saved") {
-			m.buildMainMenu()
+			m.rebuildCurrent()
 			return
 		}
 		if m.OnConfigReload != nil {
 			if err := m.OnConfigReload(m.Config); err != nil {
 				m.StatusMessage = "Saved (apply failed)"
-				m.buildMainMenu()
+				m.rebuildCurrent()
 				return
 			}
 		}
@@ -1182,29 +1276,29 @@ func (m *Menu) HandleEnter() bool {
 		m.Config.Ollama.URL = strings.TrimSpace(value)
 		m.OllamaModels = nil
 		m.StatusMessage = "Ollama URL updated (save to persist)"
-		m.buildMainMenu()
+		m.rebuildCurrent()
 
 	case InputOllamaModel:
 		m.Config.Ollama.Model = strings.TrimSpace(value)
 		m.StatusMessage = "Ollama model updated (save to persist)"
-		m.buildMainMenu()
+		m.rebuildCurrent()
 
 	case InputFontSize:
 		parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 32)
 		if err != nil {
 			m.StatusMessage = "Invalid font size"
-			m.buildMainMenu()
+			m.rebuildCurrent()
 			break
 		}
 		m.Config.FontSize = float32(parsed)
 		m.StatusMessage = "Font size updated (save to persist)"
-		m.buildMainMenu()
+		m.rebuildCurrent()
 
 	case InputPanelWidth:
 		parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 32)
 		if err != nil {
 			m.StatusMessage = "Invalid panel width"
-			m.buildMainMenu()
+			m.rebuildCurrent()
 			break
 		}
 		// Clamp to valid range
@@ -1216,7 +1310,7 @@ func (m *Menu) HandleEnter() bool {
 		}
 		m.Config.Appearance.PanelWidthPercent = pw
 		m.StatusMessage = "Panel width updated (save to persist)"
-		m.buildMainMenu()
+		m.rebuildCurrent()
 	}
 
 	if !m.InputActive {
@@ -1373,9 +1467,18 @@ func (m *Menu) handleDeleteConfirmSelect() {
 // goBack goes back to previous menu
 func (m *Menu) goBack() {
 	switch m.State {
-	case MenuShellSelect, MenuThemeSelect, MenuPromptStyle, MenuPromptSettings, MenuScripts, MenuOllamaModels, MenuCommands, MenuAliases, MenuExports, MenuCursorStyle, MenuShellPaths:
+	case MenuBasic, MenuAppearance, MenuAI, MenuWeb, MenuExperimental:
 		m.navigateTo(MenuMain, m.buildMainMenu)
 		m.debugf("go back to main")
+	case MenuShellSelect, MenuScripts, MenuCommands, MenuAliases, MenuExports, MenuShellPaths:
+		m.navigateTo(MenuBasic, m.buildBasicMenu)
+		m.debugf("go back to basic settings")
+	case MenuThemeSelect, MenuPromptStyle, MenuPromptSettings, MenuCursorStyle:
+		m.navigateTo(MenuAppearance, m.buildAppearanceMenu)
+		m.debugf("go back to appearance")
+	case MenuOllamaModels:
+		m.navigateTo(MenuAI, m.buildAIMenu)
+		m.debugf("go back to ai features")
 	case MenuConfirmCommand:
 		m.clearPendingCommand()
 		m.navigateTo(MenuCommands, m.buildCommandsMenu)
@@ -1416,6 +1519,16 @@ func (m *Menu) GetTitle() string {
 	switch m.State {
 	case MenuMain:
 		return "Settings"
+	case MenuBasic:
+		return "Basic Settings"
+	case MenuAppearance:
+		return "Appearance"
+	case MenuAI:
+		return "AI Features"
+	case MenuWeb:
+		return "Web Features"
+	case MenuExperimental:
+		return "Experimental Features"
 	case MenuShellSelect:
 		return "Select Shell"
 	case MenuThemeSelect:
@@ -1602,6 +1715,16 @@ func (m *Menu) stateName() string {
 		return "closed"
 	case MenuMain:
 		return "main"
+	case MenuBasic:
+		return "basic"
+	case MenuAppearance:
+		return "appearance"
+	case MenuAI:
+		return "ai"
+	case MenuWeb:
+		return "web"
+	case MenuExperimental:
+		return "experimental"
 	case MenuShellSelect:
 		return "shell"
 	case MenuThemeSelect:

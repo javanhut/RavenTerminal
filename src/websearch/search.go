@@ -131,10 +131,10 @@ func SearchDuckDuckGo(ctx context.Context, query string, maxResults int) ([]Resu
 		if n.Type == html.ElementNode && n.Data == "a" {
 			class := attr(n, "class")
 			if strings.Contains(class, "result__a") || strings.Contains(class, "result-link") {
-				title := strings.TrimSpace(textContent(n))
+				title := collapseSpace(textContent(n))
 				href := normalizeURL(attr(n, "href"))
 				if title != "" && href != "" {
-					snippet := findSnippet(n)
+					snippet := collapseSpace(findSnippet(n))
 					results = append(results, Result{
 						Title:   title,
 						URL:     href,
@@ -544,8 +544,10 @@ func normalizeURL(href string) string {
 	if href == "" {
 		return ""
 	}
+	// Protocol-relative links (the form DuckDuckGo's redirect links usually
+	// take) must still go through the redirect-decoding below.
 	if strings.HasPrefix(href, "//") {
-		return "https:" + href
+		href = "https:" + href
 	}
 	if strings.HasPrefix(href, "/l/?") {
 		u, err := url.Parse("https://duckduckgo.com" + href)
@@ -564,6 +566,13 @@ func normalizeURL(href string) string {
 		}
 	}
 	return href
+}
+
+// collapseSpace trims and collapses all interior whitespace runs (newlines,
+// tabs, repeated spaces from HTML) to single spaces so results render as one
+// clean line.
+func collapseSpace(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 func attr(n *html.Node, name string) string {

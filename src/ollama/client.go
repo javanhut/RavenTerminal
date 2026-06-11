@@ -14,8 +14,32 @@ import (
 )
 
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role      string     `json:"role"`
+	Content   string     `json:"content"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"` // set on assistant messages that invoked tools
+	ToolName  string     `json:"tool_name,omitempty"`  // set on role "tool" result messages
+}
+
+// ToolCall is a tool invocation requested by the model.
+type ToolCall struct {
+	Function ToolCallFunction `json:"function"`
+}
+
+type ToolCallFunction struct {
+	Name      string         `json:"name"`
+	Arguments map[string]any `json:"arguments"`
+}
+
+// ToolDef describes a callable tool in the Ollama /api/chat "tools" format.
+type ToolDef struct {
+	Type     string          `json:"type"` // always "function"
+	Function ToolDefFunction `json:"function"`
+}
+
+type ToolDefFunction struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Parameters  map[string]any `json:"parameters"`
 }
 
 // ThinkingOptions configures thinking/reasoning mode for supported models
@@ -26,8 +50,9 @@ type ThinkingOptions struct {
 
 // ChatResult contains the response and any thinking content
 type ChatResult struct {
-	Content  string // The main response content
-	Thinking string // Thinking/reasoning content (if any)
+	Content   string     // The main response content
+	Thinking  string     // Thinking/reasoning content (if any)
+	ToolCalls []ToolCall // Tool invocations requested by the model (if any)
 }
 
 type Client struct {
@@ -185,6 +210,14 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, onToken fun
 // onToken is called for each content token, onThinking is called for thinking tokens.
 // Returns ChatResult with both content and thinking.
 func (c *Client) ChatStreamWithThinking(ctx context.Context, messages []Message, onToken func(token string), onThinking func(token string)) (ChatResult, error) {
+	return c.ChatStreamWithTools(ctx, messages, nil, onToken, onThinking)
+}
+
+// ChatStreamWithTools is ChatStreamWithThinking plus tool support: tool
+// definitions are sent with the request, and any tool calls the model makes
+// are returned in ChatResult.ToolCalls (the caller runs them and continues
+// the conversation with role "tool" messages).
+func (c *Client) ChatStreamWithTools(ctx context.Context, messages []Message, tools []ToolDef, onToken func(token string), onThinking func(token string)) (ChatResult, error) {
 	if c.BaseURL == "" {
 		return ChatResult{}, errors.New("ollama url not set")
 	}
@@ -196,6 +229,7 @@ func (c *Client) ChatStreamWithThinking(ctx context.Context, messages []Message,
 		Model:    c.Model,
 		Messages: messages,
 		Stream:   true,
+		Tools:    tools,
 	}
 
 	// Add thinking options if enabled
@@ -288,6 +322,7 @@ func (c *Client) ChatStreamWithThinking(ctx context.Context, messages []Message,
 
 	var fullContent strings.Builder
 	var fullThinking strings.Builder
+	var toolCalls []ToolCall
 	decoder := json.NewDecoder(resp.Body)
 
 	for {
@@ -314,6 +349,9 @@ func (c *Client) ChatStreamWithThinking(ctx context.Context, messages []Message,
 			}
 		}
 
+		// Tool calls can arrive in any chunk; accumulate them.
+		toolCalls = append(toolCalls, streamResp.Message.ToolCalls...)
+
 		if streamResp.Message.Content != "" {
 			fullContent.WriteString(streamResp.Message.Content)
 			if onToken != nil {
@@ -333,11 +371,11 @@ func (c *Client) ChatStreamWithThinking(ctx context.Context, messages []Message,
 		content, thinking = ExtractThinking(content)
 	}
 
-	if strings.TrimSpace(content) == "" && strings.TrimSpace(thinking) == "" {
+	if strings.TrimSpace(content) == "" && strings.TrimSpace(thinking) == "" && len(toolCalls) == 0 {
 		return ChatResult{}, errors.New("empty response")
 	}
 
-	return ChatResult{Content: content, Thinking: thinking}, nil
+	return ChatResult{Content: content, Thinking: thinking, ToolCalls: toolCalls}, nil
 }
 
 // ExtractThinking extracts thinking content from <think>...</think> tags.
@@ -506,6 +544,7 @@ type chatRequest struct {
 	Stream   bool         `json:"stream"`
 	Think    bool         `json:"think,omitempty"`   // Enable thinking mode (some APIs)
 	Options  *chatOptions `json:"options,omitempty"` // Model options
+	Tools    []ToolDef    `json:"tools,omitempty"`   // Tool definitions for tool-calling models
 }
 
 type chatResponse struct {

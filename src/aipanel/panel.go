@@ -493,10 +493,24 @@ func BuildWrappedLinesWithThinking(messages []Message, maxChars int, showThinkin
 			prefix = "You: "
 		} else if role == "error" {
 			prefix = "Error: "
+		} else if role == "tool" {
+			prefix = "⚙ " // tool activity note, rendered dim
 		} else if role != "" && role != "assistant" {
 			prefix = role + ": "
 		}
-		indent := strings.Repeat(" ", len(prefix))
+		indent := strings.Repeat(" ", cells(prefix))
+
+		// Tool activity notes are literal text (commands, URLs, paths) —
+		// markdown stripping would mangle them (e.g. eat underscores).
+		if role == "tool" {
+			for _, wline := range wrapText(message.Content, maxChars, prefix, indent) {
+				lines = append(lines, WrappedLine{Role: role, Text: wline})
+			}
+			if i < len(messages)-1 {
+				lines = append(lines, WrappedLine{Role: "", Text: ""})
+			}
+			continue
+		}
 
 		// Render thinking content first if present and enabled
 		if showThinking && message.Thinking != "" {

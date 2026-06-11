@@ -845,6 +845,8 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 						color = r.theme.Foreground
 					case "error":
 						color = [4]float32{0.9, 0.3, 0.3, 1.0} // Red for errors
+					case "tool":
+						color = panelDimText // tool activity notes stay quiet
 					default:
 						if line.Role != "" {
 							color = r.theme.Cursor
@@ -1043,10 +1045,7 @@ func buildWrappedPreview(lines []string, maxChars int, theme Theme) []styledLine
 
 		if inCode {
 			// Code block - preserve as-is
-			if len(text) > maxChars {
-				text = text[:maxChars-3] + "..."
-			}
-			out = append(out, styledLine{text: text, color: codeColor})
+			out = append(out, styledLine{text: truncateToCells(text, maxChars), color: codeColor})
 			continue
 		}
 
@@ -1175,11 +1174,13 @@ func stripInlineMarkdown(text string) string {
 	return strings.TrimSpace(text)
 }
 
+// wrapText wraps text into lines of at most maxChars display cells. Width is
+// measured in cells (not bytes) so multibyte and wide runes wrap correctly.
 func wrapText(text string, maxChars int, prefix, indent string) []string {
 	if maxChars <= 0 {
 		return []string{prefix + text}
 	}
-	if prefix == "" && indent == "" && len(text) <= maxChars {
+	if prefix == "" && indent == "" && textCells(text) <= maxChars {
 		return []string{text}
 	}
 	words := strings.Fields(text)
@@ -1196,7 +1197,7 @@ func wrapText(text string, maxChars int, prefix, indent string) []string {
 
 	for _, word := range words {
 		if line == "" {
-			line = prefix
+			line = indent
 		}
 		next := line
 		if next != "" && !strings.HasSuffix(next, " ") {
@@ -1204,7 +1205,7 @@ func wrapText(text string, maxChars int, prefix, indent string) []string {
 		}
 		next += word
 
-		if len(next) <= lineLimit {
+		if textCells(next) <= lineLimit {
 			line = next
 			continue
 		}
@@ -1215,16 +1216,32 @@ func wrapText(text string, maxChars int, prefix, indent string) []string {
 			continue
 		}
 
-		// Hard wrap long word
-		for len(word) > 0 {
-			limit := lineLimit
-			if len(word) <= limit {
-				lines = append(lines, indent+word)
-				word = ""
+		// Hard wrap a single word wider than the line, by cells.
+		rs := []rune(word)
+		budget := lineLimit - textCells(indent)
+		if budget < 1 {
+			budget = 1
+		}
+		for len(rs) > 0 {
+			if textCells(string(rs)) <= budget {
+				lines = append(lines, indent+string(rs))
 				break
 			}
-			lines = append(lines, indent+word[:limit])
-			word = word[limit:]
+			n := 0
+			w := 0
+			for i, c := range rs {
+				cw := grid.RuneWidth(c)
+				if w+cw > budget {
+					break
+				}
+				w += cw
+				n = i + 1
+			}
+			if n < 1 {
+				n = 1
+			}
+			lines = append(lines, indent+string(rs[:n]))
+			rs = rs[n:]
 		}
 		line = ""
 	}
