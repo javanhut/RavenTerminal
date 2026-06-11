@@ -19,11 +19,13 @@ NC='\033[0m' # No Color
 
 # Default values
 REMOVE_CONFIG=false
+PURGE=false
 FORCE=false
 VERBOSE=false
 
 # Application info
 APP_NAME="raven-terminal"
+RAW_UNINSTALLER_URL="https://raw.githubusercontent.com/javanhut/RavenTerminal/main/scripts/uninstall.sh"
 
 # Installation paths
 USER_BIN_DIR="$HOME/.local/bin"
@@ -72,6 +74,10 @@ OPTIONS:
     -c, --config        Also remove configuration files
                         (~/.config/raven-terminal/)
 
+    -p, --purge         Remove every trace: config, caches, data dirs,
+                        macOS app bundles, and stop running instances.
+                        Delegates to the full uninstaller from the repo.
+
     -f, --force         Don't ask for confirmation
 
     -v, --verbose       Show verbose output
@@ -85,6 +91,9 @@ EXAMPLES:
     # Remove everything including config
     curl -sSL https://raw.githubusercontent.com/javanhut/RavenTerminal/main/scripts/remote-uninstall.sh | bash -s -- --config
 
+    # Remove every trace (config, caches, running instances)
+    curl -sSL https://raw.githubusercontent.com/javanhut/RavenTerminal/main/scripts/remote-uninstall.sh | bash -s -- --purge
+
     # Force remove without confirmation
     curl -sSL https://raw.githubusercontent.com/javanhut/RavenTerminal/main/scripts/remote-uninstall.sh | bash -s -- --force
 
@@ -96,6 +105,11 @@ parse_args() {
     while [[ $# -gt 0 ]]; do
         case $1 in
             -c|--config)
+                REMOVE_CONFIG=true
+                shift
+                ;;
+            -p|--purge)
+                PURGE=true
                 REMOVE_CONFIG=true
                 shift
                 ;;
@@ -358,12 +372,44 @@ print_completion() {
     echo ""
 }
 
+# Purge needs the full uninstaller (macOS bundles, caches, process handling),
+# so fetch it from the repo instead of duplicating that logic here
+run_full_purge() {
+    local tmp
+    tmp="$(mktemp)"
+    print_info "Fetching full uninstaller from repository..."
+
+    if ! curl -sSL -o "$tmp" "$RAW_UNINSTALLER_URL"; then
+        rm -f "$tmp"
+        print_error "Could not download the full uninstaller."
+        print_error "Falling back to standard uninstall (caches may remain)."
+        return 1
+    fi
+
+    local flags="--purge --force"
+    if [ "$VERBOSE" = true ]; then
+        flags="$flags --verbose"
+    fi
+
+    bash "$tmp" $flags
+    local status=$?
+    rm -f "$tmp"
+    return $status
+}
+
 main() {
     print_header
     parse_args "$@"
 
     detect_installations
     confirm_uninstall
+
+    if [ "$PURGE" = true ]; then
+        if run_full_purge; then
+            exit 0
+        fi
+        # Fall back to the standard inline uninstall below
+    fi
 
     uninstall_user
     uninstall_global

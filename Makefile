@@ -1,7 +1,7 @@
 # Raven Terminal Makefile
 # Provides easy build, install, uninstall, and dependency management
 
-.PHONY: all build install install-local uninstall uninstall-local clean deps deps-check test macos-icon help
+.PHONY: all build install install-local uninstall uninstall-local uninstall-all fresh fresh-local purge clean deps deps-check test macos-icon help
 
 # Application info
 APP_NAME := raven-terminal
@@ -69,6 +69,19 @@ install-local: build
 	@echo -e "$(BLUE)[INFO]$(NC) Performing clean user install..."
 	@$(SCRIPTS_DIR)/uninstall.sh --all --force 2>/dev/null || true
 	@$(SCRIPTS_DIR)/install.sh --user
+
+# Fresh install system-wide: purge everything (config, caches, old binaries,
+# running instances), build from scratch, install, and verify
+fresh:
+	@$(SCRIPTS_DIR)/clean-install.sh --global
+
+# Fresh install for current user: same full purge, user-level install
+fresh-local:
+	@$(SCRIPTS_DIR)/clean-install.sh --user
+
+# Remove every trace of raven-terminal (installs, config, caches, instances)
+purge:
+	@$(SCRIPTS_DIR)/uninstall.sh --purge --force
 
 # Uninstall all installations (clean uninstall)
 uninstall:
@@ -200,6 +213,10 @@ help:
 	@echo "  build           Build the application (default)"
 	@echo "  install         Clean install system-wide (uninstalls first, requires sudo)"
 	@echo "  install-local   Clean install for current user (uninstalls first)"
+	@echo "  fresh           Fresh install system-wide: full purge (config, caches,"
+	@echo "                  running instances) + scratch build + verify"
+	@echo "  fresh-local     Fresh install for current user (same full purge)"
+	@echo "  purge           Remove every trace: installs, config, caches, instances"
 	@echo "  uninstall       Uninstall all installations (global + user)"
 	@echo "  uninstall-local Uninstall user installation only"
 	@echo "  uninstall-all   Uninstall everything including config files"

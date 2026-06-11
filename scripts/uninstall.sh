@@ -19,12 +19,15 @@ NC='\033[0m' # No Color
 # Default values
 UNINSTALL_MODE=""
 REMOVE_CONFIG=false
+PURGE=false
 FORCE=false
 VERBOSE=false
 REPORT=()
 
 # Application info
 APP_NAME="raven-terminal"
+BUNDLE_ID="com.javanhut.raven-terminal"
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
 # Installation paths
 USER_BIN_DIR="$HOME/.local/bin"
@@ -90,6 +93,11 @@ OPTIONS:
     -c, --config        Also remove configuration files
                         (~/.config/raven-terminal/)
 
+    -p, --purge         Remove every trace: implies --all and --config, plus
+                        data/log dirs, macOS caches (LaunchServices, saved
+                        state, preferences), and stops running instances.
+                        Verifies nothing is left behind afterwards.
+
     -f, --force         Don't ask for confirmation
 
     -v, --verbose       Show verbose output
@@ -100,6 +108,7 @@ EXAMPLES:
     $(basename "$0") --user           # Remove user installation
     $(basename "$0") --global         # Remove system-wide installation
     $(basename "$0") --all --config   # Remove everything including config
+    $(basename "$0") --purge --force  # Scorched earth, no questions asked
 
 EOF
     exit 0
@@ -124,6 +133,11 @@ parse_args() {
                 REMOVE_CONFIG=true
                 shift
                 ;;
+            -p|--purge)
+                PURGE=true
+                REMOVE_CONFIG=true
+                shift
+                ;;
             -f|--force)
                 FORCE=true
                 shift
@@ -144,9 +158,13 @@ parse_args() {
     done
     
     if [ -z "$UNINSTALL_MODE" ]; then
-        print_error "Please specify uninstall mode: --user, --global, or --all"
-        echo "Use --help for usage information."
-        exit 1
+        if [ "$PURGE" = true ]; then
+            UNINSTALL_MODE="all"
+        else
+            print_error "Please specify uninstall mode: --user, --global, or --all"
+            echo "Use --help for usage information."
+            exit 1
+        fi
     fi
 }
 
@@ -236,7 +254,8 @@ remove_file() {
         target="$label ($file)"
     fi
     
-    if [ -f "$file" ]; then
+    # -L catches symlinks whose target is already gone (-f alone would miss them)
+    if [ -f "$file" ] || [ -L "$file" ]; then
         if [ "$use_sudo" = true ]; then
             sudo rm -f "$file"
         else
@@ -269,6 +288,129 @@ remove_dir() {
         return 0
     else
         record_action "Not found: $target"
+        return 1
+    fi
+}
+
+# PIDs of this script's own process tree, so purge never kills the terminal
+# the user is running the uninstall from
+ancestor_pids() {
+    local pid=$$
+    while [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null; do
+        echo "$pid"
+        pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
+    done
+}
+
+stop_running_instances() {
+    local pids ancestors pid
+    pids="$(pgrep -x "$APP_NAME" 2>/dev/null || true)"
+    if [ -z "$pids" ]; then
+        record_action "No running instances"
+        return 0
+    fi
+
+    ancestors=" $(ancestor_pids | tr '\n' ' ') "
+
+    for pid in $pids; do
+        if [[ "$ancestors" == *" $pid "* ]]; then
+            print_warning "You are running this from inside Raven Terminal (pid $pid)."
+            print_warning "That window keeps the old version until you close it."
+            continue
+        fi
+        if kill "$pid" 2>/dev/null; then
+            record_action "Stopped running instance (pid $pid)"
+        fi
+    done
+
+    # Give instances a moment to exit cleanly, then force-kill stragglers
+    sleep 1
+    for pid in $pids; do
+        if [[ "$ancestors" == *" $pid "* ]]; then
+            continue
+        fi
+        kill -9 "$pid" 2>/dev/null || true
+    done
+}
+
+# Must run while the .app bundles still exist
+unregister_macos_bundles() {
+    if [ "$OS_TYPE" != "Darwin" ] || [ ! -x "$LSREGISTER" ]; then
+        return 0
+    fi
+
+    local bundle
+    for bundle in "$MACOS_USER_APP_DIR/${MACOS_APP_NAME}.app" "$MACOS_GLOBAL_APP_DIR/${MACOS_APP_NAME}.app"; do
+        if [ -d "$bundle" ]; then
+            "$LSREGISTER" -u "$bundle" 2>/dev/null || true
+            record_action "Unregistered from LaunchServices: $bundle"
+        fi
+    done
+}
+
+purge_caches() {
+    print_info "Purging caches and runtime data..."
+
+    remove_dir "$HOME/.local/share/raven-terminal" false "Data/log dir" || true
+
+    if [ "$OS_TYPE" = "Darwin" ]; then
+        remove_dir "$HOME/Library/Saved Application State/${BUNDLE_ID}.savedState" false "macOS saved state" || true
+        remove_dir "$HOME/Library/Caches/${BUNDLE_ID}" false "macOS cache dir" || true
+        remove_file "$HOME/Library/Preferences/${BUNDLE_ID}.plist" false "macOS preferences" || true
+        if command -v defaults &> /dev/null; then
+            defaults delete "$BUNDLE_ID" 2>/dev/null || true
+        fi
+    fi
+}
+
+verify_removal() {
+    print_info "Verifying nothing was left behind..."
+
+    hash -r 2>/dev/null || true
+
+    local leftovers=()
+    local found path
+    found="$(command -v "$APP_NAME" 2>/dev/null || true)"
+    if [ -n "$found" ]; then
+        leftovers+=("$found  <- still resolves in PATH")
+    fi
+
+    local candidates=(
+        "$USER_BIN_DIR/$APP_NAME"
+        "$USER_BIN_DIR/raven-terminal-launcher"
+        "$GLOBAL_BIN_DIR/$APP_NAME"
+        "$GLOBAL_BIN_DIR/raven-terminal-launcher"
+        "$LEGACY_GLOBAL_BIN_DIR/$APP_NAME"
+        "$LEGACY_GLOBAL_BIN_DIR/raven-terminal-launcher"
+        "$USER_APP_DIR/$APP_NAME.desktop"
+        "$GLOBAL_APP_DIR/$APP_NAME.desktop"
+        "$USER_CONFIG_DIR"
+        "$HOME/.local/share/raven-terminal"
+    )
+    if [ "$OS_TYPE" = "Darwin" ]; then
+        candidates+=(
+            "$MACOS_USER_APP_DIR/${MACOS_APP_NAME}.app"
+            "$MACOS_GLOBAL_APP_DIR/${MACOS_APP_NAME}.app"
+            "$HOME/Library/Saved Application State/${BUNDLE_ID}.savedState"
+            "$HOME/Library/Caches/${BUNDLE_ID}"
+            "$HOME/Library/Preferences/${BUNDLE_ID}.plist"
+        )
+    fi
+
+    for path in "${candidates[@]}"; do
+        if [ -e "$path" ] || [ -L "$path" ]; then
+            leftovers+=("$path")
+        fi
+    done
+
+    if [ ${#leftovers[@]} -eq 0 ]; then
+        print_success "System is clean: no Raven Terminal files remain"
+    else
+        print_warning "Leftover files detected:"
+        for path in "${leftovers[@]}"; do
+            echo "    $path"
+        done
+        print_warning "Remove these manually (or re-run with sudo) before reinstalling."
         return 1
     fi
 }
@@ -449,13 +591,9 @@ uninstall_macos_global() {
         record_action "Not found: Global app bundle ($app_bundle)"
     fi
 
-    # Remove CLI symlink
-    if [ -L "$GLOBAL_BIN_DIR/$APP_NAME" ]; then
-        sudo rm "$GLOBAL_BIN_DIR/$APP_NAME"
-        record_action "Removed: Global CLI symlink ($GLOBAL_BIN_DIR/$APP_NAME)"
+    # Remove CLI symlink (or stray binary at the same path)
+    if remove_file "$GLOBAL_BIN_DIR/$APP_NAME" true "Global CLI symlink"; then
         ((++removed))
-    else
-        record_action "Not found: Global CLI symlink ($GLOBAL_BIN_DIR/$APP_NAME)"
     fi
 
     if [ $removed -gt 0 ]; then
@@ -495,7 +633,12 @@ main() {
     
     detect_installations
     confirm_uninstall
-    
+
+    if [ "$PURGE" = true ]; then
+        stop_running_instances
+        unregister_macos_bundles
+    fi
+
     # Branch based on OS type
     if [ "$OS_TYPE" = "Darwin" ]; then
         # macOS: Remove app bundles
@@ -530,7 +673,15 @@ main() {
     if [ "$REMOVE_CONFIG" = true ]; then
         remove_config
     fi
-    
+
+    if [ "$PURGE" = true ]; then
+        purge_caches
+        if ! verify_removal; then
+            print_completion
+            exit 1
+        fi
+    fi
+
     print_completion
 }
 

@@ -19,6 +19,7 @@ NC='\033[0m' # No Color
 
 # Default values
 INSTALL_MODE="user"
+CLEAN_INSTALL=false
 VERBOSE=false
 
 # Application info
@@ -85,9 +86,16 @@ OPTIONS:
                         Binary: /usr/local/bin/
                         Desktop: /usr/share/applications/
 
+    -c, --clean         Fully purge any previous installation first,
+                        including config files and caches, so nothing
+                        carries over from the old version
+
     -v, --verbose       Show verbose output
 
     -h, --help          Show this help message
+
+Old binaries and desktop entries are always removed before installing.
+Config files are preserved unless --clean is given.
 
 EXAMPLES:
     # User installation (default)
@@ -95,6 +103,9 @@ EXAMPLES:
 
     # System-wide installation
     curl -sSL https://raw.githubusercontent.com/javanhut/RavenTerminal/main/scripts/remote-install.sh | bash -s -- --global
+
+    # Fully clean install (wipes old config and caches too)
+    curl -sSL https://raw.githubusercontent.com/javanhut/RavenTerminal/main/scripts/remote-install.sh | bash -s -- --clean
 
 EOF
     exit 0
@@ -111,6 +122,10 @@ parse_args() {
                 INSTALL_MODE="global"
                 shift
                 ;;
+            -c|--clean)
+                CLEAN_INSTALL=true
+                shift
+                ;;
             -v|--verbose)
                 VERBOSE=true
                 shift
@@ -125,6 +140,25 @@ parse_args() {
                 ;;
         esac
     done
+}
+
+remove_previous_install() {
+    local uninstaller="$TEMP_DIR/RavenTerminal/scripts/uninstall.sh"
+
+    if [ ! -f "$uninstaller" ]; then
+        print_warning "Uninstall script not found in repo; skipping cleanup of previous install"
+        return 0
+    fi
+
+    if [ "$CLEAN_INSTALL" = true ]; then
+        print_info "Purging previous installation (including config and caches)..."
+        bash "$uninstaller" --purge --force || \
+            print_warning "Purge reported leftovers; continuing with install"
+    else
+        print_info "Removing previous installation (config preserved)..."
+        bash "$uninstaller" --all --force || \
+            print_warning "Cleanup of previous install had issues; continuing"
+    fi
 }
 
 detect_distro() {
@@ -414,6 +448,9 @@ main() {
     check_dependencies
     clone_repo
     build_application
+
+    # Build succeeded, now it is safe to remove the old install
+    remove_previous_install
 
     case $INSTALL_MODE in
         user)
