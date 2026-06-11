@@ -36,12 +36,12 @@
 
 | Keybinding | Action |
 |------------|--------|
-| Ctrl+Shift+V | Split pane vertically (side by side) |
-| Ctrl+Shift+H | Split pane horizontally (stacked) |
+| Super+D (Cmd+D on macOS) or Ctrl+Shift+V | Split pane vertically (side by side) |
+| Super+Shift+D (Cmd+Shift+D on macOS) or Ctrl+Shift+H | Split pane horizontally (stacked) |
 | Ctrl+Shift+W | Close current pane |
-| Shift+Tab | Cycle to next pane |
-| Ctrl+Shift+] | Focus next pane |
-| Ctrl+Shift+[ | Focus previous pane |
+| Super+Shift+Tab (Cmd+Shift+Tab on macOS) | Cycle to next pane |
+| Super+] (Cmd+] on macOS) or Ctrl+Shift+] | Focus next pane |
+| Super+[ (Cmd+[ on macOS) or Ctrl+Shift+[ | Focus previous pane |
 
 ## Scrolling
 
@@ -82,4 +82,4 @@ F1-F12 are passed through to the running application.
 
 - **Ctrl+letter**: Sends control character (Ctrl+D for EOF, Ctrl+L for clear, etc.)
 - **Alt+letter**: Sends ESC prefix followed by the letter
-- **Shift+Tab**: Sends reverse tab sequence
+- **Shift+Tab**: Always sends the reverse-tab sequence (CSI Z) to the running app (nvim, TUIs). Pane cycling uses Super+Shift+Tab (Cmd+Shift+Tab on macOS). Note macOS reserves Cmd+Shift+Tab for the app switcher and tiling WMs often grab Super chords; the leader+] / leader+[ bindings always cycle panes.

@@ -1257,15 +1257,18 @@ func (r *Renderer) getHelpSections() []struct {
 	title    string
 	bindings [][2]string
 } {
-	// Platform-aware modifier labels: macOS uses Cmd for app shortcuts, others Ctrl+Shift.
+	// Platform-aware modifier labels. The Super (Cmd) layer is identical on
+	// every platform; Linux shows its conventional Ctrl+Shift chords with
+	// the Super alias where the letters differ.
 	isMac := runtime.GOOS == "darwin"
 	mod := "Ctrl+Shift"
 	exitKey := "Ctrl+Q"
-	pasteKey := "Ctrl+Shift+P"
-	splitV := "Ctrl+Shift+V"
-	splitH := "Ctrl+Shift+H"
-	nextTab := "Ctrl+Tab"
-	prevTab := "Ctrl+Shift+Tab"
+	pasteKey := "Super+V / Ctrl+Shift+P"
+	splitV := "Super+D / Ctrl+Shift+V"
+	splitH := "Super+Shift+D / Ctrl+Shift+H"
+	nextTab := "Ctrl+Tab / Super+Shift+]"
+	prevTab := "Ctrl+Shift+Tab / Super+Shift+["
+	cyclePanes := "Super+Shift+Tab"
 	if isMac {
 		mod = "Cmd"
 		exitKey = "Cmd+Q"
@@ -1274,6 +1277,7 @@ func (r *Renderer) getHelpSections() []struct {
 		splitH = "Cmd+Shift+D"
 		nextTab = "Cmd+Shift+]"
 		prevTab = "Cmd+Shift+["
+		cyclePanes = "Cmd+Shift+Tab"
 	}
 
 	return []struct {
@@ -1312,7 +1316,7 @@ func (r *Renderer) getHelpSections() []struct {
 				{splitV, "Split vertical"},
 				{splitH, "Split horizontal"},
 				{mod + "+W", "Close pane"},
-				{"Shift+Tab", "Cycle panes"},
+				{cyclePanes, "Cycle panes"},
 				{mod + "+]", "Next pane"},
 				{mod + "+[", "Previous pane"},
 				{mod + "+[ or ]", "Cycle overlay panel (when open)"},
@@ -1465,9 +1469,18 @@ func (r *Renderer) renderHelpPanel(width, height int, proj [16]float32) {
 	visibleHeight := contentEndY - contentStartY
 	visibleLines := int(visibleHeight / lineHeight)
 
-	// Calculate column positions - fixed key column width to prevent overlap
-	// Longest key is "Ctrl+Shift+Tab" or "Shift+PageDown" which needs ~15 chars
-	keyColWidth := r.cellWidth * 18 // 18 characters worth of space
+	// Calculate column positions - size the key column to the longest key
+	// label so dual-chord labels ("Super+D / Ctrl+Shift+V") never overlap
+	// their descriptions.
+	longestKey := 0
+	for _, section := range r.getHelpSections() {
+		for _, binding := range section.bindings {
+			if w := textCells(binding[0]); w > longestKey {
+				longestKey = w
+			}
+		}
+	}
+	keyColWidth := r.cellWidth * float32(longestKey+3)
 	descColX := contentX + keyColWidth
 
 	// Title (fixed, doesn't scroll)

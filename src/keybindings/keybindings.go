@@ -67,13 +67,15 @@ func TranslateKey(key glfw.Key, mods glfw.ModifierKey, appCursorMode bool) KeyRe
 	alt := mods&glfw.ModAlt != 0
 	super := mods&glfw.ModSuper != 0
 
-	// primary is the platform's app-shortcut modifier: Cmd (Super) on macOS,
-	// Ctrl+Shift elsewhere. Keeping Ctrl out of it leaves the Control key free for
-	// terminal control characters (Ctrl+C, Ctrl+D, ...), matching iTerm2/Terminal.app.
-	primary := (isMacOS && super) || (!isMacOS && ctrl && shift)
+	// primary is the app-shortcut leader. The Super (Cmd) layer is identical
+	// on every platform so muscle memory transfers between macOS and Linux;
+	// Linux additionally accepts the conventional Ctrl+Shift chords. Keeping
+	// plain Ctrl out of it leaves the Control key free for terminal control
+	// characters (Ctrl+C, Ctrl+D, ...), matching iTerm2/Terminal.app.
+	primary := super || (!isMacOS && ctrl && shift)
 
-	// Exit: Ctrl+Q everywhere, plus Cmd+Q on macOS.
-	if (ctrl && key == glfw.KeyQ) || (isMacOS && super && key == glfw.KeyQ) {
+	// Exit: Ctrl+Q everywhere, plus Super+Q (Cmd+Q-style) on both platforms.
+	if (ctrl && key == glfw.KeyQ) || (super && key == glfw.KeyQ) {
 		return KeyResult{Action: ActionExit}
 	}
 
@@ -88,8 +90,9 @@ func TranslateKey(key glfw.Key, mods glfw.ModifierKey, appCursorMode bool) KeyRe
 	if primary && key == glfw.KeyC {
 		return KeyResult{Action: ActionCopy}
 	}
-	// Paste: Cmd+V on macOS (universal), Ctrl+Shift+P elsewhere (legacy binding kept).
-	if (isMacOS && super && key == glfw.KeyV) || (!isMacOS && ctrl && shift && key == glfw.KeyP) {
+	// Paste: Super+V on both platforms (Cmd+V-style), plus the legacy
+	// Ctrl+Shift+P on Linux.
+	if (super && key == glfw.KeyV) || (!isMacOS && ctrl && shift && key == glfw.KeyP) {
 		return KeyResult{Action: ActionPaste}
 	}
 
@@ -105,12 +108,13 @@ func TranslateKey(key glfw.Key, mods glfw.ModifierKey, appCursorMode bool) KeyRe
 		return KeyResult{Action: ActionClosePane}
 	}
 
-	// Splits: on macOS Cmd+V is paste, so use iTerm-style Cmd+D / Cmd+Shift+D.
-	// Elsewhere keep Ctrl+Shift+V / Ctrl+Shift+H.
-	if (isMacOS && super && !shift && key == glfw.KeyD) || (!isMacOS && ctrl && shift && key == glfw.KeyV) {
+	// Splits: iTerm-style Super+D / Super+Shift+D on both platforms (Super+V
+	// is paste, so splits can't use V there); Linux also keeps the
+	// conventional Ctrl+Shift+V / Ctrl+Shift+H.
+	if (super && !shift && key == glfw.KeyD) || (!isMacOS && ctrl && shift && key == glfw.KeyV) {
 		return KeyResult{Action: ActionSplitVertical}
 	}
-	if (isMacOS && super && shift && key == glfw.KeyD) || (!isMacOS && ctrl && shift && key == glfw.KeyH) {
+	if (super && shift && key == glfw.KeyD) || (!isMacOS && ctrl && shift && key == glfw.KeyH) {
 		return KeyResult{Action: ActionSplitHorizontal}
 	}
 
@@ -118,21 +122,23 @@ func TranslateKey(key glfw.Key, mods glfw.ModifierKey, appCursorMode bool) KeyRe
 		return KeyResult{Action: ActionShowHelp}
 	}
 
-	// Tab cycling with brackets: on macOS Cmd+Shift+] / Cmd+Shift+[ (the Safari /
-	// Terminal.app convention). Cmd+Tab can't be used — macOS reserves it for the app
-	// switcher. Checked before the pane bindings so Shift selects tabs over panes.
-	if isMacOS && super && shift && key == glfw.KeyRightBracket {
+	// Tab cycling with brackets: Super+Shift+] / Super+Shift+[ on both
+	// platforms (the Safari / Terminal.app convention; Cmd+Tab can't be used
+	// — macOS reserves it for the app switcher). Checked before the pane
+	// bindings so Shift selects tabs over panes.
+	if super && shift && key == glfw.KeyRightBracket {
 		return KeyResult{Action: ActionNextTab}
 	}
-	if isMacOS && super && shift && key == glfw.KeyLeftBracket {
+	if super && shift && key == glfw.KeyLeftBracket {
 		return KeyResult{Action: ActionPrevTab}
 	}
 
-	// Pane cycling: Cmd+] / Cmd+[ on macOS (no Shift), Ctrl+Shift+] / [ elsewhere.
-	if (isMacOS && super && !shift && key == glfw.KeyRightBracket) || (!isMacOS && ctrl && shift && key == glfw.KeyRightBracket) {
+	// Pane cycling: Super+] / Super+[ on both platforms (no Shift); Linux
+	// also keeps Ctrl+Shift+] / [.
+	if (super && !shift && key == glfw.KeyRightBracket) || (!isMacOS && ctrl && shift && key == glfw.KeyRightBracket) {
 		return KeyResult{Action: ActionNextPane}
 	}
-	if (isMacOS && super && !shift && key == glfw.KeyLeftBracket) || (!isMacOS && ctrl && shift && key == glfw.KeyLeftBracket) {
+	if (super && !shift && key == glfw.KeyLeftBracket) || (!isMacOS && ctrl && shift && key == glfw.KeyLeftBracket) {
 		return KeyResult{Action: ActionPrevPane}
 	}
 
@@ -159,8 +165,8 @@ func TranslateKey(key glfw.Key, mods glfw.ModifierKey, appCursorMode bool) KeyRe
 		return KeyResult{Action: ActionToggleAIPanel}
 	}
 
-	// Resize mode: Ctrl+R everywhere, plus Cmd+R on macOS.
-	if (ctrl && !shift && key == glfw.KeyR) || (isMacOS && super && !shift && key == glfw.KeyR) {
+	// Resize mode: Ctrl+R everywhere, plus Super+R on both platforms.
+	if (ctrl && !shift && key == glfw.KeyR) || (super && !shift && key == glfw.KeyR) {
 		return KeyResult{Action: ActionToggleResizeMode}
 	}
 
@@ -276,9 +282,18 @@ func TranslateKey(key glfw.Key, mods glfw.ModifierKey, appCursorMode bool) KeyRe
 
 	// Tab
 	if key == glfw.KeyTab {
-		if shift && !ctrl {
-			// Shift+Tab cycles through split panes
+		// Pane cycling: Cmd+Shift+Tab on macOS, Super+Shift+Tab on Linux —
+		// the same physical chord everywhere. (macOS reserves Cmd+Shift+Tab
+		// for the app switcher unless remapped, and tiling WMs often grab
+		// Super; the leader+]/[ bindings always cycle panes as well.)
+		if super && shift {
 			return KeyResult{Action: ActionNextPane}
+		}
+		if shift && !ctrl && !super {
+			// Plain Shift+Tab belongs to the running app: it's back-tab
+			// (CSI Z) in nvim, Claude Code's mode cycling, form navigation
+			// in TUIs, etc.
+			return KeyResult{Action: ActionInput, Data: []byte("\x1b[Z")}
 		}
 		if !ctrl && !shift {
 			return KeyResult{Action: ActionInput, Data: []byte{'\t'}}
