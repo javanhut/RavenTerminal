@@ -24,8 +24,12 @@ func RuneWidth(r rune) int {
 		return 1
 	}
 
-	// Non-printable characters have zero width
-	if !unicode.IsPrint(r) {
+	// Non-printable characters have zero width. Unicode space separators (Zs)
+	// are excluded from this check: unicode.IsPrint admits only the ASCII
+	// space, but NBSP and friends occupy a cell in every terminal. Dropping
+	// them desyncs the cursor column from applications that emit them (e.g.
+	// Claude Code separates its prompt from ghost text with U+00A0).
+	if !unicode.IsPrint(r) && !unicode.Is(unicode.Zs, r) {
 		return 0
 	}
 

@@ -37,6 +37,10 @@ func TestRuneWidth(t *testing.T) {
 		{"variation selector 16", 0xFE0F, 0},
 		{"null", 0x0000, 0},
 		{"C0 control", 0x0007, 0},
+		{"no-break space", 0x00A0, 1},
+		{"narrow no-break space", 0x202F, 1},
+		{"en space", 0x2002, 1},
+		{"ideographic space", 0x3000, 2},
 	}
 	for _, c := range cases {
 		if got := RuneWidth(c.r); got != c.want {
@@ -58,6 +62,23 @@ func TestPrivateUseIconAdvancesCursor(t *testing.T) {
 	}
 	if c := g.GetCell(1, 0); c.Char != 0xE0A0 {
 		t.Fatalf("cell[1] char = U+%04X, want U+E0A0 (icon must own the cell)", c.Char)
+	}
+}
+
+// Claude Code writes its composer prompt as "❯ " followed by dim ghost
+// text, then overwrites the ghost via absolute column positioning. If the NBSP
+// is dropped instead of occupying a cell, every later write lands one column
+// short and ghost-text remnants survive.
+func TestNoBreakSpaceAdvancesCursor(t *testing.T) {
+	g := NewGrid(10, 1)
+	for _, r := range []rune{'❯', 0x00A0, 'T'} {
+		g.WriteChar(r, DefaultFg(), DefaultBg(), 0, 0, 0, Color{})
+	}
+	if col, _ := g.GetCursor(); col != 3 {
+		t.Fatalf("cursor col = %d, want 3 (NBSP must occupy its own cell)", col)
+	}
+	if c := g.GetCell(2, 0); c.Char != 'T' {
+		t.Fatalf("cell[2] char = %q, want T", c.Char)
 	}
 }
 

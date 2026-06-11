@@ -4,7 +4,39 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/javanhut/RavenTerminal/src/grid"
 )
+
+// cells returns the display width of s in terminal cells (wide runes such as
+// emoji count 2), matching how the renderer advances when drawing panel text.
+// All wrapping/truncation here must use cells, never len(): byte counts split
+// multibyte runes and overcount emoji, which is what used to push wrapped
+// lines out of the panel.
+func cells(s string) int { return grid.StringWidth(s) }
+
+// fitRunes returns how many leading runes of rs fit within maxCells.
+func fitRunes(rs []rune, maxCells int) int {
+	w := 0
+	for i, r := range rs {
+		rw := grid.RuneWidth(r)
+		if w+rw > maxCells {
+			return i
+		}
+		w += rw
+	}
+	return len(rs)
+}
+
+// truncateCells truncates s to at most max cells, appending an ellipsis when
+// something was cut.
+func truncateCells(s string, max int) string {
+	if max <= 0 || cells(s) <= max {
+		return s
+	}
+	rs := []rune(s)
+	return string(rs[:fitRunes(rs, max-3)]) + "..."
+}
 
 // Spinner frames for loading animation
 var spinnerFrames = []string{"|", "/", "-", "\\"}
@@ -60,6 +92,11 @@ type Panel struct {
 	SelectionActive bool
 	SelectionStart  int // Start line index (in wrapped lines)
 	SelectionEnd    int // End line index (in wrapped lines)
+
+	// AnchorOffset is how many blank lines the renderer left above a
+	// conversation shorter than the viewport (chat-style bottom anchoring).
+	// Mouse hit-testing must subtract it when mapping y to a line index.
+	AnchorOffset int
 }
 
 type Layout struct {
@@ -236,25 +273,32 @@ func wrapInputText(text string, maxChars int) []string {
 			continue
 		}
 
-		// Wrap long lines
-		for len(line) > 0 {
-			if len(line) <= maxChars {
-				result = append(result, line)
+		// Wrap long lines by display cells
+		rs := []rune(line)
+		for len(rs) > 0 {
+			if cells(string(rs)) <= maxChars {
+				result = append(result, string(rs))
 				break
 			}
 
-			// Find a good break point
-			breakAt := maxChars
-			// Try to break at a space
-			for i := maxChars - 1; i > maxChars/2; i-- {
-				if line[i] == ' ' {
-					breakAt = i + 1
-					break
+			fit := fitRunes(rs, maxChars)
+			if fit < 1 {
+				fit = 1
+			}
+			breakAt := fit
+			// Prefer breaking after a space in the latter half of the line
+			for i := fit - 1; i > 0; i-- {
+				if rs[i] != ' ' {
+					continue
 				}
+				if cells(string(rs[:i])) > maxChars/2 {
+					breakAt = i + 1
+				}
+				break
 			}
 
-			result = append(result, line[:breakAt])
-			line = line[breakAt:]
+			result = append(result, string(rs[:breakAt]))
+			rs = rs[breakAt:]
 		}
 	}
 
@@ -485,10 +529,7 @@ func BuildWrappedLinesWithThinking(messages []Message, maxChars int, showThinkin
 
 			if inCode {
 				// In code block: preserve line as-is (with indent only)
-				codeLine := linePrefix + contentLine
-				if len(codeLine) > maxChars {
-					codeLine = codeLine[:maxChars-3] + "..."
-				}
+				codeLine := truncateCells(linePrefix+contentLine, maxChars)
 				lines = append(lines, WrappedLine{Role: role, Text: codeLine, InCode: true})
 				continue
 			}
@@ -515,10 +556,7 @@ func BuildWrappedLinesWithThinking(messages []Message, maxChars int, showThinkin
 				headerText = stripMarkdownFormatting(headerText)
 				if headerText != "" {
 					headerPrefix := strings.Repeat("=", min(level, 3)) + " "
-					text := linePrefix + headerPrefix + headerText
-					if len(text) > maxChars {
-						text = text[:maxChars-3] + "..."
-					}
+					text := truncateCells(linePrefix+headerPrefix+headerText, maxChars)
 					lines = append(lines, WrappedLine{Role: role, Text: text, IsHeader: true})
 				}
 				continue
@@ -570,7 +608,7 @@ func BuildWrappedLinesWithThinking(messages []Message, maxChars int, showThinkin
 			if isBullet {
 				fullPrefix = linePrefix + bulletPrefix
 			}
-			bulletIndent := indent + strings.Repeat(" ", len(bulletPrefix))
+			bulletIndent := indent + strings.Repeat(" ", cells(bulletPrefix))
 
 			wrapped := wrapText(text, maxChars, fullPrefix, bulletIndent)
 			for _, wline := range wrapped {
@@ -628,7 +666,7 @@ func wrapText(text string, maxChars int, prefix, indent string) []string {
 	if maxChars <= 0 {
 		return []string{prefix + text}
 	}
-	if prefix == "" && indent == "" && len(text) <= maxChars {
+	if prefix == "" && indent == "" && cells(text) <= maxChars {
 		return []string{text}
 	}
 	words := strings.Fields(text)
@@ -645,7 +683,7 @@ func wrapText(text string, maxChars int, prefix, indent string) []string {
 
 	for _, word := range words {
 		if line == "" {
-			line = prefix
+			line = indent
 		}
 		next := line
 		if next != "" && !strings.HasSuffix(next, " ") {
@@ -653,7 +691,7 @@ func wrapText(text string, maxChars int, prefix, indent string) []string {
 		}
 		next += word
 
-		if len(next) <= lineLimit {
+		if cells(next) <= lineLimit {
 			line = next
 			continue
 		}
@@ -664,15 +702,23 @@ func wrapText(text string, maxChars int, prefix, indent string) []string {
 			continue
 		}
 
-		for len(word) > 0 {
-			limit := lineLimit
-			if len(word) <= limit {
-				lines = append(lines, indent+word)
-				word = ""
+		// A single word wider than the line: hard-chop it by cells.
+		rs := []rune(word)
+		budget := lineLimit - cells(indent)
+		if budget < 1 {
+			budget = 1
+		}
+		for len(rs) > 0 {
+			if cells(string(rs)) <= budget {
+				lines = append(lines, indent+string(rs))
 				break
 			}
-			lines = append(lines, indent+word[:limit])
-			word = word[limit:]
+			n := fitRunes(rs, budget)
+			if n < 1 {
+				n = 1
+			}
+			lines = append(lines, indent+string(rs[:n]))
+			rs = rs[n:]
 		}
 		line = ""
 	}

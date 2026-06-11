@@ -1267,7 +1267,7 @@ func main() {
 						// Check if click is in message area for text selection
 						if fx >= layout.ContentX && fx <= layout.ContentX+layout.ContentWidth &&
 							fy >= layout.MessagesStart && fy <= layout.MessagesEnd {
-							lineIdx := int((fy-layout.MessagesStart)/layout.LineHeight) + aiPanel.Scroll
+							lineIdx := int((fy-layout.MessagesStart)/layout.LineHeight) - aiPanel.AnchorOffset + aiPanel.Scroll
 							aiPanel.SelectionActive = true
 							aiPanel.SelectionStart = lineIdx
 							aiPanel.SelectionEnd = lineIdx
@@ -1360,7 +1360,7 @@ func main() {
 					if fy > layout.MessagesEnd {
 						fy = layout.MessagesEnd
 					}
-					endLine := int((fy-layout.MessagesStart)/layout.LineHeight) + aiPanel.Scroll
+					endLine := int((fy-layout.MessagesStart)/layout.LineHeight) - aiPanel.AnchorOffset + aiPanel.Scroll
 					startLine := aiPanel.SelectionStart
 					if endLine < startLine {
 						startLine, endLine = endLine, startLine
@@ -1528,7 +1528,7 @@ func main() {
 			if fy > layout.MessagesEnd {
 				fy = layout.MessagesEnd
 			}
-			aiPanel.SelectionEnd = int((fy-layout.MessagesStart)/layout.LineHeight) + aiPanel.Scroll
+			aiPanel.SelectionEnd = int((fy-layout.MessagesStart)/layout.LineHeight) - aiPanel.AnchorOffset + aiPanel.Scroll
 			return
 		}
 

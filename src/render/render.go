@@ -571,7 +571,7 @@ func (r *Renderer) drawPanelScrollbar(x, top, bottom float32, total, visible, sc
 
 // drawTextRight draws text right-aligned so it ends at rightX.
 func (r *Renderer) drawTextRight(rightX, y float32, text string, clr [4]float32, proj [16]float32) {
-	r.drawText(rightX-float32(len([]rune(text)))*r.cellWidth, y, text, clr, proj)
+	r.drawText(rightX-float32(textCells(text))*r.cellWidth, y, text, clr, proj)
 }
 
 func (r *Renderer) renderSearchPanel(panel *searchpanel.Panel, width, height int, proj [16]float32) {
@@ -597,22 +597,18 @@ func (r *Renderer) renderSearchPanel(panel *searchpanel.Panel, width, height int
 	inputActive := panel.Focused && panel.Mode == searchpanel.ModeResults
 	r.drawPanelInputBox(layout.ContentX, layout.InputBoxY, layout.ContentWidth, layout.LineHeight, inputActive, proj)
 
-	inputText := panel.Query
-	if len(inputText) > maxChars {
-		inputText = "..." + inputText[len(inputText)-maxChars+3:]
-	}
+	inputText := truncateHeadToCells(panel.Query, maxChars)
 	inputTextY := layout.InputBoxY + layout.LineHeight*0.75
 	if inputText == "" {
-		if inputActive {
-			r.drawText(layout.ContentX+8, inputTextY, "_", r.theme.TabActive, proj)
-		}
 		r.drawText(layout.ContentX+8, inputTextY, "Search the web...", panelFaintText, proj)
-	} else {
-		cursor := ""
 		if inputActive {
-			cursor = "_"
+			r.drawInputCursor(layout.ContentX+8, inputTextY, proj)
 		}
-		r.drawText(layout.ContentX+8, inputTextY, inputText+cursor, r.theme.Foreground, proj)
+	} else {
+		r.drawText(layout.ContentX+8, inputTextY, inputText, r.theme.Foreground, proj)
+		if inputActive {
+			r.drawInputCursor(layout.ContentX+8+float32(textCells(inputText))*r.cellWidth, inputTextY, proj)
+		}
 	}
 
 	status := panel.Status
@@ -638,10 +634,7 @@ func (r *Renderer) renderSearchPanel(panel *searchpanel.Panel, width, height int
 		}
 	}
 	if status != "" {
-		if len(status) > maxChars {
-			status = status[:maxChars-3] + "..."
-		}
-		r.drawText(layout.ContentX, layout.StatusY, status, statusColor, proj)
+		r.drawText(layout.ContentX, layout.StatusY, truncateToCells(status, maxChars), statusColor, proj)
 	}
 
 	if panel.Mode == searchpanel.ModePreview {
@@ -653,16 +646,22 @@ func (r *Renderer) renderSearchPanel(panel *searchpanel.Panel, width, height int
 	var footerText string
 	switch {
 	case !panel.Focused:
-		footerText = panelFocusChord() + ": focus panel"
+		footerText = fitToCells(maxChars, panelFocusChord()+": focus panel", "Focus: "+panelFocusChord())
 	case panel.Mode == searchpanel.ModePreview:
-		footerText = "Esc: back | Up/Down: scroll | Ctrl+O: browser"
+		footerText = fitToCells(maxChars,
+			"Esc: back | Up/Down: scroll | Ctrl+O: browser",
+			"Esc: back | Up/Down: scroll",
+			"Esc: back")
 	case len(panel.Results) > 0 && !panel.QueryDirty:
-		footerText = fmt.Sprintf("%d/%d | Enter: preview | Ctrl+O: browser", panel.Selected+1, len(panel.Results))
+		footerText = fitToCells(maxChars,
+			fmt.Sprintf("%d/%d | Enter: preview | Ctrl+O: browser", panel.Selected+1, len(panel.Results)),
+			fmt.Sprintf("%d/%d | Enter: preview", panel.Selected+1, len(panel.Results)),
+			"Enter: preview")
 	default:
-		footerText = "Enter: search | Up/Down: history | Esc: close"
-	}
-	if len(footerText) > maxChars {
-		footerText = footerText[:maxChars-3] + "..."
+		footerText = fitToCells(maxChars,
+			"Enter: search | Up/Down: history | Esc: close",
+			"Enter: search | Up/Down: history",
+			"Enter: search")
 	}
 	r.drawText(layout.ContentX, layout.FooterY, footerText, panelDimText, proj)
 }
@@ -681,28 +680,20 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 	if model := panel.LoadedModel; model != "" {
 		avail := maxChars - len("AI Chat") - 2
 		if avail > 3 {
-			if len(model) > avail {
-				model = model[:avail-3] + "..."
-			}
-			r.drawTextRight(layout.ContentX+layout.ContentWidth, layout.HeaderY, model, panelFaintText, proj)
+			r.drawTextRight(layout.ContentX+layout.ContentWidth, layout.HeaderY,
+				truncateToCells(model, avail), panelFaintText, proj)
 		}
 	}
 
-	status := panel.Status
-	statusColor := r.theme.Cursor
-	if panel.Loading {
-		if status == "" {
-			status = "Thinking..."
+	// Errors and one-off notices render in the status slot under the header;
+	// the loading spinner instead joins the conversation flow below, next to
+	// the message it belongs to.
+	if status := panel.Status; status != "" && !panel.Loading {
+		statusColor := r.theme.Cursor
+		if strings.Contains(status, "failed") || strings.HasPrefix(status, "Missing") {
+			statusColor = panelErrorText
 		}
-		status = panel.SpinnerFrame() + " " + status
-	} else if strings.Contains(status, "failed") || strings.HasPrefix(status, "Missing") {
-		statusColor = panelErrorText
-	}
-	if status != "" {
-		if len(status) > maxChars {
-			status = status[:maxChars-3] + "..."
-		}
-		r.drawText(layout.ContentX, layout.StatusY, status, statusColor, proj)
+		r.drawText(layout.ContentX, layout.StatusY, truncateToCells(status, maxChars), statusColor, proj)
 	}
 
 	r.drawText(layout.ContentX, layout.InputLabelY, "Message", panelDimText, proj)
@@ -718,19 +709,18 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 	inputStartLine := panel.InputScroll
 
 	if panel.Input == "" {
-		if panel.Focused {
-			r.drawText(layout.ContentX+8, inputY, "_", r.theme.TabActive, proj)
-		}
 		r.drawText(layout.ContentX+8, inputY, "Ask anything...", panelFaintText, proj)
+		if panel.Focused {
+			r.drawInputCursor(layout.ContentX+8, inputY, proj)
+		}
 	} else {
 		for i := 0; i < visibleInputLines && inputStartLine+i < len(inputLines); i++ {
 			lineText := inputLines[inputStartLine+i]
-			// Add cursor on the last line
-			isLastLine := inputStartLine+i == len(inputLines)-1
-			if isLastLine && panel.Focused {
-				lineText += "_"
-			}
 			r.drawText(layout.ContentX+8, inputY, lineText, r.theme.Foreground, proj)
+			// Caret after the last line's text
+			if panel.Focused && inputStartLine+i == len(inputLines)-1 {
+				r.drawInputCursor(layout.ContentX+8+float32(textCells(lineText))*r.cellWidth, inputY, proj)
+			}
 			inputY += layout.LineHeight
 		}
 	}
@@ -747,9 +737,29 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 	panel.WrapChars = maxChars
 	panel.WrappedLines = lines
 
-	if len(lines) == 0 && !panel.Loading {
-		r.drawText(layout.ContentX, layout.MessagesStart, "Ask a question to begin.", panelDimText, proj)
-		r.drawText(layout.ContentX, layout.MessagesStart+layout.LineHeight, "Enter sends, Shift+Enter adds a newline.", panelFaintText, proj)
+	// While waiting on the model, the spinner rides at the end of the
+	// conversation (where the reply will appear) rather than up in the header.
+	if panel.Loading {
+		status := panel.Status
+		if status == "" {
+			status = "Thinking..."
+		}
+		if len(lines) > 0 {
+			lines = append(lines, aipanel.WrappedLine{Role: "", Text: ""})
+		}
+		lines = append(lines, aipanel.WrappedLine{
+			Role: "thinking", Text: panel.SpinnerFrame() + " " + status, IsThinking: true,
+		})
+	}
+
+	if len(lines) == 0 {
+		r.drawText(layout.ContentX, layout.MessagesStart,
+			truncateToCells("Ask a question to begin.", maxChars), panelDimText, proj)
+		r.drawText(layout.ContentX, layout.MessagesStart+layout.LineHeight,
+			fitToCells(maxChars,
+				"Enter sends, Shift+Enter adds a newline.",
+				"Enter sends, Shift+Enter: newline.",
+				"Enter sends."), panelFaintText, proj)
 	} else {
 		visibleLines := layout.VisibleLines
 		totalLines := len(lines)
@@ -770,6 +780,13 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 
 		startLine := panel.Scroll
 		lineY := layout.MessagesStart
+		// Chat-style anchoring: while the conversation is shorter than the
+		// viewport, hug it to the input box instead of leaving a dead gap.
+		panel.AnchorOffset = 0
+		if totalLines < visibleLines {
+			panel.AnchorOffset = visibleLines - totalLines
+			lineY = layout.MessagesStart + float32(panel.AnchorOffset)*layout.LineHeight
+		}
 		codeColor := [4]float32{0.7, 0.8, 0.6, 1.0}           // Greenish for code
 		headerColor := [4]float32{0.9, 0.7, 0.4, 1.0}         // Orange/gold for headers
 		bulletColor := [4]float32{0.7, 0.7, 0.9, 1.0}         // Light blue for bullets
@@ -846,17 +863,30 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 
 	var footerText string
 	if !panel.Focused {
-		footerText = panelFocusChord() + ": focus panel"
+		footerText = fitToCells(maxChars, panelFocusChord()+": focus panel", "Focus: "+panelFocusChord())
 	} else {
-		footerText = "Enter: send | Shift+Enter: newline | " + panelCopyChord() + ": copy"
+		full := "Enter: send | Shift+Enter: newline | " + panelCopyChord() + ": copy"
 		if aipanel.HasThinkingContent(panel.Messages) {
-			footerText += " | Ctrl+T: thinking"
+			full += " | Ctrl+T: thinking"
 		}
-	}
-	if len(footerText) > maxChars {
-		footerText = footerText[:maxChars-3] + "..."
+		footerText = fitToCells(maxChars, full,
+			"Enter: send | Shift+Enter: newline | "+panelCopyChord()+": copy",
+			"Enter: send | Shift+Enter: newline",
+			"Enter sends")
 	}
 	r.drawText(layout.ContentX, layout.FooterY, footerText, panelDimText, proj)
+}
+
+// fitToCells returns the first candidate that fits within max display cells,
+// falling back to a hard truncation of the last (shortest) candidate. Used for
+// hint footers so narrow panels drop whole hints instead of cutting mid-word.
+func fitToCells(max int, candidates ...string) string {
+	for _, c := range candidates {
+		if textCells(c) <= max {
+			return c
+		}
+	}
+	return truncateToCells(candidates[len(candidates)-1], max)
 }
 
 func (r *Renderer) renderSearchResults(panel *searchpanel.Panel, layout searchpanel.Layout, maxChars int, proj [16]float32) {
@@ -899,10 +929,7 @@ func (r *Renderer) renderSearchResults(panel *searchpanel.Panel, layout searchpa
 			r.drawRect(layout.ContentX-8, drawY-layout.LineHeight+6, 3, layout.LineHeight*2.2, r.theme.TabActive, proj)
 		}
 
-		title := fmt.Sprintf("%d. %s", i+1, strings.TrimSpace(result.Title))
-		if len(title) > maxChars {
-			title = title[:maxChars-3] + "..."
-		}
+		title := truncateToCells(fmt.Sprintf("%d. %s", i+1, strings.TrimSpace(result.Title)), maxChars)
 		titleColor := r.theme.TabActive
 		if i != panel.Selected {
 			titleColor = withAlpha(r.theme.TabActive, 0.8)
@@ -913,10 +940,7 @@ func (r *Renderer) renderSearchResults(panel *searchpanel.Panel, layout searchpa
 		if subLine == "" {
 			subLine = strings.TrimSpace(result.URL)
 		}
-		if len(subLine) > maxChars {
-			subLine = subLine[:maxChars-3] + "..."
-		}
-		r.drawText(layout.ContentX+12, drawY+layout.LineHeight, subLine, panelDimText, proj)
+		r.drawText(layout.ContentX+12, drawY+layout.LineHeight, truncateToCells(subLine, maxChars), panelDimText, proj)
 	}
 
 	r.drawPanelScrollbar(layout.PanelX+layout.PanelWidth-7,
@@ -929,10 +953,7 @@ func (r *Renderer) renderSearchPreview(panel *searchpanel.Panel, layout searchpa
 	if panel.PreviewTitle != "" {
 		header = "Preview: " + panel.PreviewTitle
 	}
-	if len(header) > maxChars {
-		header = header[:maxChars-3] + "..."
-	}
-	r.drawText(layout.ContentX, layout.ResultsStart, header, r.theme.TabActive, proj)
+	r.drawText(layout.ContentX, layout.ResultsStart, truncateToCells(header, maxChars), r.theme.TabActive, proj)
 
 	wrappedLines := buildWrappedPreview(panel.PreviewLines, maxChars, r.theme)
 	panel.PreviewWrapped = nil
@@ -2859,7 +2880,16 @@ func (r *Renderer) drawChar(x, y float32, char rune, clr [4]float32, proj [16]fl
 // and italic (horizontal shear). With bold=false, italic=false it is identical to a
 // plain drawChar.
 func (r *Renderer) drawCharStyled(x, y float32, char rune, clr [4]float32, proj [16]float32, bold, italic bool) {
-	glyph, ok := r.lookupGlyph(char)
+	glyph, ok := r.resolveGlyph(char)
+	if !ok {
+		// Try the color-emoji path (same as the grid renderer) before the
+		// '?' fallback, so emoji in panel text render instead of degrading.
+		if cg, isColor := r.ensureColorGlyph(char); isColor {
+			r.drawColorGlyph(x, y-r.cellHeight, grid.RuneWidth(char), cg, clr[3], proj)
+			return
+		}
+		glyph, ok = r.ensureGlyph('?')
+	}
 	if !ok || glyph.PixelWidth == 0 {
 		return
 	}
@@ -2917,9 +2947,69 @@ func (r *Renderer) drawCharStyled(x, y float32, char rune, clr [4]float32, proj 
 // drawText draws a string of text
 func (r *Renderer) drawText(x, y float32, text string, clr [4]float32, proj [16]float32) {
 	for _, char := range text {
+		w := grid.RuneWidth(char)
+		if w == 0 {
+			// Combining marks / variation selectors have no cell of their own
+			// in panel text; skip rather than draw the '?' fallback glyph.
+			continue
+		}
 		r.drawChar(x, y, char, clr, proj)
-		x += r.cellWidth
+		x += r.cellWidth * float32(w)
 	}
+}
+
+// textCells returns the number of terminal cells the string occupies when
+// drawn with drawText (wide runes such as emoji take two).
+func textCells(s string) int {
+	return grid.StringWidth(s)
+}
+
+// truncateToCells truncates s so it occupies at most max cells, appending an
+// ellipsis when something was cut. Safe for multibyte/wide runes (never slices
+// mid-rune, counts display cells rather than bytes).
+func truncateToCells(s string, max int) string {
+	if max <= 0 || textCells(s) <= max {
+		return s
+	}
+	budget := max - 3 // room for "..."
+	w := 0
+	for i, char := range s {
+		cw := grid.RuneWidth(char)
+		if w+cw > budget {
+			return s[:i] + "..."
+		}
+		w += cw
+	}
+	return s
+}
+
+// truncateHeadToCells keeps the tail of s so it occupies at most max cells,
+// prefixing an ellipsis when something was cut (used for input fields that
+// scroll horizontally).
+func truncateHeadToCells(s string, max int) string {
+	if max <= 0 || textCells(s) <= max {
+		return s
+	}
+	budget := max - 3
+	runes := []rune(s)
+	w := 0
+	for i := len(runes) - 1; i >= 0; i-- {
+		cw := grid.RuneWidth(runes[i])
+		if w+cw > budget {
+			return "..." + string(runes[i+1:])
+		}
+		w += cw
+	}
+	return s
+}
+
+// drawInputCursor draws a thin caret bar at x, sized to one text line. Using a
+// bar (instead of an underscore glyph) keeps it visible on top of placeholder
+// text without the two glyphs smudging into each other.
+func (r *Renderer) drawInputCursor(x, textY float32, proj [16]float32) {
+	// textY matches the y passed to drawText, which treats it as the cell
+	// bottom; the bar spans that same cell box.
+	r.drawRect(x, textY-r.cellHeight, 2, r.cellHeight, r.theme.TabActive, proj)
 }
 
 // drawTextScaled draws text at a specific scale relative to current font

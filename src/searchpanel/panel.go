@@ -291,9 +291,9 @@ func (p *Panel) Layout(width, height int, cellWidth, cellHeight float32) Layout 
 	contentX := panelX + 18
 	contentWidth := panelWidth - 36
 	headerY := panelY + lineHeight*1.2
-	inputLabelY := headerY + lineHeight*1.1
-	inputBoxY := inputLabelY + lineHeight*0.35
-	statusY := inputBoxY + lineHeight*1.3
+	inputLabelY := headerY + lineHeight*1.4
+	inputBoxY := inputLabelY + lineHeight*0.45
+	statusY := inputBoxY + lineHeight*1.4
 	resultsStart := statusY + lineHeight*1.1
 	footerY := panelY + panelHeight - lineHeight*0.6
 	resultsEnd := footerY - lineHeight*1.2

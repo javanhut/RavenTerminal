@@ -133,6 +133,13 @@ func NewPane(id int, cols, rows uint16, startDir string) (*Pane, error) {
 
 // readLoop continuously reads from the PTY and processes output
 func (p *Pane) readLoop() {
+	var tap *os.File
+	if path := os.Getenv("RAVEN_PTY_TAP"); path != "" {
+		tap, _ = os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if tap != nil {
+			defer tap.Close()
+		}
+	}
 	buf := make([]byte, 4096)
 	for {
 		n, err := p.pty.Read(buf)
@@ -143,6 +150,9 @@ func (p *Pane) readLoop() {
 			return
 		}
 
+		if tap != nil {
+			tap.Write(buf[:n])
+		}
 		p.processChunk(buf[:n])
 
 		// Wake the main loop so this output renders without waiting for the idle timeout.
