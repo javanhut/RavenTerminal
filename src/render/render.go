@@ -481,18 +481,103 @@ func (r *Renderer) RenderWithHelpAndPanels(tm *tab.TabManager, width, height int
 	}
 }
 
+// Shared overlay-panel palette.
+var (
+	panelDimText   = [4]float32{0.58, 0.60, 0.66, 1.0}
+	panelFaintText = [4]float32{0.42, 0.44, 0.50, 1.0}
+	panelErrorText = [4]float32{0.9, 0.3, 0.3, 1.0}
+	panelInputBg   = [4]float32{0.02, 0.02, 0.04, 1.0}
+)
+
+// panelFocusChord returns the platform chord that moves keyboard focus
+// between an overlay panel and the terminal (the pane-cycle binding).
+func panelFocusChord() string {
+	if runtime.GOOS == "darwin" {
+		return "Cmd+]"
+	}
+	return "Ctrl+Shift+]"
+}
+
+// panelCopyChord returns the platform chord bound to ActionCopy.
+func panelCopyChord() string {
+	if runtime.GOOS == "darwin" {
+		return "Cmd+C"
+	}
+	return "Ctrl+Shift+C"
+}
+
+// drawPanelFrame draws the shared overlay-panel chrome: a rounded backdrop
+// with a header strip and a border that brightens when the panel has keyboard
+// focus, so it is obvious whether typing goes to the panel or the terminal.
+func (r *Renderer) drawPanelFrame(x, y, w, h, lineHeight float32, focused bool, proj [16]float32) {
+	radius := float32(8)
+	borderColor := r.theme.TabActive
+	borderWidth := float32(2)
+	if !focused {
+		borderColor = withAlpha(r.theme.TabActive, 0.3)
+		borderWidth = 1
+	}
+	panelBg := [4]float32{0.05, 0.06, 0.08, 0.97}
+	headerBg := [4]float32{0.09, 0.10, 0.14, 1.0}
+
+	r.drawRoundedRect(x-borderWidth, y-borderWidth, w+2*borderWidth, h+2*borderWidth, radius+borderWidth, borderColor, proj)
+	r.drawRoundedRect(x, y, w, h, radius, panelBg, proj)
+
+	// Header strip: rounded along the panel top, square at its bottom edge.
+	headerH := lineHeight * 1.7
+	if headerH > h {
+		headerH = h
+	}
+	r.drawRoundedRect(x, y, w, headerH, radius, headerBg, proj)
+	r.drawRect(x, y+headerH/2, w, headerH/2, headerBg, proj)
+	r.drawRect(x, y+headerH, w, 1, withAlpha(r.theme.TabActive, 0.25), proj)
+}
+
+// drawPanelInputBox draws a rounded input field whose border brightens when
+// it will receive typed characters.
+func (r *Renderer) drawPanelInputBox(x, y, w, h float32, active bool, proj [16]float32) {
+	border := [4]float32{0.22, 0.24, 0.32, 1.0}
+	if active {
+		border = withAlpha(r.theme.TabActive, 0.85)
+	}
+	r.drawRoundedRect(x-1, y-1, w+2, h+2, 5, border, proj)
+	r.drawRoundedRect(x, y, w, h, 4, panelInputBg, proj)
+}
+
+// drawPanelScrollbar draws a thin scroll indicator along the right edge of a
+// scrollable region when its content overflows.
+func (r *Renderer) drawPanelScrollbar(x, top, bottom float32, total, visible, scroll int, proj [16]float32) {
+	if total <= visible || visible <= 0 {
+		return
+	}
+	trackH := bottom - top
+	if trackH <= 16 {
+		return
+	}
+	r.drawRect(x, top, 3, trackH, [4]float32{1, 1, 1, 0.07}, proj)
+	thumbH := trackH * float32(visible) / float32(total)
+	if thumbH < 14 {
+		thumbH = 14
+	}
+	pos := float32(scroll) / float32(total-visible)
+	if pos < 0 {
+		pos = 0
+	}
+	if pos > 1 {
+		pos = 1
+	}
+	r.drawRoundedRect(x, top+pos*(trackH-thumbH), 3, thumbH, 1.5, withAlpha(r.theme.TabActive, 0.6), proj)
+}
+
+// drawTextRight draws text right-aligned so it ends at rightX.
+func (r *Renderer) drawTextRight(rightX, y float32, text string, clr [4]float32, proj [16]float32) {
+	r.drawText(rightX-float32(len([]rune(text)))*r.cellWidth, y, text, clr, proj)
+}
+
 func (r *Renderer) renderSearchPanel(panel *searchpanel.Panel, width, height int, proj [16]float32) {
 	layout := panel.Layout(width, height, r.cellWidth, r.cellHeight)
 
-	panelBg := [4]float32{0.05, 0.06, 0.08, 0.95}
-	borderColor := r.theme.TabActive
-	borderWidth := float32(2)
-
-	r.drawRect(layout.PanelX, layout.PanelY, layout.PanelWidth, layout.PanelHeight, panelBg, proj)
-	r.drawRect(layout.PanelX, layout.PanelY, layout.PanelWidth, borderWidth, borderColor, proj)
-	r.drawRect(layout.PanelX, layout.PanelY+layout.PanelHeight-borderWidth, layout.PanelWidth, borderWidth, borderColor, proj)
-	r.drawRect(layout.PanelX, layout.PanelY, borderWidth, layout.PanelHeight, borderColor, proj)
-	r.drawRect(layout.PanelX+layout.PanelWidth-borderWidth, layout.PanelY, borderWidth, layout.PanelHeight, borderColor, proj)
+	r.drawPanelFrame(layout.PanelX, layout.PanelY, layout.PanelWidth, layout.PanelHeight, layout.LineHeight, panel.Focused, proj)
 
 	maxChars := int(layout.ContentWidth/r.cellWidth) - 2
 	if maxChars < 10 {
@@ -500,35 +585,63 @@ func (r *Renderer) renderSearchPanel(panel *searchpanel.Panel, width, height int
 	}
 
 	r.drawText(layout.ContentX, layout.HeaderY, "Web Search", r.theme.TabActive, proj)
+	proxyBadge := "proxy off"
+	proxyColor := panelFaintText
+	if panel.ProxyEnabled {
+		proxyBadge = "proxy on"
+		proxyColor = r.theme.Cursor
+	}
+	r.drawTextRight(layout.ContentX+layout.ContentWidth, layout.HeaderY, proxyBadge, proxyColor, proj)
 
-	r.drawText(layout.ContentX, layout.InputLabelY, "Query", r.theme.Foreground, proj)
-	inputBoxColor := [4]float32{0.03, 0.03, 0.05, 1.0}
-	r.drawRect(layout.ContentX, layout.InputBoxY, layout.ContentWidth, layout.LineHeight, inputBoxColor, proj)
+	r.drawText(layout.ContentX, layout.InputLabelY, "Query", panelDimText, proj)
+	inputActive := panel.Focused && panel.Mode == searchpanel.ModeResults
+	r.drawPanelInputBox(layout.ContentX, layout.InputBoxY, layout.ContentWidth, layout.LineHeight, inputActive, proj)
 
 	inputText := panel.Query
 	if len(inputText) > maxChars {
 		inputText = "..." + inputText[len(inputText)-maxChars+3:]
 	}
-	r.drawText(layout.ContentX+8, layout.InputBoxY+layout.LineHeight*0.75, inputText+"_", r.theme.TabActive, proj)
+	inputTextY := layout.InputBoxY + layout.LineHeight*0.75
+	if inputText == "" {
+		if inputActive {
+			r.drawText(layout.ContentX+8, inputTextY, "_", r.theme.TabActive, proj)
+		}
+		r.drawText(layout.ContentX+8, inputTextY, "Search the web...", panelFaintText, proj)
+	} else {
+		cursor := ""
+		if inputActive {
+			cursor = "_"
+		}
+		r.drawText(layout.ContentX+8, inputTextY, inputText+cursor, r.theme.Foreground, proj)
+	}
 
 	status := panel.Status
+	statusColor := r.theme.Cursor
 	if panel.Loading {
-		spinner := panel.SpinnerFrame()
-		if status == "Searching..." {
-			status = spinner + " Searching..."
-		} else if status == "Loading preview..." {
-			status = spinner + " Loading preview..."
-		} else if status == "" {
-			status = spinner + " Loading..."
-		} else {
-			status = spinner + " " + status
+		if status == "" {
+			status = "Loading..."
+		}
+		status = panel.SpinnerFrame() + " " + status
+	} else if strings.Contains(status, "failed") || strings.HasPrefix(status, "Failed") {
+		statusColor = panelErrorText
+	} else if status == "" {
+		if panel.HistoryIndex >= 0 {
+			status = fmt.Sprintf("history %d/%d", panel.HistoryIndex+1, len(panel.History))
+			statusColor = panelDimText
+		} else if panel.Mode == searchpanel.ModeResults && len(panel.Results) > 0 {
+			noun := "results"
+			if len(panel.Results) == 1 {
+				noun = "result"
+			}
+			status = fmt.Sprintf("%d %s for \"%s\"", len(panel.Results), noun, panel.LastQuery)
+			statusColor = panelDimText
 		}
 	}
 	if status != "" {
 		if len(status) > maxChars {
 			status = status[:maxChars-3] + "..."
 		}
-		r.drawText(layout.ContentX, layout.StatusY, status, r.theme.Cursor, proj)
+		r.drawText(layout.ContentX, layout.StatusY, status, statusColor, proj)
 	}
 
 	if panel.Mode == searchpanel.ModePreview {
@@ -537,33 +650,27 @@ func (r *Renderer) renderSearchPanel(panel *searchpanel.Panel, width, height int
 		r.renderSearchResults(panel, layout, maxChars, proj)
 	}
 
-	footerText := "Enter: search | Up/Down: history | Ctrl+O: open in browser"
-	proxyState := "Proxy: off"
-	if panel.ProxyEnabled {
-		proxyState = "Proxy: on"
-	}
-	footerText = footerText + " | " + proxyState
-	if panel.Mode == searchpanel.ModePreview {
-		footerText = "Esc: back | Ctrl+O: open | " + proxyState
+	var footerText string
+	switch {
+	case !panel.Focused:
+		footerText = panelFocusChord() + ": focus panel"
+	case panel.Mode == searchpanel.ModePreview:
+		footerText = "Esc: back | Up/Down: scroll | Ctrl+O: browser"
+	case len(panel.Results) > 0 && !panel.QueryDirty:
+		footerText = fmt.Sprintf("%d/%d | Enter: preview | Ctrl+O: browser", panel.Selected+1, len(panel.Results))
+	default:
+		footerText = "Enter: search | Up/Down: history | Esc: close"
 	}
 	if len(footerText) > maxChars {
 		footerText = footerText[:maxChars-3] + "..."
 	}
-	r.drawText(layout.ContentX, layout.FooterY, footerText, [4]float32{0.6, 0.6, 0.6, 1.0}, proj)
+	r.drawText(layout.ContentX, layout.FooterY, footerText, panelDimText, proj)
 }
 
 func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [16]float32) {
 	layout := panel.Layout(width, height, r.cellWidth, r.cellHeight)
 
-	panelBg := [4]float32{0.05, 0.06, 0.08, 0.95}
-	borderColor := r.theme.TabActive
-	borderWidth := float32(2)
-
-	r.drawRect(layout.PanelX, layout.PanelY, layout.PanelWidth, layout.PanelHeight, panelBg, proj)
-	r.drawRect(layout.PanelX, layout.PanelY, layout.PanelWidth, borderWidth, borderColor, proj)
-	r.drawRect(layout.PanelX, layout.PanelY+layout.PanelHeight-borderWidth, layout.PanelWidth, borderWidth, borderColor, proj)
-	r.drawRect(layout.PanelX, layout.PanelY, borderWidth, layout.PanelHeight, borderColor, proj)
-	r.drawRect(layout.PanelX+layout.PanelWidth-borderWidth, layout.PanelY, borderWidth, layout.PanelHeight, borderColor, proj)
+	r.drawPanelFrame(layout.PanelX, layout.PanelY, layout.PanelWidth, layout.PanelHeight, layout.LineHeight, panel.Focused, proj)
 
 	maxChars := int(layout.ContentWidth/r.cellWidth) - 2
 	if maxChars < 10 {
@@ -571,35 +678,35 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 	}
 
 	r.drawText(layout.ContentX, layout.HeaderY, "AI Chat", r.theme.TabActive, proj)
+	if model := panel.LoadedModel; model != "" {
+		avail := maxChars - len("AI Chat") - 2
+		if avail > 3 {
+			if len(model) > avail {
+				model = model[:avail-3] + "..."
+			}
+			r.drawTextRight(layout.ContentX+layout.ContentWidth, layout.HeaderY, model, panelFaintText, proj)
+		}
+	}
 
 	status := panel.Status
+	statusColor := r.theme.Cursor
 	if panel.Loading {
-		spinner := panel.SpinnerFrame()
-		if status == "Loading model..." {
-			status = spinner + " Loading model..."
-		} else if status == "" || status == "Thinking..." {
-			status = spinner + " Thinking..."
-		} else {
-			status = spinner + " " + status
+		if status == "" {
+			status = "Thinking..."
 		}
+		status = panel.SpinnerFrame() + " " + status
+	} else if strings.Contains(status, "failed") || strings.HasPrefix(status, "Missing") {
+		statusColor = panelErrorText
 	}
 	if status != "" {
 		if len(status) > maxChars {
 			status = status[:maxChars-3] + "..."
 		}
-		r.drawText(layout.ContentX, layout.StatusY, status, r.theme.Cursor, proj)
+		r.drawText(layout.ContentX, layout.StatusY, status, statusColor, proj)
 	}
 
-	r.drawText(layout.ContentX, layout.InputLabelY, "Ask (Shift+Enter: newline)", r.theme.Foreground, proj)
-	inputBoxColor := [4]float32{0.03, 0.03, 0.05, 1.0}
-	r.drawRect(layout.ContentX, layout.InputBoxY, layout.ContentWidth, layout.InputBoxH, inputBoxColor, proj)
-
-	// Draw border around input box
-	inputBorderColor := [4]float32{0.2, 0.2, 0.3, 1.0}
-	r.drawRect(layout.ContentX, layout.InputBoxY, layout.ContentWidth, 1, inputBorderColor, proj)
-	r.drawRect(layout.ContentX, layout.InputBoxY+layout.InputBoxH-1, layout.ContentWidth, 1, inputBorderColor, proj)
-	r.drawRect(layout.ContentX, layout.InputBoxY, 1, layout.InputBoxH, inputBorderColor, proj)
-	r.drawRect(layout.ContentX+layout.ContentWidth-1, layout.InputBoxY, 1, layout.InputBoxH, inputBorderColor, proj)
+	r.drawText(layout.ContentX, layout.InputLabelY, "Message", panelDimText, proj)
+	r.drawPanelInputBox(layout.ContentX, layout.InputBoxY, layout.ContentWidth, layout.InputBoxH, panel.Focused, proj)
 
 	// Wrap input text for multiline display
 	inputLines := panel.WrapInput(maxChars - 2)
@@ -610,20 +717,22 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 	visibleInputLines := layout.InputLines
 	inputStartLine := panel.InputScroll
 
-	for i := 0; i < visibleInputLines && inputStartLine+i < len(inputLines); i++ {
-		lineText := inputLines[inputStartLine+i]
-		// Add cursor on the last line
-		isLastLine := inputStartLine+i == len(inputLines)-1
-		if isLastLine {
-			lineText += "_"
+	if panel.Input == "" {
+		if panel.Focused {
+			r.drawText(layout.ContentX+8, inputY, "_", r.theme.TabActive, proj)
 		}
-		r.drawText(layout.ContentX+8, inputY, lineText, r.theme.TabActive, proj)
-		inputY += layout.LineHeight
-	}
-
-	// If no input, show cursor on first line
-	if len(inputLines) == 0 || (len(inputLines) == 1 && inputLines[0] == "") {
-		r.drawText(layout.ContentX+8, layout.InputBoxY+layout.LineHeight*0.75, "_", r.theme.TabActive, proj)
+		r.drawText(layout.ContentX+8, inputY, "Ask anything...", panelFaintText, proj)
+	} else {
+		for i := 0; i < visibleInputLines && inputStartLine+i < len(inputLines); i++ {
+			lineText := inputLines[inputStartLine+i]
+			// Add cursor on the last line
+			isLastLine := inputStartLine+i == len(inputLines)-1
+			if isLastLine && panel.Focused {
+				lineText += "_"
+			}
+			r.drawText(layout.ContentX+8, inputY, lineText, r.theme.Foreground, proj)
+			inputY += layout.LineHeight
+		}
 	}
 
 	// Show scroll indicator if input has more lines
@@ -639,7 +748,8 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 	panel.WrappedLines = lines
 
 	if len(lines) == 0 && !panel.Loading {
-		r.drawText(layout.ContentX, layout.MessagesStart, "Ask a quick question to begin.", [4]float32{0.6, 0.6, 0.6, 1.0}, proj)
+		r.drawText(layout.ContentX, layout.MessagesStart, "Ask a question to begin.", panelDimText, proj)
+		r.drawText(layout.ContentX, layout.MessagesStart+layout.LineHeight, "Enter sends, Shift+Enter adds a newline.", panelFaintText, proj)
 	} else {
 		visibleLines := layout.VisibleLines
 		totalLines := len(lines)
@@ -681,6 +791,20 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 				r.drawRect(layout.ContentX, lineY-layout.LineHeight*0.75, layout.ContentWidth, layout.LineHeight, selColor, proj)
 			}
 
+			// Role accent bar in the left padding, continuous across each message.
+			if line.Role != "" {
+				barColor := withAlpha(r.theme.Foreground, 0.25)
+				switch line.Role {
+				case "user":
+					barColor = withAlpha(r.theme.TabActive, 0.9)
+				case "error":
+					barColor = panelErrorText
+				case "thinking":
+					barColor = thinkingColor
+				}
+				r.drawRect(layout.ContentX-9, lineY-layout.LineHeight*0.75, 3, layout.LineHeight, barColor, proj)
+			}
+
 			if strings.TrimSpace(line.Text) != "" {
 				color := r.theme.Foreground
 				if line.IsThinking {
@@ -714,22 +838,39 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 			}
 			lineY += layout.LineHeight
 		}
+
+		r.drawPanelScrollbar(layout.PanelX+layout.PanelWidth-7,
+			layout.MessagesStart-layout.LineHeight*0.75, layout.MessagesEnd,
+			totalLines, visibleLines, panel.Scroll, proj)
 	}
 
-	footerText := "Ctrl+Enter: send | Ctrl+C: copy"
-	if aipanel.HasThinkingContent(panel.Messages) {
-		footerText += " | Ctrl+T: thinking"
+	var footerText string
+	if !panel.Focused {
+		footerText = panelFocusChord() + ": focus panel"
+	} else {
+		footerText = "Enter: send | Shift+Enter: newline | " + panelCopyChord() + ": copy"
+		if aipanel.HasThinkingContent(panel.Messages) {
+			footerText += " | Ctrl+T: thinking"
+		}
 	}
 	if len(footerText) > maxChars {
 		footerText = footerText[:maxChars-3] + "..."
 	}
-	r.drawText(layout.ContentX, layout.FooterY, footerText, [4]float32{0.6, 0.6, 0.6, 1.0}, proj)
+	r.drawText(layout.ContentX, layout.FooterY, footerText, panelDimText, proj)
 }
 
 func (r *Renderer) renderSearchResults(panel *searchpanel.Panel, layout searchpanel.Layout, maxChars int, proj [16]float32) {
 	if len(panel.Results) == 0 {
-		if !panel.Loading && strings.TrimSpace(panel.Query) != "" {
-			r.drawText(layout.ContentX, layout.ResultsStart, "No results.", [4]float32{0.6, 0.6, 0.6, 1.0}, proj)
+		if !panel.Loading {
+			hint := "Type a query and press Enter to search."
+			if strings.TrimSpace(panel.Query) != "" {
+				if panel.QueryDirty {
+					hint = "Press Enter to search."
+				} else {
+					hint = "No results."
+				}
+			}
+			r.drawText(layout.ContentX, layout.ResultsStart, hint, panelFaintText, proj)
 		}
 		return
 	}
@@ -750,15 +891,23 @@ func (r *Renderer) renderSearchResults(panel *searchpanel.Panel, layout searchpa
 		drawY := layout.ResultsStart + float32(drawLine)*layout.LineHeight
 
 		if i == panel.Selected {
-			highlightColor := [4]float32{0.12, 0.14, 0.22, 1.0}
-			r.drawRect(layout.ContentX, drawY-layout.LineHeight+6, layout.ContentWidth, layout.LineHeight*2.2, highlightColor, proj)
+			highlightColor := [4]float32{0.10, 0.12, 0.19, 1.0}
+			if panel.Focused {
+				highlightColor = [4]float32{0.13, 0.16, 0.26, 1.0}
+			}
+			r.drawRoundedRect(layout.ContentX-8, drawY-layout.LineHeight+6, layout.ContentWidth+16, layout.LineHeight*2.2, 4, highlightColor, proj)
+			r.drawRect(layout.ContentX-8, drawY-layout.LineHeight+6, 3, layout.LineHeight*2.2, r.theme.TabActive, proj)
 		}
 
-		title := strings.TrimSpace(result.Title)
+		title := fmt.Sprintf("%d. %s", i+1, strings.TrimSpace(result.Title))
 		if len(title) > maxChars {
 			title = title[:maxChars-3] + "..."
 		}
-		r.drawText(layout.ContentX, drawY, title, r.theme.TabActive, proj)
+		titleColor := r.theme.TabActive
+		if i != panel.Selected {
+			titleColor = withAlpha(r.theme.TabActive, 0.8)
+		}
+		r.drawText(layout.ContentX, drawY, title, titleColor, proj)
 
 		subLine := strings.TrimSpace(result.Snippet)
 		if subLine == "" {
@@ -767,8 +916,12 @@ func (r *Renderer) renderSearchResults(panel *searchpanel.Panel, layout searchpa
 		if len(subLine) > maxChars {
 			subLine = subLine[:maxChars-3] + "..."
 		}
-		r.drawText(layout.ContentX+12, drawY+layout.LineHeight, subLine, r.theme.Foreground, proj)
+		r.drawText(layout.ContentX+12, drawY+layout.LineHeight, subLine, panelDimText, proj)
 	}
+
+	r.drawPanelScrollbar(layout.PanelX+layout.PanelWidth-7,
+		layout.ResultsStart-layout.LineHeight*0.75, layout.ResultsEnd,
+		panel.ResultsTotalLines(), visibleLines, panel.ResultsScroll, proj)
 }
 
 func (r *Renderer) renderSearchPreview(panel *searchpanel.Panel, layout searchpanel.Layout, maxChars int, proj [16]float32) {
@@ -821,6 +974,10 @@ func (r *Renderer) renderSearchPreview(panel *searchpanel.Panel, layout searchpa
 		r.drawText(layout.ContentX, lineY, line.text, line.color, proj)
 		lineY += layout.LineHeight
 	}
+
+	r.drawPanelScrollbar(layout.PanelX+layout.PanelWidth-7,
+		layout.ResultsStart+layout.LineHeight*0.25, layout.ResultsEnd,
+		len(wrappedLines), visibleLines, startLine, proj)
 }
 
 type styledLine struct {
@@ -1123,6 +1280,19 @@ func (r *Renderer) getHelpSections() []struct {
 				{mod + "+[ or ]", "Cycle overlay panel (when open)"},
 				{"Ctrl+R", "Toggle resize mode"},
 				{"Arrow Keys", "Resize active pane"},
+			},
+		},
+		{
+			title: "Web Search / AI Chat",
+			bindings: [][2]string{
+				{"Enter", "Search / open result / send message"},
+				{"Shift+Enter", "Newline in AI message"},
+				{"Up/Down", "Select result, history, or scroll"},
+				{"Ctrl+O", "Open result in browser"},
+				{"Ctrl+Shift+R", "Toggle reader proxy"},
+				{"Ctrl+T", "Expand/collapse AI thinking"},
+				{"Ctrl+U", "Clear input"},
+				{"Esc", "Back / close panel"},
 			},
 		},
 		{

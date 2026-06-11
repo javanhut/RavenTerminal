@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -443,10 +444,15 @@ func GetAvailableShells() []string {
 		"/usr/bin/zsh",
 		"/bin/fish",
 		"/usr/bin/fish",
+		"/usr/local/bin/ravenshell",
+		"/opt/homebrew/bin/ravenshell",
 		"/bin/sh",
 		"/usr/bin/sh",
 		"/bin/dash",
 		"/usr/bin/dash",
+	}
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		possibleShells = append(possibleShells, filepath.Join(homeDir, ".local", "bin", "ravenshell"))
 	}
 
 	seen := make(map[string]bool)
@@ -457,6 +463,13 @@ func GetAvailableShells() []string {
 				seen[base] = true
 				shells = append(shells, shell)
 			}
+		}
+	}
+
+	// RavenShell may be installed somewhere else on PATH (e.g. ~/go/bin).
+	if !seen["ravenshell"] {
+		if path, err := exec.LookPath("ravenshell"); err == nil {
+			shells = append(shells, path)
 		}
 	}
 	return shells

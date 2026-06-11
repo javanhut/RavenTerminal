@@ -471,12 +471,10 @@ func main() {
 			}
 			if result.Action == keybindings.ActionToggleAIPanel {
 				aiPanel.Open = false
-				aiPanel.Reset()
 				return
 			}
 			if result.Action == keybindings.ActionToggleSearchPanel {
 				aiPanel.Open = false
-				aiPanel.Reset()
 				if !searchPanel.Enabled {
 					showToast("Enable web search in settings")
 					return
@@ -555,7 +553,7 @@ func main() {
 				return
 			}
 
-			// Ctrl+Enter: send message
+			// Ctrl+Enter: send message (legacy chord, same as plain Enter)
 			if mods&glfw.ModControl != 0 && (key == glfw.KeyEnter || key == glfw.KeyKPEnter) {
 				if aiPanel.Loading {
 					return
@@ -566,15 +564,22 @@ func main() {
 
 			switch key {
 			case glfw.KeyEscape:
+				// Close but keep the conversation; reopening restores it.
 				aiPanel.Open = false
-				aiPanel.Reset()
 				return
 			case glfw.KeyEnter, glfw.KeyKPEnter:
-				// Regular Enter or Shift+Enter: add newline
 				if action == glfw.Repeat {
 					return
 				}
-				aiPanel.AppendNewline()
+				// Shift+Enter inserts a newline; plain Enter sends.
+				if mods&glfw.ModShift != 0 {
+					aiPanel.AppendNewline()
+					return
+				}
+				if aiPanel.Loading {
+					return
+				}
+				startAIChat(aiPanel.Input)
 				return
 			case glfw.KeyUp:
 				// Scroll input if multiline, otherwise scroll messages
@@ -655,8 +660,6 @@ func main() {
 					aiPanel.Focused = true
 					showHelp = false
 					renderer.ResetHelpScroll()
-				} else {
-					aiPanel.Reset()
 				}
 				return
 			}
@@ -1008,7 +1011,6 @@ func main() {
 			} else {
 				searchPanel.Open = false
 				aiPanel.Open = false
-				aiPanel.Reset()
 				settingsMenu.Open()
 			}
 		case keybindings.ActionToggleResizeMode:
@@ -1019,7 +1021,6 @@ func main() {
 				return
 			}
 			aiPanel.Open = false
-			aiPanel.Reset()
 			searchPanel.Toggle()
 			if searchPanel.Open {
 				if settingsMenu.Config != nil {
@@ -1040,8 +1041,6 @@ func main() {
 				aiPanel.Focused = true
 				showHelp = false
 				renderer.ResetHelpScroll()
-			} else {
-				aiPanel.Reset()
 			}
 		}
 	})

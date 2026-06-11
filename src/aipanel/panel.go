@@ -90,6 +90,11 @@ func (p *Panel) Toggle() {
 	p.Open = !p.Open
 	if p.Open {
 		p.Focused = true
+		// Conversations survive closing the panel; jump back to the latest
+		// message when reopening one.
+		if len(p.Messages) > 0 {
+			p.AutoScroll = true
+		}
 	}
 }
 
