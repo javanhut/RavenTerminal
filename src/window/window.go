@@ -150,12 +150,37 @@ func (w *Window) ToggleFullscreen() {
 		w.savedX, w.savedY = w.glfw.GetPos()
 		w.savedWidth, w.savedHeight = w.glfw.GetSize()
 
-		// Enter fullscreen on primary monitor
-		monitor := glfw.GetPrimaryMonitor()
+		// Enter fullscreen on the monitor the window is on
+		monitor := w.currentMonitor()
 		mode := monitor.GetVideoMode()
 		w.glfw.SetMonitor(monitor, 0, 0, mode.Width, mode.Height, mode.RefreshRate)
 		w.isFullscreen = true
 	}
+}
+
+// currentMonitor returns the monitor containing the largest portion of the
+// window, falling back to the primary monitor. GLFW only exposes a window's
+// monitor while it is fullscreen, so for windowed mode we compute the overlap
+// between the window rect and each monitor's work area ourselves.
+func (w *Window) currentMonitor() *glfw.Monitor {
+	wx, wy := w.glfw.GetPos()
+	ww, wh := w.glfw.GetSize()
+	best := glfw.GetPrimaryMonitor()
+	bestArea := 0
+	for _, m := range glfw.GetMonitors() {
+		mode := m.GetVideoMode()
+		if mode == nil {
+			continue
+		}
+		mx, my := m.GetPos()
+		overlapW := min(wx+ww, mx+mode.Width) - max(wx, mx)
+		overlapH := min(wy+wh, my+mode.Height) - max(wy, my)
+		if overlapW > 0 && overlapH > 0 && overlapW*overlapH > bestArea {
+			bestArea = overlapW * overlapH
+			best = m
+		}
+	}
+	return best
 }
 
 // IsFullscreen returns whether the window is in fullscreen mode
