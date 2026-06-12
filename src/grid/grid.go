@@ -385,9 +385,14 @@ func (g *Grid) appendCombining(r rune) {
 }
 
 // cursorNewline moves cursor to next line (internal, no lock)
-func (g *Grid) cursorNewline() {
+// cursorIndex moves the cursor down one row with line-feed/IND semantics:
+// the column is PRESERVED. Resetting it is carriage return's job — raw-mode
+// TUIs (nvim) send bare LF as a cheap "cursor down" after positioning, and
+// homing the column here scatters their writes across column 1. The PTY's
+// ONLCR translation hides that for cooked-mode shells, which is why the bug
+// only showed inside full-screen apps.
+func (g *Grid) cursorIndex() {
 	g.wrapPending = false
-	g.CursorCol = 0
 	g.CursorRow++
 	// Scroll only when the cursor crosses the bottom margin from inside the
 	// scroll region. A cursor positioned below the region (possible when a TUI
@@ -399,6 +404,13 @@ func (g *Grid) cursorNewline() {
 	} else if g.CursorRow >= g.Rows {
 		g.CursorRow = g.Rows - 1
 	}
+}
+
+// cursorNewline wraps to the start of the next row (autowrap continuation:
+// the only newline that legitimately resets the column).
+func (g *Grid) cursorNewline() {
+	g.CursorCol = 0
+	g.cursorIndex()
 }
 
 // scrollUpRegion scrolls only within the scroll region
@@ -439,7 +451,7 @@ func (g *Grid) scrollUpRegionWithBg(bg Color) {
 func (g *Grid) Newline() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.cursorNewline()
+	g.cursorIndex()
 }
 
 // CarriageReturn moves cursor to the beginning of the current line

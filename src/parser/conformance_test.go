@@ -140,3 +140,50 @@ func TestSurrogateUTF8Rejected(t *testing.T) {
 		t.Fatalf("surrogate UTF-8 char = %U, want U+FFFD", c)
 	}
 }
+
+// Bare LF must move the cursor down with the COLUMN PRESERVED (index
+// semantics); only CR homes the column. Raw-mode TUIs (nvim) position the
+// cursor then send LF as a cheap "cursor down" — homing the column scattered
+// their writes across column 1 (LNM mode 20 restores the legacy behavior).
+func TestLineFeedPreservesColumn(t *testing.T) {
+	term := NewTerminal(20, 5)
+	term.Process([]byte("\x1b[2;10H\n"))
+	col, row := term.Grid.GetCursor()
+	if row != 2 || col != 9 {
+		t.Errorf("after CUP(2,10)+LF: cursor row=%d col=%d, want row=2 col=9 (column preserved)", row, col)
+	}
+
+	// VT and FF behave like LF.
+	term.Process([]byte("\x1b[2;10H\x0b\x0c"))
+	col, row = term.Grid.GetCursor()
+	if row != 3 || col != 9 {
+		t.Errorf("after CUP(2,10)+VT+FF: cursor row=%d col=%d, want row=3 col=9", row, col)
+	}
+
+	// NEL (ESC E) does CR+LF.
+	term.Process([]byte("\x1b[2;10H\x1bE"))
+	col, row = term.Grid.GetCursor()
+	if row != 2 || col != 0 {
+		t.Errorf("after NEL: cursor row=%d col=%d, want row=2 col=0", row, col)
+	}
+
+	// LNM mode 20 set: LF performs CR too.
+	term.Process([]byte("\x1b[20h\x1b[2;10H\n"))
+	col, row = term.Grid.GetCursor()
+	if row != 2 || col != 0 {
+		t.Errorf("LNM: after CUP(2,10)+LF: cursor row=%d col=%d, want row=2 col=0", row, col)
+	}
+	term.Process([]byte("\x1b[20l"))
+
+	// Autowrap continuation still starts at column 0.
+	term.Process([]byte("\x1b[2J\x1b[4;1H") )
+	term.Process([]byte("abcdefghijklmnopqrst")) // exactly 20 cols, wrap pending
+	term.Process([]byte("X"))
+	col, row = term.Grid.GetCursor()
+	if row != 4 || col != 1 {
+		t.Errorf("after wrap write: cursor row=%d col=%d, want row=4 col=1", row, col)
+	}
+	if c := term.Grid.GetCell(0, 4); c.Char != 'X' {
+		t.Errorf("wrapped char at col0 = %q, want X", c.Char)
+	}
+}
