@@ -28,18 +28,18 @@ func TestCheckReadOnlyAllows(t *testing.T) {
 
 func TestCheckReadOnlyRejects(t *testing.T) {
 	rejected := [][]string{
-		{"rm", "-rf", "/tmp/x"},          // not allowlisted
-		{"touch", "file"},                // not allowlisted
-		{"git", "push"},                  // mutating subcommand
-		{"git", "commit", "-m", "x"},     // mutating subcommand
-		{"git", "checkout", "main"},      // mutating subcommand
-		{"git", "config", "user.name"},   // can write config
-		{"git", "diff", "--output=f"},    // write-capable flag
-		{"find", ".", "-delete"},         // destructive flag
+		{"rm", "-rf", "/tmp/x"},            // not allowlisted
+		{"touch", "file"},                  // not allowlisted
+		{"git", "push"},                    // mutating subcommand
+		{"git", "commit", "-m", "x"},       // mutating subcommand
+		{"git", "checkout", "main"},        // mutating subcommand
+		{"git", "config", "user.name"},     // can write config
+		{"git", "diff", "--output=f"},      // write-capable flag
+		{"find", ".", "-delete"},           // destructive flag
 		{"find", ".", "-exec", "rm", "{}"}, // arbitrary exec
-		{"find", ".", "-fprint0", "out"}, // file-writing variant
-		{"curl", "http://example.com"},   // network side effects, not listed
-		{"sh", "-c", "ls"},               // shell escape
+		{"find", ".", "-fprint0", "out"},   // file-writing variant
+		{"curl", "http://example.com"},     // network side effects, not listed
+		{"sh", "-c", "ls"},                 // shell escape
 	}
 	for _, argv := range rejected {
 		if err := checkReadOnly(argv); err == nil {

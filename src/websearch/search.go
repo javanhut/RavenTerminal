@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -57,9 +58,7 @@ func doWithRetry(ctx context.Context, client *http.Client, req *http.Request) (*
 			if err != nil {
 				return nil, err
 			}
-			for k, v := range req.Header {
-				newReq.Header[k] = v
-			}
+			maps.Copy(newReq.Header, req.Header)
 			newReq.Header.Set("User-Agent", getRandomUserAgent())
 			req = newReq
 		}
@@ -664,11 +663,11 @@ func normalizeReaderURL(pageURL string) string {
 		u.Scheme = "https"
 		pageURL = u.String()
 	}
-	if strings.HasPrefix(pageURL, "https://") {
-		return "https://" + strings.TrimPrefix(pageURL, "https://")
+	if after, ok := strings.CutPrefix(pageURL, "https://"); ok {
+		return "https://" + after
 	}
-	if strings.HasPrefix(pageURL, "http://") {
-		return "http://" + strings.TrimPrefix(pageURL, "http://")
+	if after, ok := strings.CutPrefix(pageURL, "http://"); ok {
+		return "http://" + after
 	}
 	return "http://" + pageURL
 }

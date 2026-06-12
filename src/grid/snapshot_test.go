@@ -79,7 +79,7 @@ func TestSnapshotReusesBuffer(t *testing.T) {
 
 func BenchmarkSnapshot(b *testing.B) {
 	g := NewGrid(80, 24)
-	for row := 0; row < 24; row++ {
+	for range 24 {
 		writeStr(g, "the quick brown fox jumps over the lazy dog 0123456789")
 		g.CarriageReturn()
 		g.Newline()

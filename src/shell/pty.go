@@ -123,7 +123,7 @@ func looksLikePathList(s string) bool {
 	if s == "" || strings.ContainsAny(s, "\n\r") {
 		return false
 	}
-	for _, entry := range strings.Split(s, ":") {
+	for entry := range strings.SplitSeq(s, ":") {
 		entry = strings.TrimSpace(entry)
 		if entry == "" {
 			continue
@@ -172,7 +172,7 @@ func composePath(custom []string, base string) string {
 	for _, d := range custom {
 		add(d)
 	}
-	for _, d := range strings.Split(base, ":") {
+	for d := range strings.SplitSeq(base, ":") {
 		add(d)
 	}
 	return strings.Join(out, ":")
@@ -479,7 +479,7 @@ func getUserShell(username string) string {
 	if err != nil {
 		return ""
 	}
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		fields := strings.Split(line, ":")
 		if len(fields) >= 7 && fields[0] == username {
 			return fields[6]

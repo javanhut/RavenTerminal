@@ -93,7 +93,7 @@ func TestHistoryRetainsStyles(t *testing.T) {
 func TestHistoryTrimReleasesStyles(t *testing.T) {
 	g := newGrid(4, 1, 2) // tiny scrollback cap of 2 rows
 	// Each distinct color produces a distinct style; scroll each into history.
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		g.WriteChar('x', IndexedColor(uint8(10+i)), DefaultBg(), 0, 0, 0, Color{})
 		g.ScrollUpWithBg(1, DefaultBg())
 	}

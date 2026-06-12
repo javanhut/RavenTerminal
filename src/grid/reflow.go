@@ -102,10 +102,7 @@ func (g *Grid) reflow(newCols, newRows int) {
 				start := si * newCols
 				if cursorOffset >= start && cursorOffset < start+newCols || si == len(segments)-1 {
 					cursorNewAbsRow = len(newSeq)
-					cursorNewCol = cursorOffset - start
-					if cursorNewCol < 0 {
-						cursorNewCol = 0
-					}
+					cursorNewCol = max(cursorOffset-start, 0)
 					if cursorNewCol >= newCols {
 						cursorNewCol = newCols - 1
 					}
@@ -168,7 +165,7 @@ func (g *Grid) reflow(newCols, newRows int) {
 	// Trim history beyond the cap (releasing the dropped front rows).
 	if len(histRows) > g.maxScroll {
 		drop := len(histRows) - g.maxScroll
-		for i := 0; i < drop; i++ {
+		for i := range drop {
 			g.releaseRow(histRows[i])
 		}
 		histRows = histRows[drop:]
@@ -178,17 +175,11 @@ func (g *Grid) reflow(newCols, newRows int) {
 	g.rows = active
 
 	// 5. Restore cursor (clamped to the active area).
-	g.CursorRow = cursorInActive
-	if g.CursorRow < 0 {
-		g.CursorRow = 0
-	}
+	g.CursorRow = max(cursorInActive, 0)
 	if g.CursorRow >= newRows {
 		g.CursorRow = newRows - 1
 	}
-	g.CursorCol = cursorNewCol
-	if g.CursorCol < 0 {
-		g.CursorCol = 0
-	}
+	g.CursorCol = max(cursorNewCol, 0)
 	if g.CursorCol >= newCols {
 		g.CursorCol = newCols - 1
 	}
@@ -230,10 +221,7 @@ func wrapCells(cells []Cell, cols int) [][]Cell {
 	var segs [][]Cell
 	i := 0
 	for i < len(cells) {
-		end := i + cols
-		if end > len(cells) {
-			end = len(cells)
-		}
+		end := min(i+cols, len(cells))
 		// Don't split a wide char: if the last kept cell is a wide-char start,
 		// drop it to the next segment.
 		if end < len(cells) && end > i && cells[end-1].Width == CellWidthWide {

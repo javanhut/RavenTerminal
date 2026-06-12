@@ -60,8 +60,8 @@ func (t *Terminal) handleAPC(buf []byte) {
 	}
 	body := buf[1:]
 	var ctrlPart, payloadPart []byte
-	if i := bytes.IndexByte(body, ';'); i >= 0 {
-		ctrlPart, payloadPart = body[:i], body[i+1:]
+	if before, after, ok := bytes.Cut(body, []byte{';'}); ok {
+		ctrlPart, payloadPart = before, after
 	} else {
 		ctrlPart = body
 	}
@@ -82,12 +82,12 @@ func (t *Terminal) handleAPC(buf []byte) {
 // parseKittyControls parses comma-separated key=value control pairs.
 func parseKittyControls(s string) map[string]string {
 	m := make(map[string]string)
-	for _, kv := range strings.Split(s, ",") {
+	for kv := range strings.SplitSeq(s, ",") {
 		if kv == "" {
 			continue
 		}
-		if i := strings.IndexByte(kv, '='); i >= 0 {
-			m[kv[:i]] = kv[i+1:]
+		if before, after, ok := strings.Cut(kv, "="); ok {
+			m[before] = after
 		}
 	}
 	return m

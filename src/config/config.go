@@ -487,71 +487,72 @@ func (c *Config) WriteInitScript() (string, error) {
 	initPath := filepath.Join(scriptsDir, "init.sh")
 
 	// Build the init script content
-	script := "#!/bin/bash\n"
-	script += "# Raven Terminal Init Script - Auto-generated\n"
-	script += "# Do not edit directly - changes will be overwritten\n"
-	script += "# Edit config.toml instead\n\n"
+	var script strings.Builder
+	script.WriteString("#!/bin/bash\n")
+	script.WriteString("# Raven Terminal Init Script - Auto-generated\n")
+	script.WriteString("# Do not edit directly - changes will be overwritten\n")
+	script.WriteString("# Edit config.toml instead\n\n")
 
 	// Source user's .bashrc if SourceRC is enabled
 	if c.Shell.SourceRC {
-		script += "# Source user's bashrc\n"
-		script += "[ -f \"$HOME/.bashrc\" ] && source \"$HOME/.bashrc\"\n\n"
+		script.WriteString("# Source user's bashrc\n")
+		script.WriteString("[ -f \"$HOME/.bashrc\" ] && source \"$HOME/.bashrc\"\n\n")
 	}
 
 	// Add user's init script
 	if c.Scripts.Init != "" {
-		script += "# User init script\n"
-		script += c.Scripts.Init + "\n\n"
+		script.WriteString("# User init script\n")
+		script.WriteString(c.Scripts.Init + "\n\n")
 	}
 
 	// Add language detection function
-	script += "# Language detection function\n"
-	script += "__raven_detect_lang() {\n"
+	script.WriteString("# Language detection function\n")
+	script.WriteString("__raven_detect_lang() {\n")
 	if c.Scripts.LanguageDetect != "" {
-		script += c.Scripts.LanguageDetect
+		script.WriteString(c.Scripts.LanguageDetect)
 	} else {
-		script += "echo 'None'\n"
+		script.WriteString("echo 'None'\n")
 	}
-	script += "}\n\n"
+	script.WriteString("}\n\n")
 
 	// Add VCS detection function
-	script += "# VCS detection function\n"
-	script += "__raven_detect_vcs() {\n"
+	script.WriteString("# VCS detection function\n")
+	script.WriteString("__raven_detect_vcs() {\n")
 	if c.Scripts.VCSDetect != "" {
-		script += c.Scripts.VCSDetect
+		script.WriteString(c.Scripts.VCSDetect)
 	} else {
-		script += "echo 'None'\n"
+		script.WriteString("echo 'None'\n")
 	}
-	script += "}\n\n"
+	script.WriteString("}\n\n")
 
 	// Add OSC 7 emission for cwd tracking
-	script += "# Emit OSC 7 for current working directory\n"
-	script += "__raven_emit_osc7() {\n"
-	script += "    local _host\n"
-	script += "    _host=\"${HOSTNAME:-$(hostname)}\"\n"
-	script += "    printf '\\e]7;file://%s%s\\a' \"$_host\" \"$PWD\"\n"
-	script += "}\n\n"
+	script.WriteString("# Emit OSC 7 for current working directory\n")
+	script.WriteString("__raven_emit_osc7() {\n")
+	script.WriteString("    local _host\n")
+	script.WriteString("    _host=\"${HOSTNAME:-$(hostname)}\"\n")
+	script.WriteString("    printf '\\e]7;file://%s%s\\a' \"$_host\" \"$PWD\"\n")
+	script.WriteString("}\n\n")
 
 	// Add prompt building function based on style
-	script += c.buildPromptFunction()
+	script.WriteString(c.buildPromptFunction())
 
 	// Add PROMPT_COMMAND
-	script += "\n# Set up prompt\n"
-	script += "PROMPT_COMMAND='__raven_prompt'\n"
+	script.WriteString("\n# Set up prompt\n")
+	script.WriteString("PROMPT_COMMAND='__raven_prompt'\n")
 
 	// Add aliases
 	if len(c.Aliases) > 0 {
-		script += "\n# Aliases\n"
+		script.WriteString("\n# Aliases\n")
 		for name, cmd := range c.Aliases {
-			script += "alias " + name + "='" + cmd + "'\n"
+			script.WriteString("alias " + name + "='" + cmd + "'\n")
 		}
 	}
 
 	// Add exports
 	if len(c.Exports) > 0 {
-		script += "\n# Exports\n"
+		script.WriteString("\n# Exports\n")
 		for name, value := range c.Exports {
-			script += "export " + name + "=\"" + escapeDoubleQuotes(value) + "\"\n"
+			script.WriteString("export " + name + "=\"" + escapeDoubleQuotes(value) + "\"\n")
 		}
 	}
 
@@ -559,15 +560,15 @@ func (c *Config) WriteInitScript() (string, error) {
 	// entry). New shells also get these via the PTY env; this block lets the
 	// active tab pick up edits immediately when the init script is re-sourced.
 	if len(c.Shell.Paths) > 0 {
-		script += "\n# Raven PATH additions\n"
+		script.WriteString("\n# Raven PATH additions\n")
 		for _, dir := range c.Shell.Paths {
 			d := escapeDoubleQuotes(dir)
-			script += "case \":$PATH:\" in *\":" + d + ":\"*) ;; *) PATH=\"" + d + ":$PATH\";; esac\n"
+			script.WriteString("case \":$PATH:\" in *\":" + d + ":\"*) ;; *) PATH=\"" + d + ":$PATH\";; esac\n")
 		}
-		script += "export PATH\n"
+		script.WriteString("export PATH\n")
 	}
 
-	if err := os.WriteFile(initPath, []byte(script), 0644); err != nil {
+	if err := os.WriteFile(initPath, []byte(script.String()), 0644); err != nil {
 		return "", err
 	}
 
@@ -583,19 +584,30 @@ func (c *Config) WriteInitScript() (string, error) {
 
 // getDistroName reads the distribution name from /etc/os-release
 func getDistroName() string {
-	data, err := os.ReadFile("/etc/os-release")
-	if err != nil {
-		return "linux"
-	}
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		if strings.HasPrefix(line, "ID=") {
-			id := strings.TrimPrefix(line, "ID=")
-			id = strings.Trim(id, "\"")
-			return id
+	opSys := runtime.GOOS
+	var distro string
+	switch opSys {
+	case "linux":
+
+		data, err := os.ReadFile("/etc/os-release")
+		if err != nil {
+			distro = "linux"
 		}
+		lines := strings.Split(string(data), "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(line, "ID=") {
+				id, _ := strings.CutPrefix(line, "ID=")
+				id = strings.Trim(id, "\"")
+				distro = id
+			}
+		}
+		distro = "linux"
+	case "darwin":
+		distro = "macos"
+	case "windows":
+		distro = "windows"
 	}
-	return "linux"
+	return distro
 }
 
 // buildPromptFunction builds the __raven_prompt function based on config

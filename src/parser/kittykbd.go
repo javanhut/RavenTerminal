@@ -73,5 +73,5 @@ func (t *Terminal) kittyQuery() {
 	if t.responseWriter == nil {
 		return
 	}
-	t.responseWriter([]byte(fmt.Sprintf("\x1b[?%du", t.kittyTop())))
+	t.responseWriter(fmt.Appendf(nil, "\x1b[?%du", t.kittyTop()))
 }

@@ -25,8 +25,8 @@ func TestKittyPushPopQuery(t *testing.T) {
 
 func TestKittySetModes(t *testing.T) {
 	term := NewTerminal(10, 1)
-	term.Process([]byte("\x1b[>1u"))    // push flags 1
-	term.Process([]byte("\x1b[=6;2u"))  // set bits: add 6 -> 7
+	term.Process([]byte("\x1b[>1u"))   // push flags 1
+	term.Process([]byte("\x1b[=6;2u")) // set bits: add 6 -> 7
 	if term.KittyKeyboardFlags() != 7 {
 		t.Fatalf("set-bits flags = %d, want 7", term.KittyKeyboardFlags())
 	}

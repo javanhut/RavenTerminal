@@ -97,7 +97,7 @@ func (c *Client) LoadModel(ctx context.Context) error {
 	// Retry with linear backoff — gives the model time to load on cold starts
 	maxRetries := 5
 	var lastErr error
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	for attempt := range maxRetries {
 		if attempt > 0 {
 			// Linear backoff: 5s, 10s, 15s, 20s
 			backoff := time.Duration(attempt*5) * time.Second
@@ -255,7 +255,7 @@ func (c *Client) ChatStreamWithTools(ctx context.Context, messages []Message, to
 	const streamMaxRetries = 3
 	var resp *http.Response
 	var lastErr error
-	for attempt := 0; attempt < streamMaxRetries; attempt++ {
+	for attempt := range streamMaxRetries {
 		if attempt > 0 {
 			backoff := time.Duration(attempt*5) * time.Second
 			select {

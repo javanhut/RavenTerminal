@@ -3,6 +3,7 @@ package menu
 import (
 	"log"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -698,10 +699,7 @@ func (m *Menu) adjustScroll() {
 		m.ScrollOffset = m.SelectedIndex - visibleItems + 1
 	}
 	// Never leave a gap of blank rows below a short list.
-	maxScroll := len(m.Items) - visibleItems
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
+	maxScroll := max(len(m.Items)-visibleItems, 0)
 	if m.ScrollOffset > maxScroll {
 		m.ScrollOffset = maxScroll
 	}
@@ -1239,13 +1237,7 @@ func (m *Menu) HandleEnter() bool {
 			return false
 		}
 		// Skip if already present.
-		exists := false
-		for _, p := range m.Config.Shell.Paths {
-			if p == dir {
-				exists = true
-				break
-			}
-		}
+		exists := slices.Contains(m.Config.Shell.Paths, dir)
 		if !exists {
 			m.Config.Shell.Paths = append(m.Config.Shell.Paths, dir)
 		}
@@ -1702,7 +1694,7 @@ func (m *Menu) firstSelectableIndex() int {
 	return 0
 }
 
-func (m *Menu) debugf(format string, args ...interface{}) {
+func (m *Menu) debugf(format string, args ...any) {
 	if !debugMenu {
 		return
 	}
@@ -1872,28 +1864,28 @@ func formatFloat(f float32) string {
 }
 
 func escapeNewlines(s string) string {
-	result := ""
+	var result strings.Builder
 	for _, c := range s {
 		if c == '\n' {
-			result += "\\n"
+			result.WriteString("\\n")
 		} else {
-			result += string(c)
+			result.WriteString(string(c))
 		}
 	}
-	return result
+	return result.String()
 }
 
 func unescapeNewlines(s string) string {
-	result := ""
+	var result strings.Builder
 	i := 0
 	for i < len(s) {
 		if i+1 < len(s) && s[i] == '\\' && s[i+1] == 'n' {
-			result += "\n"
+			result.WriteString("\n")
 			i += 2
 		} else {
-			result += string(s[i])
+			result.WriteString(string(s[i]))
 			i++
 		}
 	}
-	return result
+	return result.String()
 }

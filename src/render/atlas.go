@@ -76,8 +76,8 @@ func (r *Renderer) uploadRegion(px, py int, img *image.RGBA) {
 	w := img.Rect.Dx()
 	h := img.Rect.Dy()
 	sub := make([]byte, w*h)
-	for yy := 0; yy < h; yy++ {
-		for xx := 0; xx < w; xx++ {
+	for yy := range h {
+		for xx := range w {
 			a := img.Pix[(yy*w+xx)*4+3]
 			sub[yy*w+xx] = a
 			r.atlasPix[(py+yy)*r.atlasSize+(px+xx)] = a

@@ -22,9 +22,9 @@ func TestEffectiveBlink(t *testing.T) {
 
 func TestDECSCUSRBlinkFlag(t *testing.T) {
 	cases := []struct {
-		seq        string
-		wantStyle  CursorStyle
-		wantBlink  bool
+		seq       string
+		wantStyle CursorStyle
+		wantBlink bool
 	}{
 		{"\x1b[1 q", CursorStyleBlock, true},      // blink block
 		{"\x1b[2 q", CursorStyleBlock, false},     // steady block

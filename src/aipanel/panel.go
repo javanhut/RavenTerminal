@@ -223,10 +223,7 @@ func (p *Panel) ScrollInputUp() {
 
 // ScrollInputDown scrolls the input area down
 func (p *Panel) ScrollInputDown(visibleLines int) {
-	maxScroll := len(p.InputLines) - visibleLines
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
+	maxScroll := max(len(p.InputLines)-visibleLines, 0)
 	if p.InputScroll < maxScroll {
 		p.InputScroll++
 	}
@@ -249,10 +246,7 @@ func (p *Panel) EnsureInputCursorVisible(visibleLines int) {
 		p.InputScroll = cursorLine - visibleLines + 1
 	}
 
-	maxScroll := len(p.InputLines) - visibleLines
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
+	maxScroll := max(len(p.InputLines)-visibleLines, 0)
 	if p.InputScroll > maxScroll {
 		p.InputScroll = maxScroll
 	}
@@ -265,9 +259,9 @@ func wrapInputText(text string, maxChars int) []string {
 	}
 
 	var result []string
-	lines := strings.Split(text, "\n")
+	lines := strings.SplitSeq(text, "\n")
 
-	for _, line := range lines {
+	for line := range lines {
 		if line == "" {
 			result = append(result, "")
 			continue
@@ -281,10 +275,7 @@ func wrapInputText(text string, maxChars int) []string {
 				break
 			}
 
-			fit := fitRunes(rs, maxChars)
-			if fit < 1 {
-				fit = 1
-			}
+			fit := max(fitRunes(rs, maxChars), 1)
 			breakAt := fit
 			// Prefer breaking after a space in the latter half of the line
 			for i := fit - 1; i > 0; i-- {
@@ -397,10 +388,7 @@ func (p *Panel) SaveScrollPosition(visibleLines int) {
 // RestoreScrollPosition scrolls to bottom if user was at bottom before content changed
 func (p *Panel) RestoreScrollPosition(visibleLines int) {
 	if p.AutoScroll || p.WasAtBottom {
-		maxScroll := len(p.WrappedLines) - visibleLines
-		if maxScroll < 0 {
-			maxScroll = 0
-		}
+		maxScroll := max(len(p.WrappedLines)-visibleLines, 0)
 		p.Scroll = maxScroll
 		p.AutoScroll = false
 	}
@@ -453,10 +441,7 @@ func (p *Panel) Layout(width, height int, cellWidth, cellHeight float32) Layout 
 	messagesStart := statusY + lineHeight*1.0
 	messagesEnd := inputLabelY - lineHeight*0.6
 
-	visibleLines := int((messagesEnd - messagesStart) / lineHeight)
-	if visibleLines < 1 {
-		visibleLines = 1
-	}
+	visibleLines := max(int((messagesEnd-messagesStart)/lineHeight), 1)
 
 	return Layout{
 		PanelX:        panelX,
@@ -669,13 +654,6 @@ func stripMarkdownFormatting(text string) string {
 	return strings.TrimSpace(text)
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 func wrapText(text string, maxChars int, prefix, indent string) []string {
 	if maxChars <= 0 {
 		return []string{prefix + text}
@@ -690,10 +668,7 @@ func wrapText(text string, maxChars int, prefix, indent string) []string {
 
 	lines := []string{}
 	line := prefix
-	lineLimit := maxChars
-	if lineLimit < 4 {
-		lineLimit = 4
-	}
+	lineLimit := max(maxChars, 4)
 
 	for _, word := range words {
 		if line == "" {
@@ -718,19 +693,13 @@ func wrapText(text string, maxChars int, prefix, indent string) []string {
 
 		// A single word wider than the line: hard-chop it by cells.
 		rs := []rune(word)
-		budget := lineLimit - cells(indent)
-		if budget < 1 {
-			budget = 1
-		}
+		budget := max(lineLimit-cells(indent), 1)
 		for len(rs) > 0 {
 			if cells(string(rs)) <= budget {
 				lines = append(lines, indent+string(rs))
 				break
 			}
-			n := fitRunes(rs, budget)
-			if n < 1 {
-				n = 1
-			}
+			n := max(fitRunes(rs, budget), 1)
 			lines = append(lines, indent+string(rs[:n]))
 			rs = rs[n:]
 		}

@@ -16,7 +16,7 @@ func BenchmarkWriteChar(b *testing.B) {
 func BenchmarkScroll(b *testing.B) {
 	g := NewGrid(80, 24)
 	// fill with content
-	for row := 0; row < 24; row++ {
+	for range 24 {
 		writeStr(g, "the quick brown fox jumps over the lazy dog 0123456789")
 		g.CarriageReturn()
 		g.Newline()
@@ -29,7 +29,7 @@ func BenchmarkScroll(b *testing.B) {
 
 func BenchmarkResize(b *testing.B) {
 	g := NewGrid(80, 24)
-	for row := 0; row < 24; row++ {
+	for range 24 {
 		writeStr(g, "the quick brown fox jumps over the lazy dog")
 		g.CarriageReturn()
 		g.Newline()
@@ -48,7 +48,7 @@ func BenchmarkResize(b *testing.B) {
 // (the pattern Snapshot will replace).
 func BenchmarkReadFrame(b *testing.B) {
 	g := NewGrid(80, 24)
-	for row := 0; row < 24; row++ {
+	for range 24 {
 		writeStr(g, "the quick brown fox jumps over the lazy dog 0123456789")
 		g.CarriageReturn()
 		g.Newline()

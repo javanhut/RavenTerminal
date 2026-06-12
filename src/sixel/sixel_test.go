@@ -14,7 +14,7 @@ func TestDecodeSolidColumn(t *testing.T) {
 		t.Fatalf("dims = %dx%d, want 1x6", img.Width, img.Height)
 	}
 	// Every one of the 6 pixels should be red (255,0,0,255).
-	for y := 0; y < 6; y++ {
+	for y := range 6 {
 		o := (y*img.Width + 0) * 4
 		if img.Pixels[o] != 255 || img.Pixels[o+1] != 0 || img.Pixels[o+2] != 0 || img.Pixels[o+3] != 255 {
 			t.Fatalf("pixel (0,%d) = %v, want red", y, img.Pixels[o:o+4])

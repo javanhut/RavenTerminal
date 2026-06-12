@@ -54,7 +54,7 @@ func TestKittyChunkedTransmit(t *testing.T) {
 	half1 := base64.StdEncoding.EncodeToString(raw[:8])
 	half2 := base64.StdEncoding.EncodeToString(raw[8:])
 	term.Process(apc("f=32,s=2,v=2,i=9,a=t,m=1;" + half1)) // more chunks
-	term.Process(apc("m=0;" + half2))                       // final chunk
+	term.Process(apc("m=0;" + half2))                      // final chunk
 	img, ok := term.Images().Get(9)
 	if !ok {
 		t.Fatal("chunked image not assembled")

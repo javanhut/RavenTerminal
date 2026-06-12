@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -150,13 +151,7 @@ func (r *Registry) webSearchTool() Tool {
 			if query == "" {
 				return "", fmt.Errorf("query is required")
 			}
-			n := argInt(args, "max_results", 5)
-			if n < 1 {
-				n = 1
-			}
-			if n > maxSearchResults {
-				n = maxSearchResults
-			}
+			n := min(max(argInt(args, "max_results", 5), 1), maxSearchResults)
 			results, err := websearch.SearchDuckDuckGo(ctx, query, n)
 			if err != nil {
 				return "", err
@@ -266,26 +261,14 @@ func (r *Registry) readFileTool() Tool {
 				return "", fmt.Errorf("%s looks like a binary file", path)
 			}
 
-			start := argInt(args, "start_line", 1)
-			if start < 1 {
-				start = 1
-			}
-			limit := argInt(args, "max_lines", defaultFileLines)
-			if limit < 1 {
-				limit = 1
-			}
-			if limit > maxFileLines {
-				limit = maxFileLines
-			}
+			start := max(argInt(args, "start_line", 1), 1)
+			limit := min(max(argInt(args, "max_lines", defaultFileLines), 1), maxFileLines)
 
 			lines := strings.Split(string(data), "\n")
 			if start > len(lines) {
 				return "", fmt.Errorf("start_line %d is past end of file (%d lines)", start, len(lines))
 			}
-			end := start - 1 + limit
-			if end > len(lines) {
-				end = len(lines)
-			}
+			end := min(start-1+limit, len(lines))
 			var b strings.Builder
 			for i := start - 1; i < end; i++ {
 				fmt.Fprintf(&b, "%5d\t%s\n", i+1, lines[i])
@@ -305,12 +288,7 @@ func isBinary(data []byte) bool {
 	if len(probe) > 1024 {
 		probe = probe[:1024]
 	}
-	for _, c := range probe {
-		if c == 0 {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(probe, 0)
 }
 
 func (r *Registry) listDirTool() Tool {

@@ -9,10 +9,10 @@ func TestClusterWidth(t *testing.T) {
 	}{
 		{"a", 1},
 		{"世", 2},
-		{"é", 1},          // precomposed
+		{"é", 1},     // precomposed
 		{"é", 1},    // e + combining acute
 		{"👨‍👩‍👧", 2}, // ZWJ family
-		{"🇺🇸", 2},                // regional-indicator flag
+		{"🇺🇸", 2},    // regional-indicator flag
 	}
 	for _, c := range cases {
 		if got := ClusterWidth(c.cluster); got != c.want {

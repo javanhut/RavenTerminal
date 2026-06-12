@@ -38,7 +38,7 @@ func TestStorePruneBelow(t *testing.T) {
 	s := NewStore(0)
 	s.Place(&Placement{AnchorAbsRow: 0, Rows: 2})  // occupies rows 0-1
 	s.Place(&Placement{AnchorAbsRow: 10, Rows: 2}) // rows 10-11
-	s.PrunePlacementsBelow(5)                       // drop anything fully below row 5
+	s.PrunePlacementsBelow(5)                      // drop anything fully below row 5
 	if len(s.Placements()) != 1 {
 		t.Fatalf("placements = %d, want 1 after prune", len(s.Placements()))
 	}

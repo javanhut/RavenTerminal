@@ -72,10 +72,10 @@ type Cell struct {
 	Bg             Color
 	UnderlineColor Color // Underline color (ColorDefault = follow Fg). Set via SGR 58.
 	Flags          CellFlags
-	Width          uint8    // 0=continuation cell, 1=normal width, 2=wide cell start
-	UnderlineStyle uint8    // 0=default/solid, 1=solid, 2=double, 3=curly, 4=dotted, 5=dashed (SGR 4:n)
-	Link           uint16   // OSC 8 hyperlink id (0=none); resolve via Grid.LinkURL
-	Combining      []rune   // codepoints after Char (combining marks / ZWJ cont.); nil for none
+	Width          uint8  // 0=continuation cell, 1=normal width, 2=wide cell start
+	UnderlineStyle uint8  // 0=default/solid, 1=solid, 2=double, 3=curly, 4=dotted, 5=dashed (SGR 4:n)
+	Link           uint16 // OSC 8 hyperlink id (0=none); resolve via Grid.LinkURL
+	Combining      []rune // codepoints after Char (combining marks / ZWJ cont.); nil for none
 }
 
 // NewCell creates an empty cell
@@ -607,7 +607,7 @@ func (g *Grid) scrollUpInternalWithBg(bg Color) {
 func (g *Grid) ScrollUp(n int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for i := 0; i < n; i++ {
+	for range n {
 		g.scrollUpRegion()
 	}
 }
@@ -616,7 +616,7 @@ func (g *Grid) ScrollUp(n int) {
 func (g *Grid) ScrollUpWithBg(n int, bg Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for i := 0; i < n; i++ {
+	for range n {
 		g.scrollUpRegionWithBg(bg)
 	}
 }
@@ -666,7 +666,7 @@ func (g *Grid) scrollDownRegionWithBg(bg Color) {
 func (g *Grid) ScrollDown(n int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for i := 0; i < n; i++ {
+	for range n {
 		g.scrollDownRegion()
 	}
 }
@@ -675,7 +675,7 @@ func (g *Grid) ScrollDown(n int) {
 func (g *Grid) ScrollDownWithBg(n int, bg Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for i := 0; i < n; i++ {
+	for range n {
 		g.scrollDownRegionWithBg(bg)
 	}
 }
@@ -1208,11 +1208,11 @@ func (g *Grid) Resize(cols, rows int) {
 	newRows := make([]*Row, rows)
 	keepCols := min(cols, g.Cols)
 	keepRows := min(rows, g.Rows)
-	for row := 0; row < rows; row++ {
+	for row := range rows {
 		nr := g.blankRowN(cols, g.eraseBg)
 		if row < keepRows {
 			src := g.rows[row]
-			for col := 0; col < keepCols; col++ {
+			for col := range keepCols {
 				g.styles.retain(src.cells[col].Style)
 				g.styles.release(nr.cells[col].Style)
 				nr.cells[col] = src.cells[col]
@@ -1288,23 +1288,13 @@ func (g *Grid) LinesScrolledOut() int {
 	return g.scrolledOut
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // EraseChars erases n characters at cursor without moving cursor
 func (g *Grid) EraseChars(n int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
 	startCol := g.CursorCol
-	endCol := g.CursorCol + n
-	if endCol > g.Cols {
-		endCol = g.Cols
-	}
+	endCol := min(g.CursorCol+n, g.Cols)
 
 	// If we start on a continuation cell, include the wide char start
 	if startCol > 0 {
@@ -1332,7 +1322,7 @@ func (g *Grid) EraseChars(n int) {
 func (g *Grid) RepeatChar(n int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for i := 0; i < n; i++ {
+	for range n {
 		if g.wrapPending {
 			if g.autoWrap {
 				g.cursorNewline()

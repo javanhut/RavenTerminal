@@ -197,10 +197,7 @@ func (p *Panel) ScrollResults(delta int, visibleLines int) {
 		return
 	}
 	p.ResultsScroll += delta
-	maxScroll := p.ResultsTotalLines() - visibleLines
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
+	maxScroll := max(p.ResultsTotalLines()-visibleLines, 0)
 	if p.ResultsScroll < 0 {
 		p.ResultsScroll = 0
 	}
@@ -218,10 +215,7 @@ func (p *Panel) ScrollPreview(delta int, visibleLines int) {
 		return
 	}
 	p.PreviewScroll += delta
-	maxScroll := totalLines - visibleLines
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
+	maxScroll := max(totalLines-visibleLines, 0)
 	if p.PreviewScroll < 0 {
 		p.PreviewScroll = 0
 	}
@@ -244,10 +238,7 @@ func (p *Panel) ensureSelectionVisible(visibleLines int) {
 		p.ResultsScroll = endLine - visibleLines + 1
 	}
 
-	maxScroll := p.ResultsTotalLines() - visibleLines
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
+	maxScroll := max(p.ResultsTotalLines()-visibleLines, 0)
 	if p.ResultsScroll > maxScroll {
 		p.ResultsScroll = maxScroll
 	}
@@ -298,10 +289,7 @@ func (p *Panel) Layout(width, height int, cellWidth, cellHeight float32) Layout 
 	footerY := panelY + panelHeight - lineHeight*0.6
 	resultsEnd := footerY - lineHeight*1.2
 
-	visibleLines := int((resultsEnd - resultsStart) / lineHeight)
-	if visibleLines < 1 {
-		visibleLines = 1
-	}
+	visibleLines := max(int((resultsEnd-resultsStart)/lineHeight), 1)
 
 	return Layout{
 		PanelX:       panelX,

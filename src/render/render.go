@@ -579,10 +579,7 @@ func (r *Renderer) renderSearchPanel(panel *searchpanel.Panel, width, height int
 
 	r.drawPanelFrame(layout.PanelX, layout.PanelY, layout.PanelWidth, layout.PanelHeight, layout.LineHeight, panel.Focused, proj)
 
-	maxChars := int(layout.ContentWidth/r.cellWidth) - 2
-	if maxChars < 10 {
-		maxChars = 10
-	}
+	maxChars := max(int(layout.ContentWidth/r.cellWidth)-2, 10)
 
 	r.drawText(layout.ContentX, layout.HeaderY, "Web Search", r.theme.TabActive, proj)
 	proxyBadge := "proxy off"
@@ -671,10 +668,7 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 
 	r.drawPanelFrame(layout.PanelX, layout.PanelY, layout.PanelWidth, layout.PanelHeight, layout.LineHeight, panel.Focused, proj)
 
-	maxChars := int(layout.ContentWidth/r.cellWidth) - 2
-	if maxChars < 10 {
-		maxChars = 10
-	}
+	maxChars := max(int(layout.ContentWidth/r.cellWidth)-2, 10)
 
 	r.drawText(layout.ContentX, layout.HeaderY, "AI Chat", r.theme.TabActive, proj)
 	if model := panel.LoadedModel; model != "" {
@@ -763,10 +757,7 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 	} else {
 		visibleLines := layout.VisibleLines
 		totalLines := len(lines)
-		maxScroll := totalLines - visibleLines
-		if maxScroll < 0 {
-			maxScroll = 0
-		}
+		maxScroll := max(totalLines-visibleLines, 0)
 		if panel.AutoScroll {
 			panel.Scroll = maxScroll
 			panel.AutoScroll = false
@@ -964,15 +955,9 @@ func (r *Renderer) renderSearchPreview(panel *searchpanel.Panel, layout searchpa
 		panel.PreviewWrapped = append(panel.PreviewWrapped, line.text)
 	}
 
-	visibleLines := layout.VisibleLines - 1
-	if visibleLines < 1 {
-		visibleLines = 1
-	}
+	visibleLines := max(layout.VisibleLines-1, 1)
 	startLine := panel.PreviewScroll
-	maxScroll := len(wrappedLines) - visibleLines
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
+	maxScroll := max(len(wrappedLines)-visibleLines, 0)
 	if startLine > maxScroll {
 		startLine = maxScroll
 	}
@@ -1190,10 +1175,7 @@ func wrapText(text string, maxChars int, prefix, indent string) []string {
 
 	lines := []string{}
 	line := prefix
-	lineLimit := maxChars
-	if lineLimit < 4 {
-		lineLimit = 4
-	}
+	lineLimit := max(maxChars, 4)
 
 	for _, word := range words {
 		if line == "" {
@@ -1218,10 +1200,7 @@ func wrapText(text string, maxChars int, prefix, indent string) []string {
 
 		// Hard wrap a single word wider than the line, by cells.
 		rs := []rune(word)
-		budget := lineLimit - textCells(indent)
-		if budget < 1 {
-			budget = 1
-		}
+		budget := max(lineLimit-textCells(indent), 1)
 		for len(rs) > 0 {
 			if textCells(string(rs)) <= budget {
 				lines = append(lines, indent+string(rs))
@@ -1398,10 +1377,7 @@ func (r *Renderer) ScrollHelpUp() {
 func (r *Renderer) ScrollHelpDown() {
 	// Estimate visible lines based on default panel size
 	visibleLines := 20
-	maxScroll := r.getTotalHelpLines() - visibleLines
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
+	maxScroll := max(r.getTotalHelpLines()-visibleLines, 0)
 	if r.helpScrollOffset < maxScroll {
 		r.helpScrollOffset++
 	}
@@ -1492,10 +1468,7 @@ func (r *Renderer) renderHelpPanel(width, height int, proj [16]float32) {
 
 	// Scroll indicators
 	totalLines := r.getTotalHelpLines()
-	maxScroll := totalLines - visibleLines
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
+	maxScroll := max(totalLines-visibleLines, 0)
 
 	// Draw scroll indicator on right side
 	scrollBarX := panelX + panelWidth - 18
@@ -1652,20 +1625,14 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 	contentStartY := separatorY + lineHeight*0.8
 	contentEndY := panelY + panelHeight - footerHeight
 	visibleHeight := contentEndY - contentStartY
-	visibleItems := int(visibleHeight / lineHeight)
-	if visibleItems < 1 {
-		visibleItems = 1
-	}
+	visibleItems := max(int(visibleHeight/lineHeight), 1)
 
 	// Report the real viewport size so the menu scrolls to keep the selection visible
 	// at any window size (fullscreen or windowed). This also re-clamps the scroll offset.
 	m.SetVisibleCount(visibleItems)
 
 	totalItems := len(m.Items)
-	maxScroll := totalItems - visibleItems
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
+	maxScroll := max(totalItems-visibleItems, 0)
 
 	scrollBarWidth := float32(8)
 	scrollBarPadding := float32(8)
@@ -1674,10 +1641,9 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 	}
 
 	// Calculate max characters that fit in content width (for truncation)
-	maxChars := int(contentWidth/r.cellWidth) - 3 // -3 for "> " prefix
-	if maxChars < 10 {
-		maxChars = 10
-	}
+	maxChars := max(
+		// -3 for "> " prefix
+		int(contentWidth/r.cellWidth)-3, 10)
 
 	// Title
 	r.drawText(contentX, headerY, m.GetTitle(), r.theme.TabActive, proj)
@@ -2280,7 +2246,7 @@ func (r *Renderer) HitTestTabBar(tm *tab.TabManager, x, y float64) (index int, n
 	}
 	g := r.tabBarGeom()
 	n := tm.TabCount()
-	for i := 0; i < n; i++ {
+	for i := range n {
 		boxY := g.topPad + float32(i)*(g.boxH+g.gap)
 		if fx >= g.boxX && fx <= g.boxX+g.boxW && fy >= boxY && fy <= boxY+g.boxH {
 			return i, false, true
@@ -2362,7 +2328,7 @@ func (r *Renderer) drawRoundedRect(x, y, w, h, radius float32, clr [4]float32, p
 	r.drawRect(x, y+radius, w, h-2*radius, clr, proj)
 	// Rounded top/bottom caps: 1px strips inset along a circular arc.
 	steps := int(radius)
-	for i := 0; i < steps; i++ {
+	for i := range steps {
 		dy := radius - float32(i) - 0.5
 		dx := radius - float32(math.Sqrt(float64(radius*radius-dy*dy)))
 		stripX := x + dx
@@ -2419,8 +2385,8 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 	r.gridRects.reset()
 	r.gridGlyphs.reset()
 	r.colorDraws = r.colorDraws[:0]
-	for row := 0; row < rows; row++ {
-		for col := 0; col < cols; col++ {
+	for row := range rows {
+		for col := range cols {
 			cell := snap.Cells[row*cols+col]
 			x := offsetX + float32(col)*r.cellWidth
 			y := offsetY + float32(row)*r.cellHeight
@@ -2513,8 +2479,8 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 
 	// Pass 2: immediate draws for the minority cases — block elements,
 	// underlines, strikethrough (drawn over the batched glyphs).
-	for row := 0; row < rows; row++ {
-		for col := 0; col < cols; col++ {
+	for row := range rows {
+		for col := range cols {
 			cell := snap.Cells[row*cols+col]
 			if cell.Width == grid.CellWidthContinuation {
 				continue

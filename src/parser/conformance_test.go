@@ -54,8 +54,8 @@ func TestCursorPositionReport(t *testing.T) {
 func TestDECALN(t *testing.T) {
 	term := NewTerminal(5, 3)
 	term.Process([]byte("\x1b#8")) // DECALN: fill with 'E'
-	for row := 0; row < 3; row++ {
-		for col := 0; col < 5; col++ {
+	for row := range 3 {
+		for col := range 5 {
 			if c := term.Grid.GetCell(col, row).Char; c != 'E' {
 				t.Fatalf("DECALN cell (%d,%d) = %q, want E", col, row, c)
 			}
@@ -71,7 +71,7 @@ func TestCustomTabStops(t *testing.T) {
 		t.Fatalf("default tab -> col %d, want 8", col)
 	}
 	// Clear all stops, set one at col 20, return home, tab -> col 20.
-	term.Process([]byte("\x1b[3g")) // TBC all
+	term.Process([]byte("\x1b[3g"))  // TBC all
 	term.Process([]byte("\x1b[21G")) // CHA to col 21 (1-based) -> col 20
 	term.Process([]byte("\x1bH"))    // HTS at col 20
 	term.Process([]byte("\r"))       // CR to col 0
@@ -84,9 +84,9 @@ func TestCustomTabStops(t *testing.T) {
 func TestInsertMode(t *testing.T) {
 	term := NewTerminal(10, 1)
 	term.Process([]byte("ABC"))
-	term.Process([]byte("\x1b[H"))   // home (col 0)
-	term.Process([]byte("\x1b[4h"))  // IRM on
-	term.Process([]byte("X"))        // insert X, shifting ABC right
+	term.Process([]byte("\x1b[H"))  // home (col 0)
+	term.Process([]byte("\x1b[4h")) // IRM on
+	term.Process([]byte("X"))       // insert X, shifting ABC right
 	if got := lineText(term, 0); got != "XABC" {
 		t.Fatalf("insert mode line = %q, want %q", got, "XABC")
 	}
@@ -116,7 +116,7 @@ func TestOSC4PaletteSetQuery(t *testing.T) {
 	term := NewTerminal(10, 1)
 	out := captureResponses(term)
 	term.Process([]byte("\x1b]4;5;#ff0000\x1b\\")) // set palette 5 = red
-	term.Process([]byte("\x1b]4;5;?\x1b\\"))        // query
+	term.Process([]byte("\x1b]4;5;?\x1b\\"))       // query
 	want := "\x1b]4;5;rgb:ffff/0000/0000\x1b\\"
 	if string(*out) != want {
 		t.Fatalf("OSC 4 query reply = %q, want %q", string(*out), want)
@@ -176,7 +176,7 @@ func TestLineFeedPreservesColumn(t *testing.T) {
 	term.Process([]byte("\x1b[20l"))
 
 	// Autowrap continuation still starts at column 0.
-	term.Process([]byte("\x1b[2J\x1b[4;1H") )
+	term.Process([]byte("\x1b[2J\x1b[4;1H"))
 	term.Process([]byte("abcdefghijklmnopqrst")) // exactly 20 cols, wrap pending
 	term.Process([]byte("X"))
 	col, row = term.Grid.GetCursor()

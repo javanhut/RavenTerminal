@@ -30,7 +30,7 @@ func Decode(params []int, data []byte) (*images.Image, error) {
 	// writeSixel sets the 6 vertical pixels encoded by b at column x.
 	writeSixel := func(b byte) {
 		bits := int(b - 0x3f)
-		for i := 0; i < 6; i++ {
+		for i := range 6 {
 			if bits&(1<<uint(i)) != 0 {
 				set(x, y+i, cur)
 			}
@@ -208,7 +208,7 @@ func defaultPalette() [256]rgba {
 		{66, 66, 66, 255}, {84, 84, 153, 255}, {153, 66, 66, 255}, {84, 153, 84, 255},
 		{153, 84, 153, 255}, {84, 153, 153, 255}, {153, 153, 84, 255}, {204, 204, 204, 255},
 	}
-	for i := 0; i < 16; i++ {
+	for i := range 16 {
 		p[i] = base[i]
 	}
 	return p

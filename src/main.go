@@ -18,9 +18,9 @@ import (
 	"github.com/javanhut/RavenTerminal/src/config"
 	"github.com/javanhut/RavenTerminal/src/grid"
 	"github.com/javanhut/RavenTerminal/src/keybindings"
-	"github.com/javanhut/RavenTerminal/src/parser"
 	"github.com/javanhut/RavenTerminal/src/menu"
 	"github.com/javanhut/RavenTerminal/src/ollama"
+	"github.com/javanhut/RavenTerminal/src/parser"
 	"github.com/javanhut/RavenTerminal/src/render"
 	"github.com/javanhut/RavenTerminal/src/searchpanel"
 	"github.com/javanhut/RavenTerminal/src/tab"
@@ -614,17 +614,11 @@ func main() {
 			width, height := win.GetFramebufferSize()
 			cellW, cellH := renderer.CellDimensions()
 			layout := aiPanel.Layout(width, height, cellW, cellH)
-			maxChars := int(layout.ContentWidth/cellW) - 2
-			if maxChars < 10 {
-				maxChars = 10
-			}
+			maxChars := max(int(layout.ContentWidth/cellW)-2, 10)
 			wrapped := aipanel.BuildWrappedLinesWithThinking(aiPanel.Messages, maxChars, aiPanel.ShowThinking, aiPanel.ThinkingExpanded)
 			totalLines := len(wrapped)
 			visibleLines := layout.VisibleLines
-			maxScroll := totalLines - visibleLines
-			if maxScroll < 0 {
-				maxScroll = 0
-			}
+			maxScroll := max(totalLines-visibleLines, 0)
 			if aiPanel.Scroll > maxScroll {
 				aiPanel.Scroll = maxScroll
 			}
@@ -786,10 +780,7 @@ func main() {
 			width, height := win.GetFramebufferSize()
 			cellW, cellH := renderer.CellDimensions()
 			layout := searchPanel.Layout(width, height, cellW, cellH)
-			previewVisible := layout.VisibleLines - 1
-			if previewVisible < 1 {
-				previewVisible = 1
-			}
+			previewVisible := max(layout.VisibleLines-1, 1)
 			previewTotal := len(searchPanel.PreviewLines)
 			if len(searchPanel.PreviewWrapped) > 0 && searchPanel.PreviewWrapChars > 0 {
 				previewTotal = len(searchPanel.PreviewWrapped)
@@ -941,12 +932,12 @@ func main() {
 				renderer.ScrollHelpDown()
 				return
 			case glfw.KeyPageUp:
-				for i := 0; i < 5; i++ {
+				for range 5 {
 					renderer.ScrollHelpUp()
 				}
 				return
 			case glfw.KeyPageDown:
-				for i := 0; i < 5; i++ {
+				for range 5 {
 					renderer.ScrollHelpDown()
 				}
 				return
@@ -1267,16 +1258,10 @@ func main() {
 			width, height := win.GetFramebufferSize()
 			cellW, cellH := renderer.CellDimensions()
 			layout := aiPanel.Layout(width, height, cellW, cellH)
-			maxChars := int(layout.ContentWidth/cellW) - 2
-			if maxChars < 10 {
-				maxChars = 10
-			}
+			maxChars := max(int(layout.ContentWidth/cellW)-2, 10)
 			totalLines := len(aipanel.BuildWrappedLinesWithThinking(aiPanel.Messages, maxChars, aiPanel.ShowThinking, aiPanel.ThinkingExpanded))
 			visibleLines := layout.VisibleLines
-			maxScroll := totalLines - visibleLines
-			if maxScroll < 0 {
-				maxScroll = 0
-			}
+			maxScroll := max(totalLines-visibleLines, 0)
 			steps := int(math.Abs(yoff))
 			if steps == 0 {
 				steps = 1
@@ -1299,10 +1284,7 @@ func main() {
 			width, height := win.GetFramebufferSize()
 			cellW, cellH := renderer.CellDimensions()
 			layout := searchPanel.Layout(width, height, cellW, cellH)
-			previewVisible := layout.VisibleLines - 1
-			if previewVisible < 1 {
-				previewVisible = 1
-			}
+			previewVisible := max(layout.VisibleLines-1, 1)
 			steps := int(math.Abs(yoff))
 			if steps == 0 {
 				steps = 1

@@ -76,9 +76,9 @@ func (g *Grid) Snapshot(prev *Snapshot) *Snapshot {
 	}
 
 	// Copy the visible region (reuses the existing scrollback-aware mapping).
-	for row := 0; row < rows; row++ {
+	for row := range rows {
 		base := row * cols
-		for col := 0; col < cols; col++ {
+		for col := range cols {
 			s.Cells[base+col] = g.displayCellLocked(col, row)
 		}
 	}

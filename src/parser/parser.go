@@ -140,9 +140,9 @@ type Terminal struct {
 	pendingKitty *kittyTransmit
 	// Dynamic colors: OSC 10/11/12 foreground/background/cursor and OSC 4 palette
 	// overrides. Zero value (ColorDefault) means "not overridden".
-	fgColor      grid.Color
-	bgColor      grid.Color
-	cursorColor  grid.Color
+	fgColor         grid.Color
+	bgColor         grid.Color
+	cursorColor     grid.Color
 	paletteOverride map[int]grid.Color
 	// Cursor style (DECSCUSR) and whether it blinks
 	cursorStyle    CursorStyle
@@ -682,7 +682,7 @@ func (t *Terminal) executeCSI(final byte) {
 		t.Grid.ClearTabStop(t.getParam(params, 0, 0))
 	case 't': // Window manipulation: report text-area size in chars (18)
 		if t.getParam(params, 0, 0) == 18 && t.responseWriter != nil {
-			t.responseWriter([]byte(fmt.Sprintf("\x1b[8;%d;%dt", t.Grid.Rows, t.Grid.Cols)))
+			t.responseWriter(fmt.Appendf(nil, "\x1b[8;%d;%dt", t.Grid.Rows, t.Grid.Cols))
 		}
 	case 'q': // DECSCUSR - Set cursor style (ignore for now)
 		t.setCursorStyle(params)
@@ -1034,8 +1034,8 @@ func (t *Terminal) handleDCS(params string) {
 	}
 	// Handle XTGETTCAP requests (DCS + q Pt ST)
 	// These request terminfo capabilities
-	if strings.HasPrefix(params, "+q") {
-		caps := strings.TrimPrefix(params, "+q")
+	if after, ok := strings.CutPrefix(params, "+q"); ok {
+		caps := after
 		t.handleXTGETTCAP(caps)
 	}
 	// Handle DECRQSS and other DCS sequences as needed
@@ -1099,8 +1099,8 @@ func (t *Terminal) handleOSC(params string) {
 	case "8": // Hyperlink: OSC 8 ; params ; URI
 		// value is "params;URI"; an empty URI closes the current hyperlink.
 		uri := ""
-		if idx := strings.Index(value, ";"); idx >= 0 {
-			uri = value[idx+1:]
+		if _, after, ok := strings.Cut(value, ";"); ok {
+			uri = after
 		}
 		if uri == "" {
 			t.currentLinkID = 0
@@ -1171,7 +1171,7 @@ func (t *Terminal) handleOSC4(value string) {
 		}
 		if t.paletteOverride != nil {
 			if c, ok := t.paletteOverride[idx]; ok && c.Type == grid.ColorRGB {
-				t.responseWriter([]byte(fmt.Sprintf("\x1b]4;%d;%s\x1b\\", idx, formatXColor(c))))
+				t.responseWriter(fmt.Appendf(nil, "\x1b]4;%d;%s\x1b\\", idx, formatXColor(c)))
 			}
 		}
 		return
@@ -1313,7 +1313,7 @@ func (t *Terminal) EncodeMouseEvent(button int, x, y int, pressed bool) []byte {
 		if !pressed {
 			suffix = 'm'
 		}
-		return []byte(fmt.Sprintf("\x1b[<%d;%d;%d%c", button, x, y, suffix))
+		return fmt.Appendf(nil, "\x1b[<%d;%d;%d%c", button, x, y, suffix)
 	}
 
 	// X10/Normal format: CSI M Cb Cx Cy (all values + 32)
@@ -1345,8 +1345,8 @@ func (t *Terminal) parseSGRParams(s string) []int {
 		return nil
 	}
 	var params []int
-	parts := strings.Split(s, ";")
-	for _, part := range parts {
+	parts := strings.SplitSeq(s, ";")
+	for part := range parts {
 		if strings.Contains(part, ":") {
 			subparts := strings.Split(part, ":")
 			first, _ := strconv.Atoi(subparts[0])
@@ -1474,7 +1474,7 @@ func (t *Terminal) handleDECRQM(params []int) {
 	case 2026:
 		state = report(t.syncActive)
 	}
-	t.responseWriter([]byte(fmt.Sprintf("\x1b[?%d;%d$y", mode, state)))
+	t.responseWriter(fmt.Appendf(nil, "\x1b[?%d;%d$y", mode, state))
 }
 
 // reset resets the terminal state
@@ -1600,10 +1600,7 @@ func (t *Terminal) handleDSR(params []int) {
 		col, row := t.Grid.GetCursor()
 		if t.originMode {
 			top, _ := t.Grid.GetScrollRegion()
-			row = row - (top - 1)
-			if row < 0 {
-				row = 0
-			}
+			row = max(row-(top-1), 0)
 		}
 		response := fmt.Sprintf("\x1b[%d;%dR", row+1, col+1)
 		t.responseWriter([]byte(response))

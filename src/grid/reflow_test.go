@@ -137,7 +137,7 @@ func TestReflowGrowShrinkKeepsPromptAtTop(t *testing.T) {
 // the prompt out.
 func TestReflowShrinkAfterClearKeepsPromptAtTop(t *testing.T) {
 	g := NewGrid(20, 10)
-	for i := 0; i < 30; i++ {
+	for range 30 {
 		writeStr(g, "old")
 		g.CarriageReturn()
 		g.Newline()

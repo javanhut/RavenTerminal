@@ -21,29 +21,29 @@ import (
 // readOnlyCommands maps an allowed binary to the arguments it must never
 // receive (write-capable escape hatches).
 var readOnlyCommands = map[string][]string{
-	"ls":      nil,
-	"pwd":     nil,
-	"whoami":  nil,
-	"uname":   nil,
-	"date":    nil,
-	"uptime":  nil,
-	"df":      nil,
-	"du":      nil,
-	"wc":      nil,
-	"file":    nil,
-	"stat":    nil,
-	"head":    nil,
-	"tail":    nil, // -f would hang; the exec timeout bounds it
-	"cat":     nil,
-	"grep":    nil,
-	"rg":      nil,
-	"which":   nil,
-	"ps":      nil,
-	"man":     nil, // pager forced to cat via env below
-	"find":    {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fls"},
-	"git":     {"-o", "--output", "--output-directory"},
-	"ivaldi":  nil, // limited to read subcommands below, like git
-	"go":      {"-w"}, // limited to read subcommands below; -w blocks `go env -w`
+	"ls":     nil,
+	"pwd":    nil,
+	"whoami": nil,
+	"uname":  nil,
+	"date":   nil,
+	"uptime": nil,
+	"df":     nil,
+	"du":     nil,
+	"wc":     nil,
+	"file":   nil,
+	"stat":   nil,
+	"head":   nil,
+	"tail":   nil, // -f would hang; the exec timeout bounds it
+	"cat":    nil,
+	"grep":   nil,
+	"rg":     nil,
+	"which":  nil,
+	"ps":     nil,
+	"man":    nil, // pager forced to cat via env below
+	"find":   {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fls"},
+	"git":    {"-o", "--output", "--output-directory"},
+	"ivaldi": nil,    // limited to read subcommands below, like git
+	"go":     {"-w"}, // limited to read subcommands below; -w blocks `go env -w`
 
 	// Package managers, restricted to query verbs (see readSubcommands and
 	// the flag-based validators) so the AI can answer "is X installed,
