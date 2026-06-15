@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/user"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -207,6 +208,13 @@ type PtySession struct {
 	exited    bool
 	exitedMu  sync.Mutex
 	shellName string // basename of the launched shell (e.g. "bash", "fish")
+
+	// cwdMu guards a short-lived cache of the working directory used on
+	// platforms without a /proc cwd link (macOS/BSD), where each lookup shells
+	// out to lsof. The cache keeps CurrentDir cheap to call from the render loop.
+	cwdMu       sync.Mutex
+	cwdCache    string
+	cwdCachedAt time.Time
 }
 
 // ShellName returns the basename of the shell this session runs (e.g.
@@ -424,16 +432,53 @@ func removeEnv(env []string, key string) []string {
 	return env
 }
 
-// CurrentDir returns the process working directory if available.
+// CurrentDir returns the shell process's working directory, or "" if it cannot
+// be determined. Linux reads it cheaply from /proc on every call. Other
+// platforms (macOS/BSD) have no such link, so the value is queried via lsof and
+// cached briefly — this keeps CurrentDir safe to call from the render loop (it
+// runs once per tab per frame) without spawning an lsof for every frame.
 func (p *PtySession) CurrentDir() string {
 	if p == nil || p.cmd == nil || p.cmd.Process == nil {
 		return ""
 	}
-	path, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", p.cmd.Process.Pid))
+	pid := p.cmd.Process.Pid
+
+	// Linux exposes the live cwd as a symlink; reading it is cheap.
+	if path, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid)); err == nil {
+		return path
+	}
+
+	// Elsewhere, fall back to a rate-limited lsof query.
+	p.cwdMu.Lock()
+	defer p.cwdMu.Unlock()
+	if !p.cwdCachedAt.IsZero() && time.Since(p.cwdCachedAt) < time.Second {
+		return p.cwdCache
+	}
+	p.cwdCache = processCwd(pid)
+	p.cwdCachedAt = time.Now()
+	return p.cwdCache
+}
+
+// processCwd returns the working directory of the given pid using lsof, or ""
+// on any failure. It is used on platforms without a /proc cwd link (macOS/BSD).
+func processCwd(pid int) string {
+	// Prefer the absolute path; GUI apps may launch with a stripped-down PATH.
+	lsof := "/usr/sbin/lsof"
+	if _, err := os.Stat(lsof); err != nil {
+		lsof = "lsof"
+	}
+	// -d cwd selects the cwd "file"; -F n yields machine-readable lines where the
+	// path is the line prefixed with 'n'.
+	out, err := exec.Command(lsof, "-a", "-d", "cwd", "-F", "n", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
 		return ""
 	}
-	return path
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "n") {
+			return strings.TrimPrefix(line, "n")
+		}
+	}
+	return ""
 }
 
 // findShell finds the shell to use based on config
