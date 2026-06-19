@@ -22,6 +22,14 @@ import (
 	"golang.org/x/image/font/opentype"
 )
 
+// Minimum grid dimensions enforced by CalculateGridSize. Below this the
+// terminal is no longer functional; the window-level minimum in
+// window.NewWindow is sized to keep us above this floor in practice.
+const (
+	minGridCols = 10
+	minGridRows = 3
+)
+
 // Theme colors
 type Theme struct {
 	Background [4]float32
@@ -225,6 +233,31 @@ func (r *Renderer) layoutTabBarWidth() float32 {
 		return r.tabBarWidth
 	}
 	return 0
+}
+
+// layoutMargins is the single source of truth for the pane content area inside
+// the window framebuffer. All callers that need to convert between grid
+// columns/rows and pane pixels (CalculateGridSize, renderPanes, paneRects) must
+// route through this helper so that the grid is sized for exactly the same
+// region that panes are painted into. Otherwise cells underflow or overflow
+// the pane rect, leaving unpainted strips at small window sizes.
+//
+// The horizontal margin is split symmetrically: 5px left (between the tab bar
+// and the first column) and 5px right (between the last column and the window
+// edge). The vertical margin uses the configured top/bottom padding.
+func (r *Renderer) layoutMargins(width, height int) (baseX, baseY, availW, availH float32) {
+	tabBarW := r.layoutTabBarWidth()
+	baseX = tabBarW + 5
+	baseY = r.paddingTop
+	availW = float32(width) - tabBarW - 10
+	availH = float32(height) - r.paddingTop - r.paddingBottom
+	if availW < 1 {
+		availW = 1
+	}
+	if availH < 1 {
+		availH = 1
+	}
+	return
 }
 
 // SetTextStyleOptions configures synthesized bold/italic and styled underlines.
@@ -1560,9 +1593,23 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 	panelWidth := float32(width) * 0.75
 	panelHeight := float32(height) * 0.80
 
-	// Minimum size to fit content
+	// Minimum size to fit content, but never larger than the window minus
+	// chrome so the panel never overflows/overlays its own padding at small
+	// window sizes.
 	minWidth := float32(450)
 	minHeight := float32(350)
+	if w := float32(width) - 20; minWidth > w {
+		minWidth = w
+	}
+	if h := float32(height) - 20; minHeight > h {
+		minHeight = h
+	}
+	if minWidth < 1 {
+		minWidth = 1
+	}
+	if minHeight < 1 {
+		minHeight = 1
+	}
 	if panelWidth < minWidth {
 		panelWidth = minWidth
 	}
@@ -1859,12 +1906,9 @@ func (r *Renderer) renderPanes(t *tab.Tab, width, height int, proj [16]float32, 
 		return
 	}
 
-	// Calculate available area (after tab bar)
-	tabBarW := r.layoutTabBarWidth()
-	baseX := tabBarW + 5
-	baseY := r.paddingTop
-	availableWidth := float32(width) - tabBarW - 5
-	availableHeight := float32(height) - r.paddingTop - r.paddingBottom
+	// Calculate available area (after tab bar) — shared with CalculateGridSize
+	// and paneRects via layoutMargins so cells tile exactly into the pane rect.
+	baseX, baseY, availableWidth, availableHeight := r.layoutMargins(width, height)
 
 	// Get active pane for highlighting
 	activePane := t.GetActivePane()
@@ -1938,11 +1982,7 @@ func (r *Renderer) paneRects(t *tab.Tab, width, height int) []paneRect {
 		return nil
 	}
 
-	tabBarW := r.layoutTabBarWidth()
-	baseX := tabBarW + 5
-	baseY := r.paddingTop
-	availableWidth := float32(width) - tabBarW - 5
-	availableHeight := float32(height) - r.paddingTop - r.paddingBottom
+	baseX, baseY, availableWidth, availableHeight := r.layoutMargins(width, height)
 	separatorWidth := float32(2)
 
 	rects := make([]paneRect, 0, len(layouts))
@@ -3135,15 +3175,18 @@ func (r *Renderer) TabBarWidth() float32 {
 
 // CalculateGridSize calculates the number of columns and rows that fit
 func (r *Renderer) CalculateGridSize(width, height int) (cols, rows int) {
-	availableWidth := float32(width) - r.layoutTabBarWidth() - 10
-	availableHeight := float32(height) - r.paddingTop - r.paddingBottom
-	cols = int(availableWidth / r.cellWidth)
-	rows = int(availableHeight / r.cellHeight)
-	if cols < 1 {
-		cols = 1
+	_, _, availW, availH := r.layoutMargins(width, height)
+	cols = int(availW / r.cellWidth)
+	rows = int(availH / r.cellHeight)
+	// Usable floor: below this the terminal is no longer functional and
+	// layout degenerates. The window-level minimum (see window.NewWindow)
+	// normally prevents us from ever reaching it, but clamp here too so a
+	// transient tiny frame can't collapse the grid to a 1x1 cell.
+	if cols < minGridCols {
+		cols = minGridCols
 	}
-	if rows < 1 {
-		rows = 1
+	if rows < minGridRows {
+		rows = minGridRows
 	}
 	return
 }

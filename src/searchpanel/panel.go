@@ -256,23 +256,42 @@ func (p *Panel) Layout(width, height int, cellWidth, cellHeight float32) Layout 
 			minPanelWidth = wideMin
 		}
 	}
+	// Clamp the minimum to the available window width so a small window
+	// never forces the panel past its own max-width boundary and clips.
+	maxWidth := float32(width) - 20
+	if maxWidth < 1 {
+		maxWidth = 1
+	}
+	if minPanelWidth > maxWidth {
+		minPanelWidth = maxWidth
+	}
 	if panelWidth < minPanelWidth {
 		panelWidth = minPanelWidth
 	}
 	if panelWidth > 560 {
 		panelWidth = 560
 	}
-	maxWidth := float32(width) - 20
 	if panelWidth > maxWidth {
 		panelWidth = maxWidth
 	}
 
 	panelHeight := float32(height) - 30
+	// Clamp the height floor to the available window height so a small
+	// window never forces the panel past its own max-height boundary.
+	maxHeight := float32(height) - 20
+	if maxHeight < 1 {
+		maxHeight = 1
+	}
 	if panelHeight < 240 {
 		panelHeight = 240
 	}
-	if panelHeight > float32(height)-20 {
-		panelHeight = float32(height) - 20
+	if panelHeight > maxHeight {
+		panelHeight = maxHeight
+	}
+	// Final safety: the 240 floor above may still exceed maxHeight on very
+	// small windows; clamp again so we never overflow.
+	if panelHeight > maxHeight {
+		panelHeight = maxHeight
 	}
 
 	panelX := float32(width) - panelWidth - 10

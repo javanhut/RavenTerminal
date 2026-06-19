@@ -32,6 +32,17 @@ func DefaultConfig() Config {
 	}
 }
 
+// MinWindowWidth and MinWindowHeight are the hard floor enforced via GLFW's
+// SetWindowSizeLimits. They are sized to keep the grid above the renderer's
+// minGridCols/minGridRows floor even with the tab bar visible and default
+// chrome padding:  tabBar(200) + 10px margins + 10 cols * ~10px cellWidth
+// ~= 310 wide; 24px vertical padding + 3 rows * ~22px cellHeight ~= 90 tall.
+// Rounded up to comfortable defaults.
+const (
+	MinWindowWidth  = 480
+	MinWindowHeight = 320
+)
+
 // Window wraps a GLFW window with OpenGL context
 type Window struct {
 	glfw         *glfw.Window
@@ -70,6 +81,11 @@ func NewWindow(config Config) (*Window, error) {
 	}
 
 	window.MakeContextCurrent()
+
+	// Enforce a hard minimum window size so the grid can never collapse below
+	// the renderer's usable floor (see MinWindowWidth/Height docs). GLFW clamps
+	// user-driven resizes and programmatic SetSize calls to these limits.
+	window.SetSizeLimits(MinWindowWidth, MinWindowHeight, glfw.DontCare, glfw.DontCare)
 
 	// Initialize OpenGL
 	if err := gl.Init(); err != nil {
