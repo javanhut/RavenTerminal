@@ -196,8 +196,9 @@ func (c *Config) buildRavenPromptFunction() string {
 		fallthrough
 	default:
 		b.WriteString("fn prompt(status) {\n")
-		// OSC 7 cwd report, zero-width, emitted with the info line.
-		b.WriteString("    line1 = \"" + esc + "]7;file://\" + $(hostname) + $(cwd) + \"" + bel + "\"\n")
+		// RavenShell already emits the OSC 7 cwd report natively (oscWorkingDir
+		// in main.go), so the prompt script only needs the visible line.
+		b.WriteString("    line1 = \"\"\n")
 		first := true
 		if c.Prompt.ShowPath {
 			b.WriteString("    line1 = line1 + \"" + cyan + "\" + __raven_cwd() + \"" + reset + "\"\n")
