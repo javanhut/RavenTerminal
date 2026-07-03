@@ -1017,6 +1017,14 @@ func main() {
 			activeTab.Terminal.GetGrid().ScrollViewDown(1)
 		case keybindings.ActionToggleFullscreen:
 			win.ToggleFullscreen()
+			// Re-fit immediately: the framebuffer-size callback isn't reliably
+			// delivered on fullscreen<->windowed (or cross-monitor) transitions,
+			// so without this the grid keeps the old column count and a
+			// full-screen TUI overflows the new viewport. ponytail: same pattern
+			// as the zoom handlers.
+			width, height := win.GetFramebufferSize()
+			cols, rows := renderer.CalculateGridSize(width, height)
+			tabManager.ResizeAll(uint16(cols), uint16(rows))
 		case keybindings.ActionCopy:
 			g := activeTab.Terminal.GetGrid()
 			text := g.SelectedText()

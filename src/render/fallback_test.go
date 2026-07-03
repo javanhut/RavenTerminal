@@ -57,6 +57,22 @@ func TestFallbackChainCoversSymlinkArrow(t *testing.T) {
 	}
 }
 
+// Every unicodeFallbacks target must itself be renderable — an ASCII byte or a
+// rune the fallback chain covers. A substitution that points at another missing
+// glyph would still degrade to '?'. Guards the ⏵/⏴ (Claude Code auto-mode)
+// entries, which map to ▶/◀ rather than plain '>'/'<'.
+func TestUnicodeFallbackTargetsRenderable(t *testing.T) {
+	r := newTestRenderer(t)
+	for src, dst := range unicodeFallbacks {
+		if dst < 128 {
+			continue // ASCII always renders
+		}
+		if r.faceFor(dst) == nil {
+			t.Errorf("unicodeFallbacks[%q]=%q has no covering face; would render as '?'", string(src), string(dst))
+		}
+	}
+}
+
 func TestRuneClassification(t *testing.T) {
 	cases := []struct {
 		c         rune

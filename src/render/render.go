@@ -2784,6 +2784,13 @@ var unicodeFallbacks = map[rune]rune{
 	'\u27A4': '\u2192', // BLACK RIGHTWARDS ARROWHEAD
 	'\u2192': '>',      // RIGHTWARDS ARROW (Ubuntu Mono lacks even this)
 	'\u2190': '<',      // LEFTWARDS ARROW
+	// Media-control triangles (Unicode 7.0). Claude Code's "auto mode" prompt
+	// uses U+23F5 U+23F5 (\u23f5\u23f5); no embedded or macOS system font covers these,
+	// so they hit the '?' resort and render as "??". Map to the plain black
+	// triangles U+25B6/U+25C0, which the fallback fonts (Menlo, Apple Symbols)
+	// do have, so they render as real \u25b6/\u25c0 instead.
+	'\u23f5': '\u25b6', // BLACK MEDIUM RIGHT-POINTING TRIANGLE -> \u25b6
+	'\u23f4': '\u25c0', // BLACK MEDIUM LEFT-POINTING TRIANGLE  -> \u25c0
 	'\u276E': '<',      // HEAVY LEFT-POINTING ANGLE QUOTATION MARK
 	'\u276F': '>',      // HEAVY RIGHT-POINTING ANGLE QUOTATION MARK
 	'\u2713': 'v',      // CHECK MARK
