@@ -54,6 +54,7 @@ type Window struct {
 	savedY       int
 	savedWidth   int
 	savedHeight  int
+	contentScale float32 // HiDPI scale (framebuffer px per logical point)
 }
 
 // NewWindow creates a new GLFW window with OpenGL context
@@ -108,10 +109,28 @@ func NewWindow(config Config) (*Window, error) {
 		config: config,
 	}
 
+	// HiDPI: track the window's content scale (queried at startup, updated by
+	// GLFW when the window moves to a monitor with a different scale). The
+	// main loop polls ContentScale and re-rasterizes fonts on change.
+	sx, _ := window.GetContentScale()
+	w.contentScale = sx
+	window.SetContentScaleCallback(func(_ *glfw.Window, x, y float32) {
+		w.contentScale = x
+	})
+
 	// Load and set application icon
 	w.loadIcon()
 
 	return w, nil
+}
+
+// ContentScale returns the window's current HiDPI content scale (1.0 on
+// standard-DPI displays; e.g. 2.0 on a Retina display).
+func (w *Window) ContentScale() float32 {
+	if w.contentScale <= 0 {
+		return 1
+	}
+	return w.contentScale
 }
 
 // GLFW returns the underlying GLFW window

@@ -110,5 +110,54 @@ func (g *Grid) Snapshot(prev *Snapshot) *Snapshot {
 	if dirty {
 		s.Generation++
 	}
+
+	// Record the captured state so RedrawNeeded can peek for changes.
+	g.lastSnap = snapState{
+		valid:        true,
+		cols:         cols,
+		rows:         rows,
+		cursorCol:    g.CursorCol,
+		cursorRow:    g.CursorRow,
+		scrollOffset: g.scrollOffset,
+		selActive:    selActive,
+		sSCol:        sSCol, sSRow: sSRow, sECol: sECol, sERow: sERow,
+	}
 	return s
+}
+
+// RedrawNeeded reports whether the visible state (content, cursor, scroll
+// position, selection, or size) has changed since the last Snapshot, WITHOUT
+// clearing any dirty flags. The render loop uses it to skip frames entirely
+// when nothing changed; the following Snapshot still observes the same dirt.
+func (g *Grid) RedrawNeeded() bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if !g.lastSnap.valid || g.lastSnap.cols != g.Cols || g.lastSnap.rows != g.Rows {
+		return true
+	}
+	for _, r := range g.rows {
+		if r.flags&RowDirty != 0 {
+			return true
+		}
+	}
+	if g.CursorCol != g.lastSnap.cursorCol || g.CursorRow != g.lastSnap.cursorRow ||
+		g.scrollOffset != g.lastSnap.scrollOffset {
+		return true
+	}
+	// Selection, normalized exactly as Snapshot records it.
+	selActive := g.selectionActive && g.scrollOffset == g.selectionScrollOffset
+	sSCol, sSRow := g.selectionStartCol, g.selectionStartRow
+	sECol, sERow := g.selectionEndCol, g.selectionEndRow
+	if sERow < sSRow || (sERow == sSRow && sECol < sSCol) {
+		sSCol, sECol = sECol, sSCol
+		sSRow, sERow = sERow, sSRow
+	}
+	if selActive != g.lastSnap.selActive {
+		return true
+	}
+	if selActive && (sSCol != g.lastSnap.sSCol || sSRow != g.lastSnap.sSRow ||
+		sECol != g.lastSnap.sECol || sERow != g.lastSnap.sERow) {
+		return true
+	}
+	return false
 }

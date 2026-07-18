@@ -103,6 +103,7 @@ func ThemeByName(name string) Theme {
 // SetThemeByName applies a named theme to the renderer.
 func (r *Renderer) SetThemeByName(name string) {
 	r.theme = ThemeByName(name)
+	r.uiDirty = true
 }
 
 // Glyph contains information about a rendered glyph
@@ -182,6 +183,14 @@ type Renderer struct {
 	// Reusable per-frame batch buffers (avoid re-allocation each frame).
 	gridRects  rectBatch
 	gridGlyphs glyphBatch
+	// pass2 collects, during the batched pass, the minority of cells that need
+	// immediate decoration draws (block elements, underline, strikethrough),
+	// so pass 2 doesn't re-scan the whole grid.
+	pass2 []pass2Item
+	// atlasGen increments whenever the glyph atlas grows and re-packs
+	// (invalidating all previously recorded UVs); renderGridAt uses it to
+	// detect a mid-pass repack and re-record the batch.
+	atlasGen uint64
 
 	// Color emoji: system color-emoji font decoded to per-glyph RGBA textures,
 	// drawn with a dedicated non-tinting shader (see coloremoji.go). colorDraws
@@ -214,10 +223,34 @@ type Renderer struct {
 	// tabBarVisible controls whether the left tab bar is shown and reserves layout
 	// width. It is hidden when there is a single tab so a lone tab uses the full window.
 	tabBarVisible bool
+
+	// contentScale is the window's HiDPI content scale (framebuffer pixels per
+	// logical point). Fonts are rasterized at 96*contentScale DPI and all
+	// renderer geometry stays in framebuffer pixels; the hit-testing helpers
+	// (PaneRectFor, CellSize, HitTestPane, HitTestTabBar) convert to/from the
+	// logical coordinates that GLFW cursor callbacks deliver.
+	contentScale float32
+
+	// uiDirty latches renderer-side state changes (hover underline, theme, tab
+	// bar visibility, font size) that must force a redraw; consumed once per
+	// frame by ConsumeUIDirty.
+	uiDirty bool
+}
+
+// pass2Item marks a cell needing immediate decoration draws after the batches
+// flush, with its position and already-resolved fg color.
+type pass2Item struct {
+	col, row int
+	x, y     float32
+	fg       [4]float32
+	hovered  bool
 }
 
 // SetTabBarVisible shows or hides the left tab bar (and its reserved layout width).
 func (r *Renderer) SetTabBarVisible(visible bool) {
+	if r.tabBarVisible != visible {
+		r.uiDirty = true
+	}
 	r.tabBarVisible = visible
 }
 
@@ -265,6 +298,7 @@ func (r *Renderer) SetTextStyleOptions(fauxBold, fauxItalic, undercurl bool) {
 	r.fauxBold = fauxBold
 	r.fauxItalic = fauxItalic
 	r.undercurl = undercurl
+	r.uiDirty = true
 }
 
 type paneRect struct {
@@ -286,6 +320,7 @@ func NewRenderer() (*Renderer, error) {
 		paddingBottom:   12.0,
 		tabBarWidth:     200.0,
 		currentFont:     fonts.DefaultFontName(),
+		contentScale:    1,
 		glyphs:          make(map[rune]Glyph),
 		glyphMisses:     make(map[rune]bool),
 		// atlasSize calculated dynamically in loadFontData based on glyph count
@@ -328,7 +363,7 @@ func (r *Renderer) loadFontData(fontData []byte) error {
 
 	face, err := opentype.NewFace(parsedFont, &opentype.FaceOptions{
 		Size:    float64(r.fontSize),
-		DPI:     96,
+		DPI:     r.fontDPI(),
 		Hinting: font.HintingFull,
 	})
 	if err != nil {
@@ -358,7 +393,64 @@ func (r *Renderer) loadFontData(fontData []byte) error {
 		r.fontAtlas = 0
 	}
 	r.initAtlas(atlasInitialSize)
+	r.uiDirty = true // glyph metrics changed; force a redraw
 	return nil
+}
+
+// fontDPI is the rasterization DPI: 96 scaled by the HiDPI content scale, so
+// glyphs cover the right number of framebuffer pixels on 2x displays.
+func (r *Renderer) fontDPI() float64 {
+	if r.contentScale > 0 {
+		return 96 * float64(r.contentScale)
+	}
+	return 96
+}
+
+// hidpiScale is the content scale with a zero-guard, for logical<->framebuffer
+// coordinate conversion in the hit-testing helpers.
+func (r *Renderer) hidpiScale() float32 {
+	if r.contentScale > 0 {
+		return r.contentScale
+	}
+	return 1
+}
+
+// SetContentScale applies a new HiDPI content scale: fonts are re-rasterized
+// at 96*scale DPI (rebuilding the atlas via the existing font reload path) and
+// cell sizes recomputed. The caller must re-fit the grid afterwards
+// (CalculateGridSize + resize), since cell dimensions change.
+func (r *Renderer) SetContentScale(scale float32) error {
+	if scale <= 0 {
+		scale = 1
+	}
+	if scale == r.hidpiScale() {
+		r.contentScale = scale
+		return nil
+	}
+	old := r.hidpiScale()
+	r.contentScale = scale
+	fontData, ok := fonts.GetFont(r.currentFont)
+	if !ok {
+		fontData = fonts.DefaultFont()
+	}
+	if err := r.loadFontData(fontData); err != nil {
+		return err
+	}
+	// Base (UI) cell dimensions scale with the rasterization DPI too.
+	r.baseCellWidth = r.baseCellWidth * scale / old
+	r.baseCellHeight = r.baseCellHeight * scale / old
+	return nil
+}
+
+// ContentScale returns the renderer's current HiDPI content scale.
+func (r *Renderer) ContentScale() float32 { return r.hidpiScale() }
+
+// ConsumeUIDirty reports whether renderer-side visual state (hover underline,
+// theme, tab bar, font) changed since the last call, clearing the latch.
+func (r *Renderer) ConsumeUIDirty() bool {
+	d := r.uiDirty
+	r.uiDirty = false
+	return d
 }
 
 // initGL initializes OpenGL resources
@@ -2023,8 +2115,11 @@ func (r *Renderer) paneRects(t *tab.Tab, width, height int) []paneRect {
 
 // HitTestPane returns the pane and cell position for a screen coordinate.
 func (r *Renderer) HitTestPane(t *tab.Tab, x, y float64, width, height int) (*tab.Pane, int, int, bool) {
-	fx := float32(x)
-	fy := float32(y)
+	// x,y arrive in logical (cursor callback) coordinates; pane rects are in
+	// framebuffer pixels, so scale the point up on HiDPI displays.
+	s := r.hidpiScale()
+	fx := float32(x) * s
+	fy := float32(y) * s
 	for _, rect := range r.paneRects(t, width, height) {
 		if fx < rect.x || fx >= rect.x+rect.width || fy < rect.y || fy >= rect.y+rect.height {
 			continue
@@ -2039,22 +2134,29 @@ func (r *Renderer) HitTestPane(t *tab.Tab, x, y float64, width, height int) (*ta
 	return nil, 0, 0, false
 }
 
-// PaneRectFor returns the screen rect for a specific pane.
+// PaneRectFor returns the rect for a specific pane in LOGICAL (cursor
+// callback) coordinates, for hit-testing against GLFW cursor positions. width/
+// height are the framebuffer size; internally rects are framebuffer pixels and
+// are divided by the content scale so callers can compare them directly with
+// GetCursorPos values on HiDPI displays.
 func (r *Renderer) PaneRectFor(t *tab.Tab, pane *tab.Pane, width, height int) (float32, float32, float32, float32, bool) {
 	if pane == nil {
 		return 0, 0, 0, 0, false
 	}
+	s := r.hidpiScale()
 	for _, rect := range r.paneRects(t, width, height) {
 		if rect.pane == pane {
-			return rect.x, rect.y, rect.width, rect.height, true
+			return rect.x / s, rect.y / s, rect.width / s, rect.height / s, true
 		}
 	}
 	return 0, 0, 0, 0, false
 }
 
-// CellSize returns the current render cell dimensions.
+// CellSize returns the cell dimensions in LOGICAL (cursor callback)
+// coordinates, matching PaneRectFor, for pixel->cell hit-testing math.
 func (r *Renderer) CellSize() (float32, float32) {
-	return r.cellWidth, r.cellHeight
+	s := r.hidpiScale()
+	return r.cellWidth / s, r.cellHeight / s
 }
 
 // drawPaneSeparators draws separator lines between panes
@@ -2280,7 +2382,9 @@ func (r *Renderer) HitTestTabBar(tm *tab.TabManager, x, y float64) (index int, n
 	if !r.tabBarVisible {
 		return 0, false, false
 	}
-	fx, fy := float32(x), float32(y)
+	// x,y are logical cursor coordinates; tab bar geometry is framebuffer px.
+	s := r.hidpiScale()
+	fx, fy := float32(x)*s, float32(y)*s
 	if fx < 0 || fx > r.tabBarWidth {
 		return 0, false, false
 	}
@@ -2410,101 +2514,126 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 	cols := snap.Cols
 	rows := snap.Rows
 
-	// Warm the glyph cache up front. ensureGlyph may grow and re-pack the atlas
-	// (changing every glyph's UVs); doing it before we record UVs into the batch
-	// guarantees the recorded coordinates stay valid for this frame.
-	for i := range snap.Cells {
-		c := snap.Cells[i]
-		if c.Char != ' ' && c.Char != 0 && c.Width != grid.CellWidthContinuation && !isBlockElement(c.Char) {
-			r.lookupGlyph(c.Char)
-		}
+	// Hover underline applies only when the hover target is this grid.
+	hoverRow := -1
+	if r.hoverActive && r.hoverGrid == g {
+		hoverRow = r.hoverRow
 	}
 
 	// Pass 1: accumulate all backgrounds/selection and all glyphs into two
-	// batches, then flush each in a single draw call.
-	r.gridRects.reset()
-	r.gridGlyphs.reset()
-	r.colorDraws = r.colorDraws[:0]
-	for row := range rows {
-		for col := range cols {
-			cell := snap.Cells[row*cols+col]
-			x := offsetX + float32(col)*r.cellWidth
-			y := offsetY + float32(row)*r.cellHeight
-			if x+r.cellWidth > offsetX+paneWidth || y+r.cellHeight > offsetY+paneHeight {
-				continue
-			}
+	// batches, then flush each in a single draw call. Glyphs are rasterized on
+	// demand inside the loop; if that grows the atlas mid-pass (growing
+	// re-packs every glyph, invalidating UVs already recorded in the batch),
+	// the pass is re-run once — by then every needed glyph is cached, so the
+	// rerun records consistent UVs. This replaces the old always-on full-grid
+	// glyph warm loop with a rare retry.
+	for attempt := 0; ; attempt++ {
+		startGen := r.atlasGen
+		r.gridRects.reset()
+		r.gridGlyphs.reset()
+		r.colorDraws = r.colorDraws[:0]
+		r.pass2 = r.pass2[:0]
+		for row := range rows {
+			for col := range cols {
+				cell := snap.Cells[row*cols+col]
+				x := offsetX + float32(col)*r.cellWidth
+				y := offsetY + float32(row)*r.cellHeight
+				if x+r.cellWidth > offsetX+paneWidth || y+r.cellHeight > offsetY+paneHeight {
+					continue
+				}
 
-			bgColor := r.colorToRGBA(cell.Bg, true)
-			if cell.Flags&grid.FlagInverse != 0 {
-				bgColor = r.colorToRGBA(cell.Fg, false)
-			}
-			if bgColor != r.theme.Background {
-				r.gridRects.addRect(x, y, r.cellWidth+0.5, r.cellHeight, bgColor)
-			}
-			if snap.Selected(col, row) {
-				r.gridRects.addRect(x, y, r.cellWidth+0.5, r.cellHeight, r.theme.Selection)
-			}
+				bgColor := r.colorToRGBA(cell.Bg, true)
+				if cell.Flags&grid.FlagInverse != 0 {
+					bgColor = r.colorToRGBA(cell.Fg, false)
+				}
+				if bgColor != r.theme.Background {
+					r.gridRects.addRect(x, y, r.cellWidth+0.5, r.cellHeight, bgColor)
+				}
+				if snap.Selected(col, row) {
+					r.gridRects.addRect(x, y, r.cellWidth+0.5, r.cellHeight, r.theme.Selection)
+				}
 
-			if cell.Width == grid.CellWidthContinuation {
-				continue
-			}
+				if cell.Width == grid.CellWidthContinuation {
+					continue
+				}
 
-			fgColor := r.colorToRGBA(cell.Fg, false)
-			if cell.Flags&grid.FlagInverse != 0 {
-				fgColor = r.colorToRGBA(cell.Bg, true)
-			}
-			if cell.Flags&grid.FlagDim != 0 {
-				fgColor[3] = fgColor[3] / 2
-			}
-			hidden := cell.Flags&grid.FlagHidden != 0
-			// Block-element chars and the cursor cell are drawn immediately in
-			// pass 2; everything else is a batched glyph. A glyph missing from
-			// the monochrome font is tried as a color emoji before the '?'
-			// fallback.
-			if !hidden && cell.Char != ' ' && cell.Char != 0 && !isBlockElement(cell.Char) {
-				g, ok := r.resolveGlyph(cell.Char)
-				if !ok {
-					if cg, isColor := r.ensureColorGlyph(cell.Char); isColor {
+				hidden := cell.Flags&grid.FlagHidden != 0
+				isBlock := isBlockElement(cell.Char)
+				// Block-element chars and the cursor cell are drawn immediately
+				// in pass 2; everything else is a batched glyph. A glyph
+				// missing from the monochrome font is tried as a color emoji
+				// before the '?' fallback.
+				needGlyph := !hidden && cell.Char != ' ' && cell.Char != 0 && !isBlock
+				hovered := row == hoverRow && col >= r.hoverStartCol && col <= r.hoverEndCol
+				needDecor := !hidden && (isBlock || hovered ||
+					cell.Flags&(grid.FlagUnderline|grid.FlagStrikethrough) != 0)
+				if !needGlyph && !needDecor {
+					continue
+				}
+
+				// Resolve the fg color exactly once for both the glyph and the
+				// pass-2 decorations.
+				fgColor := r.colorToRGBA(cell.Fg, false)
+				if cell.Flags&grid.FlagInverse != 0 {
+					fgColor = r.colorToRGBA(cell.Bg, true)
+				}
+				if cell.Flags&grid.FlagDim != 0 {
+					fgColor[3] = fgColor[3] / 2
+				}
+				if needDecor {
+					r.pass2 = append(r.pass2, pass2Item{
+						col: col, row: row, x: x, y: y, fg: fgColor, hovered: hovered,
+					})
+				}
+
+				if needGlyph {
+					g, ok := r.resolveGlyph(cell.Char)
+					if !ok {
+						if cg, isColor := r.ensureColorGlyph(cell.Char); isColor {
+							span := 1
+							if cell.Width == grid.CellWidthWide {
+								span = 2
+							}
+							r.colorDraws = append(r.colorDraws, colorDrawItem{
+								x: x, yTop: y, span: span, cg: cg, alpha: fgColor[3],
+							})
+						} else {
+							g, ok = r.ensureGlyph('?')
+						}
+					}
+					if ok && g.PixelWidth > 0 {
+						// Available span: wide chars own two cells; icons may
+						// also use a following blank cell (Ghostty-style), which
+						// is how Nerd Font icons are typically spaced in TUIs.
 						span := 1
 						if cell.Width == grid.CellWidthWide {
 							span = 2
+						} else if isIconRune(cell.Char) && col+1 < cols {
+							next := snap.Cells[row*cols+col+1]
+							if next.Char == ' ' || next.Char == 0 {
+								span = 2
+							}
 						}
-						r.colorDraws = append(r.colorDraws, colorDrawItem{
-							x: x, yTop: y, span: span, cg: cg, alpha: fgColor[3],
-						})
-					} else {
-						g, ok = r.ensureGlyph('?')
-					}
-				}
-				if ok && g.PixelWidth > 0 {
-					// Available span: wide chars own two cells; icons may
-					// also use a following blank cell (Ghostty-style), which
-					// is how Nerd Font icons are typically spaced in TUIs.
-					span := 1
-					if cell.Width == grid.CellWidthWide {
-						span = 2
-					} else if isIconRune(cell.Char) && col+1 < cols {
-						next := snap.Cells[row*cols+col+1]
-						if next.Char == ' ' || next.Char == 0 {
-							span = 2
+						if span == 2 && x+2*r.cellWidth > offsetX+paneWidth {
+							span = 1
 						}
-					}
-					if span == 2 && x+2*r.cellWidth > offsetX+paneWidth {
-						span = 1
-					}
-					gx, gyTop, gw, gh := r.glyphQuad(cell.Char, g, x, y, span)
-					var shear float32
-					if r.fauxItalic && cell.Flags&grid.FlagItalic != 0 {
-						shear = gh * 0.2
-					}
-					r.gridGlyphs.addGlyph(gx, gyTop+gh, gw, gh,
-						g.X, g.Y, g.Width, g.Height, fgColor, shear)
-					if r.fauxBold && cell.Flags&grid.FlagBold != 0 {
-						r.gridGlyphs.addGlyph(gx+1, gyTop+gh, gw, gh,
+						gx, gyTop, gw, gh := r.glyphQuad(cell.Char, g, x, y, span)
+						var shear float32
+						if r.fauxItalic && cell.Flags&grid.FlagItalic != 0 {
+							shear = gh * 0.2
+						}
+						r.gridGlyphs.addGlyph(gx, gyTop+gh, gw, gh,
 							g.X, g.Y, g.Width, g.Height, fgColor, shear)
+						if r.fauxBold && cell.Flags&grid.FlagBold != 0 {
+							r.gridGlyphs.addGlyph(gx+1, gyTop+gh, gw, gh,
+								g.X, g.Y, g.Width, g.Height, fgColor, shear)
+						}
 					}
 				}
 			}
+		}
+		if r.atlasGen == startGen || attempt > 0 {
+			break
 		}
 	}
 	r.flushRects(&r.gridRects, proj)
@@ -2518,54 +2647,33 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 	}
 
 	// Pass 2: immediate draws for the minority cases — block elements,
-	// underlines, strikethrough (drawn over the batched glyphs).
-	for row := range rows {
-		for col := range cols {
-			cell := snap.Cells[row*cols+col]
-			if cell.Width == grid.CellWidthContinuation {
-				continue
-			}
-			x := offsetX + float32(col)*r.cellWidth
-			y := offsetY + float32(row)*r.cellHeight
-			if x+r.cellWidth > offsetX+paneWidth || y+r.cellHeight > offsetY+paneHeight {
-				continue
-			}
-			hidden := cell.Flags&grid.FlagHidden != 0
-			fgColor := r.colorToRGBA(cell.Fg, false)
-			if cell.Flags&grid.FlagInverse != 0 {
-				fgColor = r.colorToRGBA(cell.Bg, true)
-			}
-			if cell.Flags&grid.FlagDim != 0 {
-				fgColor[3] = fgColor[3] / 2
-			}
-			if !hidden && isBlockElement(cell.Char) {
-				r.drawBlockElement(x, y, cell.Char, fgColor, proj)
-			}
-
-			drawUnderline := cell.Flags&grid.FlagUnderline != 0
-			hovered := r.hoverActive && r.hoverGrid == g && row == r.hoverRow && col >= r.hoverStartCol && col <= r.hoverEndCol
-			if hovered {
-				drawUnderline = true
-			}
-			if drawUnderline && !hidden {
-				ulColor := fgColor
-				style := uint8(1)
-				if cell.Flags&grid.FlagUnderline != 0 && !hovered {
-					if cell.UnderlineColor.Type != grid.ColorDefault {
-						ulColor = r.colorToRGBA(cell.UnderlineColor, false)
-					}
-					if cell.UnderlineStyle != 0 {
-						style = cell.UnderlineStyle
-					}
-					if !r.undercurl {
-						style = 1
-					}
+	// underlines, strikethrough (drawn over the batched glyphs) — visiting
+	// only the cells pass 1 marked instead of re-scanning the whole grid.
+	// Items are never hidden cells (filtered in pass 1).
+	for i := range r.pass2 {
+		it := &r.pass2[i]
+		cell := snap.Cells[it.row*cols+it.col]
+		if isBlockElement(cell.Char) {
+			r.drawBlockElement(it.x, it.y, cell.Char, it.fg, proj)
+		}
+		if cell.Flags&grid.FlagUnderline != 0 || it.hovered {
+			ulColor := it.fg
+			style := uint8(1)
+			if cell.Flags&grid.FlagUnderline != 0 && !it.hovered {
+				if cell.UnderlineColor.Type != grid.ColorDefault {
+					ulColor = r.colorToRGBA(cell.UnderlineColor, false)
 				}
-				r.drawUnderlineStyled(x, y, ulColor, proj, style)
+				if cell.UnderlineStyle != 0 {
+					style = cell.UnderlineStyle
+				}
+				if !r.undercurl {
+					style = 1
+				}
 			}
-			if cell.Flags&grid.FlagStrikethrough != 0 && !hidden {
-				r.drawRect(x, y+r.cellHeight/2, r.cellWidth, 1, fgColor, proj)
-			}
+			r.drawUnderlineStyled(it.x, it.y, ulColor, proj, style)
+		}
+		if cell.Flags&grid.FlagStrikethrough != 0 {
+			r.drawRect(it.x, it.y+r.cellHeight/2, r.cellWidth, 1, it.fg, proj)
 		}
 	}
 
@@ -2614,10 +2722,16 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 	}
 }
 
-// SetHoverURL sets the hover underline range for a grid.
+// SetHoverURL sets the hover underline range for a grid. Latches a redraw
+// only when the hover state actually changes (it is called on every mouse
+// move).
 func (r *Renderer) SetHoverURL(g *grid.Grid, row, startCol, endCol int) {
 	if g == nil || row < 0 || startCol < 0 || endCol < startCol {
 		r.ClearHoverURL()
+		return
+	}
+	if r.hoverActive && r.hoverGrid == g && r.hoverRow == row &&
+		r.hoverStartCol == startCol && r.hoverEndCol == endCol {
 		return
 	}
 	r.hoverGrid = g
@@ -2625,10 +2739,14 @@ func (r *Renderer) SetHoverURL(g *grid.Grid, row, startCol, endCol int) {
 	r.hoverStartCol = startCol
 	r.hoverEndCol = endCol
 	r.hoverActive = true
+	r.uiDirty = true
 }
 
 // ClearHoverURL clears any active hover underline.
 func (r *Renderer) ClearHoverURL() {
+	if r.hoverActive {
+		r.uiDirty = true
+	}
 	r.hoverGrid = nil
 	r.hoverActive = false
 }
@@ -3125,30 +3243,31 @@ func (r *Renderer) colorToRGBA(c grid.Color, isBackground bool) [4]float32 {
 	return r.theme.Foreground
 }
 
+// standard16 is the standard ANSI palette (hoisted to package level so
+// indexedColor doesn't rebuild the table literal on every call).
+var standard16 = [16][4]float32{
+	{0.043, 0.059, 0.078, 1.0}, // 0: Black
+	{0.820, 0.412, 0.412, 1.0}, // 1: Red
+	{0.498, 0.737, 0.549, 1.0}, // 2: Green
+	{0.843, 0.729, 0.490, 1.0}, // 3: Yellow
+	{0.533, 0.643, 0.831, 1.0}, // 4: Blue
+	{0.773, 0.525, 0.753, 1.0}, // 5: Magenta
+	{0.498, 0.773, 0.784, 1.0}, // 6: Cyan
+	{0.831, 0.847, 0.871, 1.0}, // 7: White
+	{0.294, 0.322, 0.388, 1.0}, // 8: Bright Black
+	{0.878, 0.478, 0.478, 1.0}, // 9: Bright Red
+	{0.604, 0.843, 0.659, 1.0}, // 10: Bright Green
+	{0.906, 0.788, 0.545, 1.0}, // 11: Bright Yellow
+	{0.647, 0.749, 0.941, 1.0}, // 12: Bright Blue
+	{0.847, 0.627, 0.831, 1.0}, // 13: Bright Magenta
+	{0.604, 0.843, 0.863, 1.0}, // 14: Bright Cyan
+	{0.945, 0.953, 0.961, 1.0}, // 15: Bright White
+}
+
 // indexedColor returns the RGB color for an indexed color (0-255)
 func indexedColor(index uint8) [4]float32 {
-	// Standard 16 colors
-	standard := [][4]float32{
-		{0.043, 0.059, 0.078, 1.0}, // 0: Black
-		{0.820, 0.412, 0.412, 1.0}, // 1: Red
-		{0.498, 0.737, 0.549, 1.0}, // 2: Green
-		{0.843, 0.729, 0.490, 1.0}, // 3: Yellow
-		{0.533, 0.643, 0.831, 1.0}, // 4: Blue
-		{0.773, 0.525, 0.753, 1.0}, // 5: Magenta
-		{0.498, 0.773, 0.784, 1.0}, // 6: Cyan
-		{0.831, 0.847, 0.871, 1.0}, // 7: White
-		{0.294, 0.322, 0.388, 1.0}, // 8: Bright Black
-		{0.878, 0.478, 0.478, 1.0}, // 9: Bright Red
-		{0.604, 0.843, 0.659, 1.0}, // 10: Bright Green
-		{0.906, 0.788, 0.545, 1.0}, // 11: Bright Yellow
-		{0.647, 0.749, 0.941, 1.0}, // 12: Bright Blue
-		{0.847, 0.627, 0.831, 1.0}, // 13: Bright Magenta
-		{0.604, 0.843, 0.863, 1.0}, // 14: Bright Cyan
-		{0.945, 0.953, 0.961, 1.0}, // 15: Bright White
-	}
-
 	if index < 16 {
-		return standard[index]
+		return standard16[index]
 	}
 
 	// 216 color cube (indices 16-231)

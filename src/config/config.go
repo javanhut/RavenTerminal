@@ -96,6 +96,10 @@ type Config struct {
 	Exports    map[string]string `toml:"exports"`
 	Theme      string            `toml:"theme"`
 	FontSize   float32           `toml:"font_size"`
+	// AllowClipboardRead lets applications read the system clipboard via
+	// OSC 52 queries. Off by default: clipboard read is a data-exfiltration
+	// vector, so kitty and wezterm gate it behind an opt-in too.
+	AllowClipboardRead bool `toml:"allow_clipboard_read"`
 }
 
 const defaultVCSDetectLegacy = `# Detect VCS (Git + Ivaldi)
@@ -345,9 +349,10 @@ func DefaultConfig() *Config {
 		Aliases: map[string]string{
 			"ls": getDefaultLsAlias(),
 		},
-		Exports:  map[string]string{},
-		Theme:    "raven-blue",
-		FontSize: 15.0,
+		Exports:            map[string]string{},
+		Theme:              "raven-blue",
+		FontSize:           15.0,
+		AllowClipboardRead: false, // opt-in: OSC 52 read leaks clipboard contents to apps
 	}
 }
 
@@ -572,12 +577,13 @@ func (c *Config) WriteInitScript() (string, error) {
 		return "", err
 	}
 
-	// Also write the fish- and rsh-syntax variants; neither shell can source
-	// init.sh. A write failure must not disable the (already written) bash
-	// init, so it is not propagated; each launch path checks its file exists
-	// before using it.
+	// Also write the fish-, rsh- and zsh-syntax variants; none of those shells
+	// can source init.sh. A write failure must not disable the (already
+	// written) bash init, so it is not propagated; each launch path checks its
+	// file exists before using it.
 	c.writeFishInitScript()
 	c.writeRavenInitScript()
+	c.writeZshInitScript()
 
 	return initPath, nil
 }

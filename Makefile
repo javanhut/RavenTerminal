@@ -1,7 +1,7 @@
 # Raven Terminal Makefile
 # Provides easy build, install, uninstall, and dependency management
 
-.PHONY: all build install install-local uninstall uninstall-local uninstall-all fresh fresh-local purge clean deps deps-check test macos-icon help
+.PHONY: all build install install-local uninstall uninstall-local uninstall-all fresh fresh-local purge clean deps deps-check test check macos-icon help
 
 # Application info
 APP_NAME := raven-terminal
@@ -192,6 +192,21 @@ endif
 test:
 	@echo -e "$(BLUE)[INFO]$(NC) Running tests..."
 	@go test ./src/...
+
+# Format check + vet + tests
+check:
+	@echo -e "$(BLUE)[INFO]$(NC) Checking gofmt..."
+	@unformatted=$$(gofmt -l src); \
+	if [ -n "$$unformatted" ]; then \
+		echo -e "$(RED)[FAIL]$(NC) gofmt needed on:"; \
+		echo "$$unformatted"; \
+		exit 1; \
+	fi
+	@echo -e "$(BLUE)[INFO]$(NC) Running go vet..."
+	@go vet ./...
+	@echo -e "$(BLUE)[INFO]$(NC) Running tests..."
+	@go test ./...
+	@echo -e "$(GREEN)[OK]$(NC) All checks passed"
 
 # Generate macOS icon (run on macOS only)
 macos-icon:

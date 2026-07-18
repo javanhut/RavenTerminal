@@ -1,54 +1,70 @@
 # Raven Terminal Keybindings
 
+App shortcuts use a **leader** modifier instead of plain Ctrl, so the Control
+key stays free for terminal control characters (Ctrl+C, Ctrl+D, ...), matching
+iTerm2 / Terminal.app:
+
+- **macOS**: the leader is **Cmd**.
+- **Linux**: the leader is **Super** (same muscle memory as macOS) *or* the
+  conventional **Ctrl+Shift** chords — both work.
+
+"Leader+X" below means Cmd+X on macOS, and Super+X or Ctrl+Shift+X on Linux,
+unless a row says otherwise.
+
 ## General
 
 | Keybinding | Action |
 |------------|--------|
-| Ctrl+Q | Exit terminal |
-| Ctrl+C | Copy visible screen |
-| Ctrl+P | Paste clipboard |
+| Ctrl+Q or Cmd/Super+Q | Exit terminal |
+| Leader+C | Copy selection (Cmd+C / Super+C / Ctrl+Shift+C) |
+| Cmd/Super+V (also Ctrl+Shift+P on Linux) | Paste clipboard |
 | Shift+Enter | Toggle fullscreen mode |
-| Ctrl+Shift+K | Show/hide keybindings help panel |
-| Ctrl+Shift+P | Open settings menu |
-| Ctrl+Shift+F | Toggle web search panel |
-| Ctrl+Shift+A | Toggle AI chat panel |
-| Ctrl+Shift+[ | Previous pane or overlay panel in cycle (when open) |
-| Ctrl+Shift+] | Next pane or overlay panel in cycle (when open) |
+| Leader+K | Show keybindings help panel |
+| Leader+S | Open settings menu |
+| Leader+F | Toggle web search panel |
+| Leader+A | Toggle AI chat panel |
+| Ctrl+R or Cmd/Super+R | Toggle pane resize mode |
 
 ## Zoom
 
 | Keybinding | Action |
 |------------|--------|
-| Ctrl+Shift++ | Zoom in (increase font size) |
-| Ctrl+Shift+- | Zoom out (decrease font size) |
-| Ctrl+Shift+0 | Reset zoom to default |
+| Leader+= | Zoom in (increase font size) |
+| Leader+- | Zoom out (decrease font size) |
+| Leader+0 | Reset zoom to default |
 
 ## Tab Management
 
 | Keybinding | Action |
 |------------|--------|
-| Ctrl+Shift+T | New tab |
-| Ctrl+Shift+X | Close current tab |
+| Leader+T | New tab |
+| Leader+X | Close current tab |
+| Leader+1..9 | Jump to tab 1-9 |
 | Ctrl+Tab | Next tab |
 | Ctrl+Shift+Tab | Previous tab |
+| Cmd/Super+Shift+] | Next tab |
+| Cmd/Super+Shift+[ | Previous tab |
 
 ## Split Panes
 
 | Keybinding | Action |
 |------------|--------|
-| Super+D (Cmd+D on macOS) or Ctrl+Shift+V | Split pane vertically (side by side) |
-| Super+Shift+D (Cmd+Shift+D on macOS) or Ctrl+Shift+H | Split pane horizontally (stacked) |
-| Ctrl+Shift+W | Close current pane |
-| Super+Shift+Tab (Cmd+Shift+Tab on macOS) | Cycle to next pane |
-| Super+] (Cmd+] on macOS) or Ctrl+Shift+] | Focus next pane |
-| Super+[ (Cmd+[ on macOS) or Ctrl+Shift+[ | Focus previous pane |
+| Cmd/Super+D (also Ctrl+Shift+V on Linux) | Split pane vertically (side by side) |
+| Cmd/Super+Shift+D (also Ctrl+Shift+H on Linux) | Split pane horizontally (stacked) |
+| Leader+W | Close current pane |
+| Cmd/Super+] (also Ctrl+Shift+] on Linux) | Focus next pane |
+| Cmd/Super+[ (also Ctrl+Shift+[ on Linux) | Focus previous pane |
+| Cmd/Super+Shift+Tab | Cycle to next pane |
+
+Note: macOS reserves Cmd+Shift+Tab for the app switcher unless remapped, and
+tiling window managers often grab Super chords; the leader+] / leader+[
+bindings always cycle panes.
 
 ## Scrolling
 
 | Keybinding | Action |
 |------------|--------|
-| Mouse wheel up | Scroll up 3 lines |
-| Mouse wheel down | Scroll down 3 lines |
+| Mouse wheel up/down | Scroll 3 lines |
 | Shift+Up | Scroll up 1 line |
 | Shift+Down | Scroll down 1 line |
 | Shift+PageUp | Scroll up 5 lines |
@@ -61,7 +77,19 @@ Scrolling is reset to the bottom when any input is typed.
 | Action | Behavior |
 |--------|----------|
 | Left-click drag | Select text and copy to clipboard |
-| Right-click | Copy selection or paste clipboard |
+| Right-click | Copy selection if one exists, otherwise paste clipboard |
+| Ctrl+Right-click | Open the URL under the pointer |
+
+## Help Panel
+
+While the help panel (Leader+K) is open:
+
+| Keybinding | Action |
+|------------|--------|
+| Up / Down | Scroll one line |
+| PageUp / PageDown | Scroll 5 lines |
+| Home | Jump to top |
+| Escape | Close the panel |
 
 ## Text Navigation
 
@@ -80,6 +108,9 @@ F1-F12 are passed through to the running application.
 
 ## Modifier Keys
 
-- **Ctrl+letter**: Sends control character (Ctrl+D for EOF, Ctrl+L for clear, etc.)
-- **Alt+letter**: Sends ESC prefix followed by the letter
-- **Shift+Tab**: Always sends the reverse-tab sequence (CSI Z) to the running app (nvim, TUIs). Pane cycling uses Super+Shift+Tab (Cmd+Shift+Tab on macOS). Note macOS reserves Cmd+Shift+Tab for the app switcher and tiling WMs often grab Super chords; the leader+] / leader+[ bindings always cycle panes.
+- **Ctrl+letter**: Sends the control character to the shell (Ctrl+C interrupts,
+  Ctrl+D for EOF, Ctrl+L clears, etc.) — Ctrl is *not* used for copy/paste.
+- **Ctrl+Space**: Sends NUL.
+- **Alt+letter**: Sends ESC prefix followed by the letter.
+- **Shift+Tab**: Always sends the reverse-tab sequence (CSI Z) to the running
+  app (nvim, TUIs). Pane cycling uses Cmd/Super+Shift+Tab instead.

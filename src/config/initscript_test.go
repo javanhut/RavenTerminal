@@ -254,6 +254,17 @@ func TestInitScriptRshSyntax(t *testing.T) {
 
 			ravenshell := shellPath(t, "ravenshell")
 
+			// Capability probe: the generated script needs zero-parameter
+			// function syntax. An installed ravenshell that predates it cannot
+			// judge the generator — skip rather than fail on a stale binary.
+			probe := filepath.Join(t.TempDir(), "probe.rsh")
+			if err := os.WriteFile(probe, []byte("func __probe() {\n  return \"ok\"\n}\nprint __probe()\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := exec.Command(ravenshell, probe).CombinedOutput(); err != nil {
+				t.Skipf("installed ravenshell predates zero-arg function syntax; update it to run this test: %v\n%s", err, out)
+			}
+
 			// The prompt function takes a status parameter only in the full
 			// style (custom without a script degrades to minimal).
 			call := "prompt()"

@@ -174,6 +174,8 @@ type Terminal struct {
 	clipboardReader func() string
 	// Reusable render snapshot buffer (double-buffered across frames).
 	snapPrev *grid.Snapshot
+	// Reusable rune buffer for Process's batch fast path (guarded by mu).
+	runBuf []rune
 }
 
 // NewTerminal creates a new terminal parser
@@ -198,14 +200,48 @@ func NewTerminal(cols, rows int) *Terminal {
 	}
 }
 
-// Process processes incoming bytes from the PTY
+// Process processes incoming bytes from the PTY.
+//
+// LOCK ORDER: t.mu is held for the whole chunk; Grid methods called beneath it
+// take Grid.mu. Terminal.mu is always acquired before Grid.mu (see Snapshot);
+// never the reverse.
 func (t *Terminal) Process(data []byte) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	for _, b := range data {
+	for i := 0; i < len(data); {
+		b := data[i]
+		// Fast path: a run of printable ASCII in ground state with plain
+		// charset and no insert mode is written through the grid's batch path,
+		// taking Grid.mu once per run instead of once per rune. Everything
+		// else falls back to the per-byte state machine.
+		if b >= 0x20 && b < 0x7f && t.state == StateGround && t.utf8Remaining == 0 &&
+			!t.insertMode && !t.activeCharsetMapped() {
+			j := i + 1
+			for j < len(data) && data[j] >= 0x20 && data[j] < 0x7f {
+				j++
+			}
+			t.runBuf = t.runBuf[:0]
+			for _, c := range data[i:j] {
+				t.runBuf = append(t.runBuf, rune(c))
+			}
+			t.Grid.WriteRunes(t.runBuf, t.currentFg, t.currentBg, t.currentFlags,
+				t.currentLinkID, t.currentUnderlineStyle, t.currentUnderlineColor)
+			i = j
+			continue
+		}
 		t.processByte(b)
+		i++
 	}
+}
+
+// activeCharsetMapped reports whether the active charset remaps printable
+// ASCII (DEC line drawing); when it does, the batch fast path is skipped.
+func (t *Terminal) activeCharsetMapped() bool {
+	if t.activeCharset == 1 {
+		return t.charsetG1 == charsetLineDrawing
+	}
+	return t.charsetG0 == charsetLineDrawing
 }
 
 // processByte processes a single byte
@@ -684,8 +720,16 @@ func (t *Terminal) executeCSI(final byte) {
 		if t.getParam(params, 0, 0) == 18 && t.responseWriter != nil {
 			t.responseWriter(fmt.Appendf(nil, "\x1b[8;%d;%dt", t.Grid.Rows, t.Grid.Cols))
 		}
-	case 'q': // DECSCUSR - Set cursor style (ignore for now)
-		t.setCursorStyle(params)
+	case 'q':
+		if strings.HasPrefix(t.csiParams, ">") {
+			// XTVERSION (CSI > q): report terminal name/version as DCS > | text ST.
+			if t.responseWriter != nil {
+				t.responseWriter([]byte("\x1bP>|RavenTerminal\x1b\\"))
+			}
+		} else {
+			// DECSCUSR (CSI Ps SP q) - set cursor style
+			t.setCursorStyle(params)
+		}
 	case 'p':
 		if strings.HasSuffix(t.csiParams, "!") {
 			// DECSTR - soft terminal reset
@@ -1123,11 +1167,24 @@ func (t *Terminal) handleOSC52(value string) {
 	data := parts[1]
 	if data == "?" {
 		// Query: respond with the current clipboard contents, base64-encoded.
-		if t.clipboardReader == nil || t.responseWriter == nil {
+		reader := t.clipboardReader
+		if reader == nil {
+			defaultClipboardReaderMu.Lock()
+			reader = defaultClipboardReader
+			defaultClipboardReaderMu.Unlock()
+		}
+		writer := t.responseWriter
+		if reader == nil || writer == nil {
 			return
 		}
-		enc := base64.StdEncoding.EncodeToString([]byte(t.clipboardReader()))
-		t.responseWriter([]byte("\x1b]52;" + selection + ";" + enc + "\x1b\\"))
+		// The reader may block (the host answers from its main thread, which
+		// also needs Terminal.mu to render), and Process holds t.mu — so the
+		// query is answered from a goroutine, off the lock. A single writer
+		// call keeps the reply sequence contiguous on the PTY.
+		go func() {
+			enc := base64.StdEncoding.EncodeToString([]byte(reader()))
+			writer([]byte("\x1b]52;" + selection + ";" + enc + "\x1b\\"))
+		}()
 		return
 	}
 	// Set: decode base64 and write to the system clipboard.
@@ -1274,6 +1331,22 @@ func (t *Terminal) SetClipboardReader(reader func() string) {
 	t.clipboardReader = reader
 }
 
+// defaultClipboardReader answers OSC 52 clipboard queries for any terminal
+// without its own reader. Process-wide so terminals created after wiring
+// (new tabs/panes) are covered too.
+var (
+	defaultClipboardReaderMu sync.Mutex
+	defaultClipboardReader   func() string
+)
+
+// SetDefaultClipboardReader sets the process-wide fallback OSC 52 clipboard
+// reader. The reader is invoked on parser (PTY reader) goroutines.
+func SetDefaultClipboardReader(reader func() string) {
+	defaultClipboardReaderMu.Lock()
+	defer defaultClipboardReaderMu.Unlock()
+	defaultClipboardReader = reader
+}
+
 // GetWindowTitle returns the current window title (set via OSC 0/2)
 func (t *Terminal) GetWindowTitle() string {
 	t.mu.Lock()
@@ -1306,32 +1379,7 @@ func (t *Terminal) EncodeMouseEvent(button int, x, y int, pressed bool) []byte {
 	if t.mouseMode == 0 {
 		return nil
 	}
-
-	if t.mouseSGRMode {
-		// SGR format: CSI < button ; x ; y M (press) or m (release)
-		suffix := 'M'
-		if !pressed {
-			suffix = 'm'
-		}
-		return fmt.Appendf(nil, "\x1b[<%d;%d;%d%c", button, x, y, suffix)
-	}
-
-	// X10/Normal format: CSI M Cb Cx Cy (all values + 32)
-	// Only reports press, not release (except button 3 which is release)
-	if !pressed && button != 3 {
-		return nil // X10 doesn't report most releases
-	}
-	cb := byte(button + 32)
-	cx := byte(x + 32)
-	cy := byte(y + 32)
-	// Clamp to valid range (max 223 for coordinates)
-	if cx > 255 {
-		cx = 255
-	}
-	if cy > 255 {
-		cy = 255
-	}
-	return []byte{0x1b, '[', 'M', cb, cx, cy}
+	return encodeMouseBytes(t.mouseSGRMode, button, x, y, pressed)
 }
 
 // parseSGRParams parses CSI parameters for SGR sequences, properly expanding
@@ -1582,6 +1630,9 @@ func (t *Terminal) GetGrid() *grid.Grid {
 func (t *Terminal) Snapshot() *grid.Snapshot {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	// Refresh the selection's viewport projection so the highlight tracks view
+	// scrolling and content scrolling in (selection anchors are absolute).
+	t.Grid.SyncSelectionView()
 	s := t.Grid.Snapshot(t.snapPrev)
 	s.CursorVisible = t.cursorVisible
 	t.snapPrev = s
@@ -1617,6 +1668,9 @@ func (t *Terminal) handleDA(params []int) {
 		// Secondary DA: report as xterm version 136
 		// Format: ESC[>Pp;Pv;Pc c where Pp=terminal type, Pv=version, Pc=ROM cartridge
 		t.responseWriter([]byte("\x1b[>0;136;0c"))
+	} else if strings.HasPrefix(t.csiParams, "=") {
+		// Tertiary DA (ESC[=c): report unit ID in DECRPTUI format.
+		t.responseWriter([]byte("\x1bP!|00000000\x1b\\"))
 	} else {
 		// Primary DA: report as VT220 with various features
 		// 62 = VT220, 22 = ANSI color, 29 = ANSI text locator

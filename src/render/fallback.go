@@ -53,7 +53,7 @@ func (r *Renderer) rebuildFallbackFaces() {
 		}
 		face, err := opentype.NewFace(ff.font, &opentype.FaceOptions{
 			Size:    float64(r.fontSize),
-			DPI:     96,
+			DPI:     r.fontDPI(),
 			Hinting: font.HintingFull,
 		})
 		if err != nil {
@@ -100,7 +100,7 @@ func (r *Renderer) loadSystemFallbacks() {
 			r.fallbackFonts = append(r.fallbackFonts, fallbackFont{font: f})
 			face, err := opentype.NewFace(f, &opentype.FaceOptions{
 				Size:    float64(r.fontSize),
-				DPI:     96,
+				DPI:     r.fontDPI(),
 				Hinting: font.HintingFull,
 			})
 			if err != nil {

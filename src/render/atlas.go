@@ -207,6 +207,7 @@ func (r *Renderer) growAtlas() bool {
 	if r.atlasSize >= atlasMaxSize {
 		return false
 	}
+	r.atlasGen++ // all previously recorded UVs become invalid
 	chars := make([]rune, 0, len(r.glyphs))
 	for c := range r.glyphs {
 		chars = append(chars, c)

@@ -129,10 +129,12 @@ type Menu struct {
 	OnConfigReload func(cfg *config.Config) error
 	// Optional hook for applying updated init script to the active shell
 	OnInitScriptUpdated func(initPath string) error
-	// Optional hook for testing Ollama connectivity.
-	OnOllamaTest func(url string) error
-	// Optional hook for fetching Ollama models.
-	OnOllamaFetchModels func(url string) ([]string, error)
+	// Optional hook for testing Ollama connectivity. Fire-and-forget: the
+	// host runs the check off-thread and reports back via StatusMessage.
+	OnOllamaTest func(url string)
+	// Optional hook for fetching Ollama models. Fire-and-forget: the host
+	// fetches off-thread and fills OllamaModels/StatusMessage when done.
+	OnOllamaFetchModels func(url string)
 	// Optional hook for pre-loading an Ollama model into memory.
 	OnOllamaLoadModel func(url, model string)
 }
@@ -843,11 +845,8 @@ func (m *Menu) handleMainSelect() {
 			m.StatusMessage = "Ollama test unavailable"
 			return
 		}
-		if err := m.OnOllamaTest(m.Config.Ollama.URL); err != nil {
-			m.StatusMessage = "Ollama test failed: " + err.Error()
-			return
-		}
-		m.StatusMessage = "Ollama connection OK"
+		m.OnOllamaTest(m.Config.Ollama.URL)
+		m.StatusMessage = "Testing Ollama connection..."
 	case label == "Load Model":
 		if m.OnOllamaLoadModel == nil {
 			m.StatusMessage = "Ollama load unavailable"
@@ -864,17 +863,8 @@ func (m *Menu) handleMainSelect() {
 			m.StatusMessage = "Ollama fetch unavailable"
 			return
 		}
-		models, err := m.OnOllamaFetchModels(m.Config.Ollama.URL)
-		if err != nil {
-			m.StatusMessage = "Model refresh failed: " + err.Error()
-			return
-		}
-		m.OllamaModels = models
-		if len(models) == 0 {
-			m.StatusMessage = "No models found"
-			return
-		}
-		m.StatusMessage = "Models loaded (" + itoa(len(models)) + ")"
+		m.OnOllamaFetchModels(m.Config.Ollama.URL)
+		m.StatusMessage = "Fetching models..."
 	case label == "Ollama Models...":
 		m.navigateTo(MenuOllamaModels, m.buildOllamaModelsMenu)
 	case label == "Thinking Mode":

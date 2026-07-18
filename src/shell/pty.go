@@ -200,6 +200,36 @@ func ravenInitIfPresent() string {
 	return path
 }
 
+// zshDotDirIfPresent returns the generated ZDOTDIR shim directory (see
+// config/zshinit.go) when its .zshenv exists, "" otherwise — so zsh never
+// starts with a ZDOTDIR pointing at a missing shim.
+func zshDotDirIfPresent() string {
+	dir := config.ZshDotDir()
+	if _, err := os.Stat(dir + "/.zshenv"); err != nil {
+		return ""
+	}
+	return dir
+}
+
+// zshInitEnv points ZDOTDIR at the generated shim dir so zsh loads Raven's
+// init. Without sourceRC the shim itself skips the user's rc files
+// (RAVEN_ZSH_NORC). A stale recursion guard inherited from a parent Raven
+// zsh is cleared so the shim always applies. No-op when the shim is missing.
+func zshInitEnv(env []string, sourceRC bool) []string {
+	dir := zshDotDirIfPresent()
+	if dir == "" {
+		return env
+	}
+	env = removeEnv(env, "RAVEN_ZDOTDIR_DONE")
+	env = replaceEnv(env, "ZDOTDIR", dir)
+	if sourceRC {
+		env = removeEnv(env, "RAVEN_ZSH_NORC")
+	} else {
+		env = replaceEnv(env, "RAVEN_ZSH_NORC", "1")
+	}
+	return env
+}
+
 // PtySession manages a pseudo-terminal connection to a shell
 type PtySession struct {
 	cmd       *exec.Cmd
@@ -267,7 +297,9 @@ func NewPtySession(cols, rows uint16, startDir string) (*PtySession, error) {
 				cmd = exec.Command(shell, "-i")
 			}
 		case "zsh":
-			// Zsh will source .zshrc automatically
+			// Raven's init is injected via the ZDOTDIR shim (see zshInitEnv);
+			// its .zshenv restores the user's rc files, so zsh still sources
+			// .zshrc as usual.
 			cmd = exec.Command(shell, "-i")
 		case "fish":
 			// Fish reads its own config, then -C sources the fish-syntax
@@ -294,7 +326,14 @@ func NewPtySession(cols, rows uint16, startDir string) (*PtySession, error) {
 				cmd = exec.Command(shell, "--noprofile", "--norc", "-i")
 			}
 		case "zsh":
-			cmd = exec.Command(shell, "--no-rcs", "-i")
+			if zshDotDirIfPresent() != "" {
+				// The ZDOTDIR shim skips the user's rc files itself
+				// (RAVEN_ZSH_NORC, set in zshInitEnv) while still loading
+				// Raven's init; --no-rcs would skip the shim's .zshenv too.
+				cmd = exec.Command(shell, "-i")
+			} else {
+				cmd = exec.Command(shell, "--no-rcs", "-i")
+			}
 		case "fish":
 			if fishInit := fishInitIfPresent(); fishInit != "" {
 				cmd = exec.Command(shell, "--no-config", "-i", "-C", "source "+config.FishQuote(fishInit))
@@ -361,11 +400,9 @@ func NewPtySession(cols, rows uint16, startDir string) (*PtySession, error) {
 		env = replaceEnv(env, k, v)
 	}
 
-	// For zsh, set up custom init by prepending to .zshrc
-	if shellBase == "zsh" && initScriptPath != "" {
-		// Create a custom ZDOTDIR to source our init script
-		env = replaceEnv(env, "RAVEN_INIT_SCRIPT", initScriptPath)
-		// Zsh will source the script via .zshenv or we use precmd
+	// For zsh, inject Raven's init via the standard ZDOTDIR shim.
+	if shellBase == "zsh" {
+		env = zshInitEnv(env, cfg.Shell.SourceRC)
 	}
 
 	// For bash without sourcing rc, we need to run the init script

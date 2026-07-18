@@ -3,6 +3,7 @@ package grid
 import (
 	"strings"
 	"sync"
+	"unicode"
 )
 
 const (
@@ -137,8 +138,25 @@ type Grid struct {
 	graphemes   [][]rune
 	graphemeMap map[string]uint32
 
-	// Selection state (display coordinates)
-	selectionActive       bool
+	// Selection state. Anchors are stored in ABSOLUTE buffer coordinates:
+	// absRow = scrolledOut + index into the history+screen continuum, the same
+	// coordinate space AbsoluteCursorRow uses for image anchoring. Absolute rows
+	// are stable when lines scroll from the screen into history (a screen row
+	// pushed by scrollUp keeps its index) and when scrollback is trimmed
+	// (scrolledOut absorbs the shift), so a selection survives both view
+	// scrolling and new output. Rule for active-screen rows: an anchor keeps its
+	// absolute position, so mid-screen region scrolls (TUIs) move text under a
+	// fixed selection rectangle rather than dragging the selection along; and
+	// reflow invalidates absolute rows entirely, so Resize clears the selection.
+	selectionActive bool
+	selAnchorAbsRow int // where the drag started
+	selAnchorCol    int
+	selEndAbsRow    int // current drag end (may precede the anchor)
+	selEndCol       int
+
+	// Viewport-relative projection of the absolute selection, refreshed by
+	// SyncSelectionView. Exists only because snapshot.go reads these fields
+	// directly; all selection logic in this file uses the absolute anchors.
 	selectionStartCol     int
 	selectionStartRow     int
 	selectionEndCol       int
@@ -158,6 +176,22 @@ type Grid struct {
 	// to give image placements a stable absolute-row anchor that scrolls with
 	// content even as scrollback is trimmed.
 	scrolledOut int
+
+	// lastSnap records the visible state captured by the most recent Snapshot,
+	// so RedrawNeeded can cheaply peek for changes without clearing anything.
+	lastSnap snapState
+}
+
+// snapState is the non-content visible state recorded at Snapshot time
+// (content changes are tracked separately via per-row RowDirty flags).
+type snapState struct {
+	valid                bool
+	cols, rows           int
+	cursorCol, cursorRow int
+	scrollOffset         int
+	selActive            bool
+	sSCol, sSRow         int
+	sECol, sERow         int
 }
 
 // NewGrid creates a new grid with the given dimensions and a full scrollback.
@@ -257,7 +291,27 @@ func (g *Grid) LinkURL(id uint16) string {
 func (g *Grid) WriteChar(c rune, fg, bg Color, flags CellFlags, link uint16, ulStyle uint8, ulColor Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.writeCharLocked(c, fg, bg, flags, link, ulStyle, ulColor)
+}
 
+// WriteRunes writes a run of runes sharing the same attributes, taking g.mu
+// ONCE for the whole run instead of once per rune. This is the parser's batch
+// path for contiguous printable output (the cat-largefile hot path); all other
+// public Grid methods keep their per-call locking.
+//
+// LOCK ORDER: the parser calls this while holding Terminal.mu. Terminal.mu is
+// always acquired before Grid.mu (see Terminal.Snapshot / parser.Process);
+// never take Terminal.mu while holding Grid.mu.
+func (g *Grid) WriteRunes(rs []rune, fg, bg Color, flags CellFlags, link uint16, ulStyle uint8, ulColor Color) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, c := range rs {
+		g.writeCharLocked(c, fg, bg, flags, link, ulStyle, ulColor)
+	}
+}
+
+// writeCharLocked is WriteChar's body; the caller must hold g.mu.
+func (g *Grid) writeCharLocked(c rune, fg, bg Color, flags CellFlags, link uint16, ulStyle uint8, ulColor Color) {
 	if g.wrapPending {
 		if g.autoWrap {
 			// The line we're leaving continued because it filled the last
@@ -775,7 +829,116 @@ func (g *Grid) VisibleText() string {
 	return strings.TrimRight(strings.Join(lines, "\n"), "\n")
 }
 
-// SetSelection sets the selection bounds in display coordinates.
+// viewTopAbsLocked returns the absolute row displayed on viewport row 0.
+func (g *Grid) viewTopAbsLocked() int {
+	return g.scrolledOut + len(g.history) - g.scrollOffset
+}
+
+// rowAtAbsLocked resolves an absolute row to its *Row (nil if it scrolled out
+// of history or lies beyond the active screen).
+func (g *Grid) rowAtAbsLocked(abs int) *Row {
+	idx := abs - g.scrolledOut
+	if idx < 0 {
+		return nil
+	}
+	if idx < len(g.history) {
+		return g.history[idx]
+	}
+	idx -= len(g.history)
+	if idx >= 0 && idx < len(g.rows) {
+		return g.rows[idx]
+	}
+	return nil
+}
+
+// normalizedSelectionLocked returns the absolute selection range ordered so
+// that (sRow,sCol) <= (eRow,eCol).
+func (g *Grid) normalizedSelectionLocked() (sRow, sCol, eRow, eCol int) {
+	sRow, sCol = g.selAnchorAbsRow, g.selAnchorCol
+	eRow, eCol = g.selEndAbsRow, g.selEndCol
+	if eRow < sRow || (eRow == sRow && eCol < sCol) {
+		sRow, eRow = eRow, sRow
+		sCol, eCol = eCol, sCol
+	}
+	return
+}
+
+// syncSelectionViewLocked projects the absolute selection onto the current
+// viewport, refreshing the legacy viewport-relative fields consumed by
+// snapshot.go. When the selection is entirely off-screen the projection is
+// invalidated by desyncing selectionScrollOffset (snapshot treats that as "no
+// visible selection") without dropping the selection itself.
+func (g *Grid) syncSelectionViewLocked() {
+	if !g.selectionActive {
+		return
+	}
+	sRow, sCol, eRow, eCol := g.normalizedSelectionLocked()
+	viewTop := g.viewTopAbsLocked()
+	sV := sRow - viewTop
+	eV := eRow - viewTop
+	if eV < 0 || sV >= g.Rows {
+		g.selectionScrollOffset = g.scrollOffset + 1 // off-screen: desync
+		return
+	}
+	if sV < 0 {
+		sV, sCol = 0, 0
+	}
+	if eV >= g.Rows {
+		eV, eCol = g.Rows-1, g.Cols-1
+	}
+	g.selectionStartCol, g.selectionStartRow = sCol, sV
+	g.selectionEndCol, g.selectionEndRow = eCol, eV
+	g.selectionScrollOffset = g.scrollOffset
+}
+
+// SyncSelectionView refreshes the viewport projection of the selection. Called
+// once per frame (before snapshotting) so the highlight tracks both view
+// scrolling and new content scrolling in.
+func (g *Grid) SyncSelectionView() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.syncSelectionViewLocked()
+}
+
+// AbsRowForViewRow translates a viewport row to an absolute buffer row.
+func (g *Grid) AbsRowForViewRow(row int) int {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.viewTopAbsLocked() + row
+}
+
+// StartSelection anchors a new selection at a viewport cell.
+func (g *Grid) StartSelection(col, row int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.Cols == 0 || g.Rows == 0 {
+		return
+	}
+	col = clampInt(col, 0, g.Cols-1)
+	row = clampInt(row, 0, g.Rows-1)
+	abs := g.viewTopAbsLocked() + row
+	g.selectionActive = true
+	g.selAnchorAbsRow, g.selAnchorCol = abs, col
+	g.selEndAbsRow, g.selEndCol = abs, col
+	g.syncSelectionViewLocked()
+}
+
+// ExtendSelection moves the selection end to a viewport cell, keeping the
+// anchor (which may now live in scrollback) fixed.
+func (g *Grid) ExtendSelection(col, row int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.selectionActive || g.Cols == 0 || g.Rows == 0 {
+		return
+	}
+	col = clampInt(col, 0, g.Cols-1)
+	row = clampInt(row, 0, g.Rows-1)
+	g.selEndAbsRow = g.viewTopAbsLocked() + row
+	g.selEndCol = col
+	g.syncSelectionViewLocked()
+}
+
+// SetSelection sets the selection bounds in display (viewport) coordinates.
 func (g *Grid) SetSelection(startCol, startRow, endCol, endRow int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -789,12 +952,107 @@ func (g *Grid) SetSelection(startCol, startRow, endCol, endRow int) {
 	startRow = clampInt(startRow, 0, g.Rows-1)
 	endRow = clampInt(endRow, 0, g.Rows-1)
 
+	viewTop := g.viewTopAbsLocked()
 	g.selectionActive = true
-	g.selectionStartCol = startCol
-	g.selectionStartRow = startRow
-	g.selectionEndCol = endCol
-	g.selectionEndRow = endRow
-	g.selectionScrollOffset = g.scrollOffset
+	g.selAnchorAbsRow, g.selAnchorCol = viewTop+startRow, startCol
+	g.selEndAbsRow, g.selEndCol = viewTop+endRow, endCol
+	g.syncSelectionViewLocked()
+}
+
+// isWordRune reports whether a rune belongs to a double-click word:
+// unicode letters/digits plus _ - . / ~.
+func isWordRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) ||
+		r == '_' || r == '-' || r == '.' || r == '/' || r == '~'
+}
+
+// SelectWordAt selects the word under a viewport cell (double-click). A cell
+// holding a non-word character selects just that cell.
+// ponytail: word expansion stays within the display row; crossing soft-wrap
+// boundaries can be added if wrapped-URL selection ever matters.
+func (g *Grid) SelectWordAt(col, row int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.Cols == 0 || g.Rows == 0 {
+		return
+	}
+	col = clampInt(col, 0, g.Cols-1)
+	row = clampInt(row, 0, g.Rows-1)
+	abs := g.viewTopAbsLocked() + row
+	r := g.rowAtAbsLocked(abs)
+	if r == nil || len(r.cells) == 0 {
+		return
+	}
+	if col >= len(r.cells) {
+		col = len(r.cells) - 1
+	}
+	// charAt resolves a column to its rune, mapping a continuation cell to its
+	// wide-char base.
+	charAt := func(c int) rune {
+		if r.cells[c].Width == CellWidthContinuation && c > 0 {
+			c--
+		}
+		ch := r.cells[c].Char
+		if ch == 0 {
+			ch = ' '
+		}
+		return ch
+	}
+	start, end := col, col
+	if isWordRune(charAt(col)) {
+		for start > 0 && isWordRune(charAt(start-1)) {
+			start--
+		}
+		for end+1 < len(r.cells) && isWordRune(charAt(end+1)) {
+			end++
+		}
+	}
+	// Snap to wide-char cell boundaries so the highlight covers whole glyphs.
+	if r.cells[start].Width == CellWidthContinuation && start > 0 {
+		start--
+	}
+	if r.cells[end].Width == CellWidthWide && end+1 < len(r.cells) {
+		end++
+	}
+	g.selectionActive = true
+	g.selAnchorAbsRow, g.selAnchorCol = abs, start
+	g.selEndAbsRow, g.selEndCol = abs, end
+	g.syncSelectionViewLocked()
+}
+
+// SelectLineAt selects the full logical line (soft-wrap-joined) containing a
+// viewport cell (triple-click).
+func (g *Grid) SelectLineAt(col, row int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.Cols == 0 || g.Rows == 0 {
+		return
+	}
+	_ = col
+	row = clampInt(row, 0, g.Rows-1)
+	abs := g.viewTopAbsLocked() + row
+	if g.rowAtAbsLocked(abs) == nil {
+		return
+	}
+	first, last := abs, abs
+	for {
+		prev := g.rowAtAbsLocked(first - 1)
+		if prev == nil || prev.flags&RowSoftWrapped == 0 {
+			break
+		}
+		first--
+	}
+	for {
+		cur := g.rowAtAbsLocked(last)
+		if cur == nil || cur.flags&RowSoftWrapped == 0 || g.rowAtAbsLocked(last+1) == nil {
+			break
+		}
+		last++
+	}
+	g.selectionActive = true
+	g.selAnchorAbsRow, g.selAnchorCol = first, 0
+	g.selEndAbsRow, g.selEndCol = last, g.Cols-1
+	g.syncSelectionViewLocked()
 }
 
 // ClearSelection clears any active selection.
@@ -812,6 +1070,7 @@ func (g *Grid) HasSelection() bool {
 }
 
 // IsSelected returns whether a display cell is within the current selection.
+// Cheap: a couple of compares after translating the viewport row to absolute.
 func (g *Grid) IsSelected(col, row int) bool {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -819,79 +1078,79 @@ func (g *Grid) IsSelected(col, row int) bool {
 }
 
 func (g *Grid) isSelectedLocked(col, row int) bool {
-	if !g.selectionActive || g.scrollOffset != g.selectionScrollOffset {
+	if !g.selectionActive {
 		return false
 	}
-
-	startCol, startRow := g.selectionStartCol, g.selectionStartRow
-	endCol, endRow := g.selectionEndCol, g.selectionEndRow
-	if endRow < startRow || (endRow == startRow && endCol < startCol) {
-		startCol, endCol = endCol, startCol
-		startRow, endRow = endRow, startRow
-	}
-
-	if row < startRow || row > endRow {
+	sRow, sCol, eRow, eCol := g.normalizedSelectionLocked()
+	abs := g.viewTopAbsLocked() + row
+	if abs < sRow || abs > eRow {
 		return false
 	}
-	if startRow == endRow {
-		return col >= startCol && col <= endCol
+	if sRow == eRow {
+		return col >= sCol && col <= eCol
 	}
-	if row == startRow {
-		return col >= startCol
+	if abs == sRow {
+		return col >= sCol
 	}
-	if row == endRow {
-		return col <= endCol
+	if abs == eRow {
+		return col <= eCol
 	}
 	return true
 }
 
-// SelectedText returns the text within the current selection.
+// SelectedText returns the text within the current selection, walking absolute
+// rows across history and the active screen. Soft-wrapped rows are joined
+// without a newline; trailing spaces are trimmed only at hard line ends.
+// Continuation cells of wide characters are skipped.
 func (g *Grid) SelectedText() string {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
-	if !g.selectionActive || g.scrollOffset != g.selectionScrollOffset {
+	if !g.selectionActive {
 		return ""
 	}
+	sRow, sCol, eRow, eCol := g.normalizedSelectionLocked()
 
-	startCol, startRow := g.selectionStartCol, g.selectionStartRow
-	endCol, endRow := g.selectionEndCol, g.selectionEndRow
-	if endRow < startRow || (endRow == startRow && endCol < startCol) {
-		startCol, endCol = endCol, startCol
-		startRow, endRow = endRow, startRow
-	}
-
-	var lines []string
-	for row := startRow; row <= endRow; row++ {
-		colStart := 0
-		colEnd := g.Cols - 1
-		if row == startRow {
-			colStart = startCol
-		}
-		if row == endRow {
-			colEnd = endCol
-		}
-		if colEnd < colStart {
+	var out strings.Builder
+	var line strings.Builder
+	for abs := sRow; abs <= eRow; abs++ {
+		r := g.rowAtAbsLocked(abs)
+		if r == nil {
 			continue
 		}
-
-		var b strings.Builder
-		b.Grow(colEnd - colStart + 1)
+		colStart := 0
+		colEnd := len(r.cells) - 1
+		if abs == sRow {
+			colStart = clampInt(sCol, 0, len(r.cells)-1)
+		}
+		if abs == eRow {
+			colEnd = clampInt(eCol, 0, len(r.cells)-1)
+		}
 		for col := colStart; col <= colEnd; col++ {
-			cell := g.displayCellLocked(col, row)
+			if r.cells[col].Width == CellWidthContinuation {
+				continue
+			}
+			cell := g.inflate(r.cells[col])
 			ch := cell.Char
 			if ch == 0 {
 				ch = ' '
 			}
-			b.WriteRune(ch)
+			line.WriteRune(ch)
 			for _, cm := range cell.Combining {
-				b.WriteRune(cm)
+				line.WriteRune(cm)
 			}
 		}
-		lines = append(lines, strings.TrimRight(b.String(), " "))
+		softWrapped := r.flags&RowSoftWrapped != 0 && abs < eRow
+		if !softWrapped {
+			// Hard line end (or end of selection): trim padding, flush.
+			out.WriteString(strings.TrimRight(line.String(), " "))
+			line.Reset()
+			if abs < eRow {
+				out.WriteByte('\n')
+			}
+		}
 	}
-
-	return strings.TrimRight(strings.Join(lines, "\n"), "\n")
+	return strings.TrimRight(out.String(), "\n")
 }
 
 func clampInt(value, min, max int) int {
@@ -1188,6 +1447,9 @@ func (g *Grid) Resize(cols, rows int) {
 		return
 	}
 	g.wrapPending = false
+	// Reflow rebuilds the history+screen continuum, invalidating absolute
+	// selection anchors; clearing on resize is the documented rule.
+	g.selectionActive = false
 
 	// The main screen reflows wrapped lines to the new width; the alternate
 	// screen (no scrollback) clamps/truncates, since TUI apps repaint on resize.

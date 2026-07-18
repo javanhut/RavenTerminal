@@ -4,8 +4,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/javanhut/RavenTerminal/src/config"
 )
 
 func TestLooksLikePathList(t *testing.T) {
@@ -111,6 +114,46 @@ func TestComposePathSkipsEmptyAndWhitespace(t *testing.T) {
 	got := composePath([]string{"", "  /a/b  "}, "::/bin")
 	if got != "/a/b:/bin" {
 		t.Fatalf("composePath = %q, want %q", got, "/a/b:/bin")
+	}
+}
+
+// The zsh spawn path must point ZDOTDIR at the generated shim dir so zsh
+// loads Raven's init, clear a stale recursion guard inherited from a parent
+// Raven zsh, and set RAVEN_ZSH_NORC only when rc sourcing is disabled.
+func TestZshInitEnvSetsZDOTDIR(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if _, err := config.DefaultConfig().WriteInitScript(); err != nil {
+		t.Fatalf("WriteInitScript: %v", err)
+	}
+
+	env := zshInitEnv([]string{"RAVEN_ZDOTDIR_DONE=1", "RAVEN_ZSH_NORC=1"}, true)
+	want := "ZDOTDIR=" + config.ZshDotDir()
+	if !slices.Contains(env, want) {
+		t.Errorf("env missing %q: %v", want, env)
+	}
+	if slices.Contains(env, "RAVEN_ZDOTDIR_DONE=1") {
+		t.Errorf("stale recursion guard not cleared: %v", env)
+	}
+	if slices.Contains(env, "RAVEN_ZSH_NORC=1") {
+		t.Errorf("RAVEN_ZSH_NORC set despite SourceRC: %v", env)
+	}
+
+	env = zshInitEnv(nil, false)
+	if !slices.Contains(env, want) {
+		t.Errorf("env missing %q: %v", want, env)
+	}
+	if !slices.Contains(env, "RAVEN_ZSH_NORC=1") {
+		t.Errorf("RAVEN_ZSH_NORC missing with SourceRC disabled: %v", env)
+	}
+}
+
+// Without a generated shim, the env must be left untouched (zsh falls back to
+// its plain launch, never a broken ZDOTDIR).
+func TestZshInitEnvMissingShim(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	env := zshInitEnv([]string{"A=1"}, true)
+	if len(env) != 1 || env[0] != "A=1" {
+		t.Errorf("env changed despite missing shim: %v", env)
 	}
 }
 

@@ -30,6 +30,44 @@ import (
 	"github.com/go-gl/glfw/v3.3/glfw"
 )
 
+// clipboardReadReq ferries OSC 52 clipboard read requests from PTY reader
+// goroutines to the main thread (GLFW clipboard access is main-thread only),
+// mirroring the DrainClipboard pattern used for writes. Buffer of 1: a second
+// concurrent query simply gets an empty reply.
+var clipboardReadReq = make(chan chan string, 1)
+
+// requestClipboardRead asks the main loop for the system clipboard contents.
+// Called on PTY reader goroutines by the parser (OSC 52 query).
+func requestClipboardRead() string {
+	reply := make(chan string, 1)
+	select {
+	case clipboardReadReq <- reply:
+	default:
+		return ""
+	}
+	window.PostEmptyEvent() // wake the main loop so it services the request
+	select {
+	case s := <-reply:
+		return s
+	case <-time.After(500 * time.Millisecond):
+		// ponytail: bounded wait — if the main loop is blocked (e.g. waiting on
+		// this pane's reader lock), answer empty instead of stalling the PTY.
+		return ""
+	}
+}
+
+// applyClipboardReadGate wires or unwires OSC 52 clipboard-read answering
+// according to allow_clipboard_read (default off — a data-exfiltration
+// vector, gated the same way in kitty/wezterm). Called at startup and on
+// every config reload so the option can be toggled at runtime.
+func applyClipboardReadGate(allow bool) {
+	if allow {
+		parser.SetDefaultClipboardReader(requestClipboardRead)
+	} else {
+		parser.SetDefaultClipboardReader(nil)
+	}
+}
+
 // lineBuffer tracks the current line being typed for command interception
 type lineBuffer struct {
 	buffer strings.Builder
@@ -95,6 +133,24 @@ type modelLoadResponse struct {
 	err   error
 }
 
+type ollamaModelsResponse struct {
+	models []string
+	err    error
+}
+
+// listOllamaModelsAsync fetches the Ollama model list on a goroutine and
+// delivers the result on results; it returns immediately so it is safe to
+// call from the GLFW main thread.
+func listOllamaModelsAsync(baseURL string, timeout time.Duration, results chan<- ollamaModelsResponse) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		client := ollama.NewClient(baseURL, "")
+		models, err := client.ListModels(ctx)
+		results <- ollamaModelsResponse{models: models, err: err}
+	}()
+}
+
 // summarizeToolArgs renders tool-call arguments as a short human-readable
 // suffix for the panel's activity line, e.g. `: rust async runtime`.
 func summarizeToolArgs(args map[string]any) string {
@@ -119,10 +175,40 @@ func shellQuote(value string) string {
 }
 
 type mouseSelection struct {
-	active   bool
-	pane     *tab.Pane
-	startCol int
-	startRow int
+	active      bool
+	pane        *tab.Pane
+	startCol    int
+	startAbsRow int // press position in absolute buffer rows (stable across scroll)
+
+	// Multi-click tracking (double=word, triple=line).
+	lastClickTime time.Time
+	lastClickCol  int
+	lastClickRow  int
+	clickCount    int
+}
+
+// mouseReportState tracks a mouse press that was forwarded to the application
+// (mouse tracking modes 1000/1002/1003), so the matching release and drag
+// motion go to the same pane, and motion is throttled to cell changes.
+type mouseReportState struct {
+	pane    *tab.Pane
+	held    int // terminal button code held (-1 = none)
+	lastCol int
+	lastRow int
+}
+
+// terminalMouseButton maps a GLFW button to the terminal encoding
+// (0=left, 1=middle, 2=right), or -1 for unsupported buttons.
+func terminalMouseButton(b glfw.MouseButton) int {
+	switch b {
+	case glfw.MouseButtonLeft:
+		return 0
+	case glfw.MouseButtonMiddle:
+		return 1
+	case glfw.MouseButtonRight:
+		return 2
+	}
+	return -1
 }
 
 type toastState struct {
@@ -176,10 +262,60 @@ func main() {
 	resizeMode := false
 	const resizeStep = 0.05
 	selection := &mouseSelection{}
+	// lastCol/lastRow start at -1 so the first motion event — including one
+	// over cell (0,0) — is never throttled as "same cell".
+	report := &mouseReportState{held: -1, lastCol: -1, lastRow: -1}
 	var lastCursorX float64
 	var lastCursorY float64
 	var haveCursorPos bool
 	lastAutoScroll := time.Time{}
+	// clampedPaneCell maps window coordinates to a cell of a specific pane,
+	// clamping positions outside the pane rect to its nearest edge cell.
+	clampedPaneCell := func(activeTab *tab.Tab, pane *tab.Pane, x, y float64) (int, int, bool) {
+		width, height := win.GetFramebufferSize()
+		rectX, rectY, rectW, rectH, ok := renderer.PaneRectFor(activeTab, pane, width, height)
+		if !ok {
+			return 0, 0, false
+		}
+		fx := float32(x)
+		fy := float32(y)
+		if fx < rectX {
+			fx = rectX
+		} else if fx >= rectX+rectW {
+			fx = rectX + rectW - 1
+		}
+		if fy < rectY {
+			fy = rectY
+		} else if fy >= rectY+rectH {
+			fy = rectY + rectH - 1
+		}
+		cellW, cellH := renderer.CellSize()
+		g := pane.Terminal.GetGrid()
+		col := clampInt(int((fx-rectX)/cellW), 0, g.Cols-1)
+		row := clampInt(int((fy-rectY)/cellH), 0, g.Rows-1)
+		return col, row, true
+	}
+
+	// mouseCtxFor snapshots a pane's mouse-routing state for DecideMouse.
+	mouseCtxFor := func(pane *tab.Pane, shift bool) parser.MouseContext {
+		mode, sgr, alt, appCur := pane.Terminal.MouseState()
+		return parser.MouseContext{Mode: mode, SGR: sgr, Shift: shift, AltScreen: alt, AppCursorKeys: appCur}
+	}
+
+	// reportMousePress forwards a button press to the pane's application when a
+	// mouse tracking mode is active (and shift is not held). Returns true when
+	// the event was consumed.
+	reportMousePress := func(pane *tab.Pane, btn, col, row int, shift bool) bool {
+		act := parser.DecideMouse(mouseCtxFor(pane, shift), parser.MousePress, btn, col, row, -1, false)
+		if act.Kind != parser.MouseActionSend {
+			return false
+		}
+		report.pane, report.held = pane, btn
+		report.lastCol, report.lastRow = col, row
+		pane.Write(act.Bytes)
+		return true
+	}
+
 	toast := &toastState{}
 	showToast := func(message string) {
 		if strings.TrimSpace(message) == "" {
@@ -194,6 +330,8 @@ func main() {
 	previewResponses := make(chan previewResponse, 4)
 	aiResponses := make(chan aiResponse, 4)
 	modelLoadResponses := make(chan modelLoadResponse, 2)
+	ollamaTestResponses := make(chan ollamaModelsResponse, 2)
+	ollamaModelsResponses := make(chan ollamaModelsResponse, 2)
 	const maxSearchResults = 8
 	const maxChatMessages = 6
 	settingsMenu := menu.NewMenu()
@@ -216,6 +354,7 @@ func main() {
 			return err
 		}
 		renderer.SetTextStyleOptions(cfg.Appearance.FauxBold, cfg.Appearance.FauxItalic, cfg.Appearance.Undercurl)
+		applyClipboardReadGate(cfg.AllowClipboardRead)
 		width, height := win.GetFramebufferSize()
 		cols, rows := renderer.CalculateGridSize(width, height)
 		tabManager.ResizeAll(uint16(cols), uint16(rows))
@@ -242,18 +381,13 @@ func main() {
 		}
 		return activeTab.Write([]byte(cmd))
 	}
-	settingsMenu.OnOllamaTest = func(baseURL string) error {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		client := ollama.NewClient(baseURL, "")
-		_, err := client.ListModels(ctx)
-		return err
+	settingsMenu.OnOllamaTest = func(baseURL string) {
+		// Off-thread: a blocking call here would freeze the UI (menu shows
+		// "Testing..." meanwhile); result applied in the main loop.
+		listOllamaModelsAsync(baseURL, 5*time.Second, ollamaTestResponses)
 	}
-	settingsMenu.OnOllamaFetchModels = func(baseURL string) ([]string, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-		defer cancel()
-		client := ollama.NewClient(baseURL, "")
-		return client.ListModels(ctx)
+	settingsMenu.OnOllamaFetchModels = func(baseURL string) {
+		listOllamaModelsAsync(baseURL, 8*time.Second, ollamaModelsResponses)
 	}
 	settingsMenu.OnOllamaLoadModel = func(baseURL, model string) {
 		// Show loading status immediately
@@ -284,6 +418,7 @@ func main() {
 			tabManager.ResizeAll(uint16(cols), uint16(rows))
 		}
 		renderer.SetTextStyleOptions(settingsMenu.Config.Appearance.FauxBold, settingsMenu.Config.Appearance.FauxItalic, settingsMenu.Config.Appearance.Undercurl)
+		applyClipboardReadGate(settingsMenu.Config.AllowClipboardRead)
 	}
 
 	startSearch := func(query string) {
@@ -757,20 +892,18 @@ func main() {
 
 			switch result.Action {
 			case keybindings.ActionCopy:
-				g := activeTab.Terminal.GetGrid()
-				text := g.SelectedText()
-				if text == "" {
-					text = g.VisibleText()
-				}
-				if text != "" {
+				// No selection: leave the clipboard alone.
+				if text := activeTab.Terminal.GetGrid().SelectedText(); text != "" {
 					glfw.SetClipboardString(text)
 					showToast("Copied to clipboard")
+				} else {
+					showToast("Nothing selected")
 				}
 				return
 			case keybindings.ActionPaste:
 				clip := glfw.GetClipboardString()
 				if clip != "" {
-					writePaste(activeTab, clip)
+					writePaste(activeTab.Terminal, activeTab, clip)
 					activeTab.Terminal.GetGrid().ResetScrollOffset()
 					showToast("Pasted from clipboard")
 				}
@@ -1026,19 +1159,17 @@ func main() {
 			cols, rows := renderer.CalculateGridSize(width, height)
 			tabManager.ResizeAll(uint16(cols), uint16(rows))
 		case keybindings.ActionCopy:
-			g := activeTab.Terminal.GetGrid()
-			text := g.SelectedText()
-			if text == "" {
-				text = g.VisibleText()
-			}
-			if text != "" {
+			// No selection: leave the clipboard alone.
+			if text := activeTab.Terminal.GetGrid().SelectedText(); text != "" {
 				glfw.SetClipboardString(text)
 				showToast("Copied to clipboard")
+			} else {
+				showToast("Nothing selected")
 			}
 		case keybindings.ActionPaste:
 			clip := glfw.GetClipboardString()
 			if clip != "" {
-				writePaste(activeTab, clip)
+				writePaste(activeTab.Terminal, activeTab, clip)
 				activeTab.Terminal.GetGrid().ResetScrollOffset()
 				showToast("Pasted from clipboard")
 			}
@@ -1221,43 +1352,18 @@ func main() {
 			}
 			if yoff > 0 {
 				g.ScrollViewUp(steps)
-				selection.startRow += steps
 			} else if yoff < 0 {
 				g.ScrollViewDown(steps)
-				selection.startRow -= steps
 			} else {
 				return
 			}
 
-			selection.startRow = clampInt(selection.startRow, 0, g.Rows-1)
-
-			width, height := win.GetFramebufferSize()
+			// The anchor is absolute (survives the scroll); just extend to the
+			// cell under the cursor in the new view.
 			x, y := w.GetCursorPos()
-			rectX, rectY, rectW, rectH, ok := renderer.PaneRectFor(activeTab, pane, width, height)
-			if !ok {
-				return
+			if col, row, ok := clampedPaneCell(activeTab, pane, x, y); ok {
+				g.ExtendSelection(col, row)
 			}
-
-			fx := float32(x)
-			fy := float32(y)
-			if fx < rectX {
-				fx = rectX
-			} else if fx >= rectX+rectW {
-				fx = rectX + rectW - 1
-			}
-			if fy < rectY {
-				fy = rectY
-			} else if fy >= rectY+rectH {
-				fy = rectY + rectH - 1
-			}
-
-			cellW, cellH := renderer.CellSize()
-			col := int((fx - rectX) / cellW)
-			row := int((fy - rectY) / cellH)
-			col = clampInt(col, 0, g.Cols-1)
-			row = clampInt(row, 0, g.Rows-1)
-
-			g.SetSelection(selection.startCol, selection.startRow, col, row)
 			renderer.ClearHoverURL()
 			return
 		}
@@ -1315,9 +1421,36 @@ func main() {
 			return
 		}
 
+		if yoff == 0 {
+			return
+		}
+
+		// Route the wheel: app mouse reporting (buttons 64/65), alt-screen
+		// arrow-key translation, or local scrollback.
+		width, height := win.GetFramebufferSize()
+		x, y := w.GetCursorPos()
+		if pane, col, row, ok := renderer.HitTestPane(activeTab, x, y, width, height); ok && pane != nil {
+			shift := w.GetKey(glfw.KeyLeftShift) == glfw.Press || w.GetKey(glfw.KeyRightShift) == glfw.Press
+			kind := parser.MouseWheelUp
+			if yoff < 0 {
+				kind = parser.MouseWheelDown
+			}
+			act := parser.DecideMouse(mouseCtxFor(pane, shift), kind, 0, col, row, -1, false)
+			if act.Kind == parser.MouseActionSend {
+				steps := int(math.Abs(yoff))
+				if steps == 0 {
+					steps = 1
+				}
+				for range steps {
+					pane.Write(act.Bytes)
+				}
+				return
+			}
+		}
+
 		if yoff > 0 {
 			activeTab.Terminal.GetGrid().ScrollViewUp(3)
-		} else if yoff < 0 {
+		} else {
 			activeTab.Terminal.GetGrid().ScrollViewDown(3)
 		}
 	})
@@ -1335,6 +1468,24 @@ func main() {
 		width, height := win.GetFramebufferSize()
 		x, y := w.GetCursorPos()
 
+		// A press that was forwarded to the application gets its matching
+		// release forwarded too, wherever the cursor ended up (shift state at
+		// release is irrelevant: the app saw the press).
+		if action == glfw.Release && report.pane != nil && terminalMouseButton(button) == report.held {
+			mode, sgr, _, _ := report.pane.Terminal.MouseState()
+			col, row := report.lastCol, report.lastRow
+			if c, r, ok := clampedPaneCell(activeTab, report.pane, x, y); ok {
+				col, row = c, r
+			}
+			act := parser.DecideMouse(parser.MouseContext{Mode: mode, SGR: sgr}, parser.MouseRelease, report.held, col, row, -1, false)
+			if act.Kind == parser.MouseActionSend {
+				report.pane.Write(act.Bytes)
+			}
+			report.pane, report.held = nil, -1
+			report.lastCol, report.lastRow = -1, -1 // don't throttle the next context's first motion
+			return
+		}
+
 		switch button {
 		case glfw.MouseButtonLeft:
 			switch action {
@@ -1343,7 +1494,9 @@ func main() {
 				if aiPanel.Open {
 					cellW, cellH := renderer.CellDimensions()
 					layout := aiPanel.Layout(width, height, cellW, cellH)
-					fx, fy := float32(x), float32(y)
+					// Layout is in framebuffer pixels; cursor pos is logical.
+					s := renderer.ContentScale()
+					fx, fy := float32(x)*s, float32(y)*s
 					if fx >= layout.PanelX && fx <= layout.PanelX+layout.PanelWidth &&
 						fy >= layout.PanelY && fy <= layout.PanelY+layout.PanelHeight {
 						aiPanel.Focused = true
@@ -1364,7 +1517,8 @@ func main() {
 				if searchPanel.Open {
 					cellW, cellH := renderer.CellDimensions()
 					layout := searchPanel.Layout(width, height, cellW, cellH)
-					fx, fy := float32(x), float32(y)
+					s := renderer.ContentScale()
+					fx, fy := float32(x)*s, float32(y)*s
 					if fx >= layout.PanelX && fx <= layout.PanelX+layout.PanelWidth &&
 						fy >= layout.PanelY && fy <= layout.PanelY+layout.PanelHeight {
 						searchPanel.Focused = true
@@ -1416,6 +1570,13 @@ func main() {
 					selection.pane.Terminal.GetGrid().ClearSelection()
 				}
 
+				// Application mouse reporting (vim/tmux/htop): forward the press
+				// unless shift is held (shift = local selection, by convention).
+				if reportMousePress(pane, 0, col, row, mods&glfw.ModShift != 0) {
+					activeTab.SetActivePane(pane)
+					return
+				}
+
 				if mods&glfw.ModControl != 0 {
 					if urlText, _, _ := linkAtCell(pane.Terminal.GetGrid(), col, row); urlText != "" {
 						if err := openURL(urlText); err != nil {
@@ -1425,18 +1586,50 @@ func main() {
 					}
 				}
 
-				selection.active = true
-				selection.pane = pane
-				selection.startCol = col
-				selection.startRow = row
-				pane.Terminal.GetGrid().SetSelection(col, row, col, row)
+				// Multi-click detection: same cell within 400ms.
+				now := time.Now()
+				if now.Sub(selection.lastClickTime) <= 400*time.Millisecond &&
+					col == selection.lastClickCol && row == selection.lastClickRow {
+					selection.clickCount++
+				} else {
+					selection.clickCount = 1
+				}
+				selection.lastClickTime = now
+				selection.lastClickCol, selection.lastClickRow = col, row
+
+				g := pane.Terminal.GetGrid()
+				switch {
+				case selection.clickCount == 2: // double-click: word
+					g.SelectWordAt(col, row)
+					selection.active = false
+					selection.pane = pane
+					if text := g.SelectedText(); text != "" {
+						glfw.SetClipboardString(text)
+						showToast("Copied to clipboard")
+					}
+				case selection.clickCount >= 3: // triple-click: logical line
+					g.SelectLineAt(col, row)
+					selection.active = false
+					selection.pane = pane
+					selection.clickCount = 0
+					if text := g.SelectedText(); text != "" {
+						glfw.SetClipboardString(text)
+						showToast("Copied to clipboard")
+					}
+				default:
+					selection.active = true
+					selection.pane = pane
+					selection.startCol = col
+					selection.startAbsRow = g.AbsRowForViewRow(row)
+					g.StartSelection(col, row)
+				}
 				activeTab.SetActivePane(pane)
 			case glfw.Release:
 				// Handle AI panel text selection release
 				if aiPanel.SelectionActive {
 					cellW, cellH := renderer.CellDimensions()
 					layout := aiPanel.Layout(width, height, cellW, cellH)
-					fy := float32(y)
+					fy := float32(y) * renderer.ContentScale()
 					if fy < layout.MessagesStart {
 						fy = layout.MessagesStart
 					}
@@ -1469,7 +1662,7 @@ func main() {
 				if searchPanel.SelectionActive {
 					cellW, cellH := renderer.CellDimensions()
 					layout := searchPanel.Layout(width, height, cellW, cellH)
-					fy := float32(y)
+					fy := float32(y) * renderer.ContentScale()
 					if fy < layout.ResultsStart+layout.LineHeight {
 						fy = layout.ResultsStart + layout.LineHeight
 					}
@@ -1503,39 +1696,22 @@ func main() {
 				}
 
 				pane := selection.pane
-				rectX, rectY, rectW, rectH, ok := renderer.PaneRectFor(activeTab, pane, width, height)
+				g := pane.Terminal.GetGrid()
+				col, row, ok := clampedPaneCell(activeTab, pane, x, y)
 				if !ok {
 					selection.active = false
 					return
 				}
 
-				fx := float32(x)
-				fy := float32(y)
-				if fx < rectX {
-					fx = rectX
-				} else if fx >= rectX+rectW {
-					fx = rectX + rectW - 1
-				}
-				if fy < rectY {
-					fy = rectY
-				} else if fy >= rectY+rectH {
-					fy = rectY + rectH - 1
-				}
-
-				cellW, cellH := renderer.CellSize()
-				col := int((fx - rectX) / cellW)
-				row := int((fy - rectY) / cellH)
-				g := pane.Terminal.GetGrid()
-				col = clampInt(col, 0, g.Cols-1)
-				row = clampInt(row, 0, g.Rows-1)
-
-				if selection.startCol == col && selection.startRow == row {
+				// A click (no drag): compare in absolute rows so scrolling
+				// mid-press doesn't fake a drag.
+				if selection.startCol == col && selection.startAbsRow == g.AbsRowForViewRow(row) {
 					g.ClearSelection()
 					selection.active = false
 					return
 				}
 
-				g.SetSelection(selection.startCol, selection.startRow, col, row)
+				g.ExtendSelection(col, row)
 				if text := g.SelectedText(); text != "" {
 					glfw.SetClipboardString(text)
 					showToast("Copied to clipboard")
@@ -1554,6 +1730,10 @@ func main() {
 
 			activeTab.SetActivePane(pane)
 			g := pane.Terminal.GetGrid()
+
+			if reportMousePress(pane, 2, col, row, mods&glfw.ModShift != 0) {
+				return
+			}
 
 			if mods&glfw.ModControl != 0 {
 				if urlText, _, _ := linkAtCell(g, col, row); urlText != "" {
@@ -1574,11 +1754,20 @@ func main() {
 
 			clip := glfw.GetClipboardString()
 			if clip != "" {
-				clip = strings.ReplaceAll(clip, "\r\n", "\n")
-				clip = strings.ReplaceAll(clip, "\n", "\r")
-				pane.Write([]byte(clip))
+				// Route through writePaste: strips embedded paste-end markers and
+				// honors bracketed paste, targeting the pane under the cursor.
+				writePaste(pane.Terminal, pane, clip)
 				g.ResetScrollOffset()
 				showToast("Pasted from clipboard")
+			}
+		case glfw.MouseButtonMiddle:
+			if action != glfw.Press {
+				return
+			}
+			if pane, col, row, ok := renderer.HitTestPane(activeTab, x, y, width, height); ok && pane != nil {
+				if reportMousePress(pane, 1, col, row, mods&glfw.ModShift != 0) {
+					activeTab.SetActivePane(pane)
+				}
 			}
 		}
 	})
@@ -1604,7 +1793,7 @@ func main() {
 			width, height := win.GetFramebufferSize()
 			cellW, cellH := renderer.CellDimensions()
 			layout := aiPanel.Layout(width, height, cellW, cellH)
-			fy := float32(ypos)
+			fy := float32(ypos) * renderer.ContentScale()
 			if fy < layout.MessagesStart {
 				fy = layout.MessagesStart
 			}
@@ -1620,7 +1809,7 @@ func main() {
 			width, height := win.GetFramebufferSize()
 			cellW, cellH := renderer.CellDimensions()
 			layout := searchPanel.Layout(width, height, cellW, cellH)
-			fy := float32(ypos)
+			fy := float32(ypos) * renderer.ContentScale()
 			if fy < layout.ResultsStart+layout.LineHeight {
 				fy = layout.ResultsStart + layout.LineHeight
 			}
@@ -1632,35 +1821,54 @@ func main() {
 		}
 
 		if selection.active && selection.pane != nil {
-			width, height := win.GetFramebufferSize()
-			rectX, rectY, rectW, rectH, ok := renderer.PaneRectFor(activeTab, selection.pane, width, height)
-			if !ok {
-				return
+			if col, row, ok := clampedPaneCell(activeTab, selection.pane, xpos, ypos); ok {
+				selection.pane.Terminal.GetGrid().ExtendSelection(col, row)
 			}
-
-			fx := float32(xpos)
-			fy := float32(ypos)
-			if fx < rectX {
-				fx = rectX
-			} else if fx >= rectX+rectW {
-				fx = rectX + rectW - 1
-			}
-			if fy < rectY {
-				fy = rectY
-			} else if fy >= rectY+rectH {
-				fy = rectY + rectH - 1
-			}
-
-			cellW, cellH := renderer.CellSize()
-			col := int((fx - rectX) / cellW)
-			row := int((fy - rectY) / cellH)
-			g := selection.pane.Terminal.GetGrid()
-			col = clampInt(col, 0, g.Cols-1)
-			row = clampInt(row, 0, g.Rows-1)
-
-			g.SetSelection(selection.startCol, selection.startRow, col, row)
 			renderer.ClearHoverURL()
 			return
+		}
+
+		// Application mouse motion reporting (1002 button-drag / 1003 any-motion),
+		// throttled to cell changes. A reported drag targets the pressed pane
+		// (clamped to its rect); hover motion targets the pane under the cursor.
+		{
+			var target *tab.Pane
+			var mcol, mrow int
+			if report.pane != nil {
+				if c, r, ok := clampedPaneCell(activeTab, report.pane, xpos, ypos); ok {
+					target, mcol, mrow = report.pane, c, r
+				}
+			} else {
+				width, height := win.GetFramebufferSize()
+				if pane, c, r, ok := renderer.HitTestPane(activeTab, xpos, ypos, width, height); ok && pane != nil {
+					target, mcol, mrow = pane, c, r
+				}
+			}
+			if target != nil {
+				shift := w.GetKey(glfw.KeyLeftShift) == glfw.Press || w.GetKey(glfw.KeyRightShift) == glfw.Press
+				held := -1
+				if report.pane == target {
+					held = report.held
+				}
+				if held >= 0 {
+					// The press was already forwarded: the shift override is
+					// latched at press time (xterm behavior), so pressing shift
+					// mid-drag doesn't punch a hole in the app's motion stream.
+					shift = false
+				}
+				cellChanged := mcol != report.lastCol || mrow != report.lastRow
+				act := parser.DecideMouse(mouseCtxFor(target, shift), parser.MouseMotion, 0, mcol, mrow, held, cellChanged)
+				switch act.Kind {
+				case parser.MouseActionSend:
+					report.lastCol, report.lastRow = mcol, mrow
+					target.Write(act.Bytes)
+					renderer.ClearHoverURL()
+					return
+				case parser.MouseActionIgnore:
+					renderer.ClearHoverURL()
+					return
+				}
+			}
 		}
 
 		width, height := win.GetFramebufferSize()
@@ -1693,6 +1901,28 @@ func main() {
 			activeTab.Write([]byte("\x1b[O"))
 		}
 	})
+
+	// Redraw-gating state. The full list of redraw triggers lives in ONE place:
+	// render.RedrawTriggers. Each loop wake compares against these previous
+	// values; when no trigger fires, all GL work (render + SwapBuffers) is
+	// skipped, so an idle terminal with cursor blink off does zero draws
+	// between events.
+	prevDrawCursor := true
+	prevToastVisible := false
+	// Panel-open states are ORed with their previous value so the frame after
+	// a close still renders once, erasing the overlay.
+	prevMenuOpen := false
+	prevSearchOpen := false
+	prevAIOpen := false
+	prevHelpOpen := false
+	prevFocused := windowFocused
+	prevFBWidth, prevFBHeight := -1, -1 // -1 forces a first-frame draw
+	prevSyncActive := false
+	var prevActiveTab *tab.Tab
+	lastScale := float32(0) // 0 forces the content scale to apply on frame one
+	// ponytail: entries for closed panes are never pruned; bounded by panes
+	// ever opened, a few pointers each.
+	lastGrids := make(map[*tab.Pane]*grid.Grid)
 
 	// Main loop
 	for !win.ShouldClose() {
@@ -1851,6 +2081,32 @@ func main() {
 		}
 	modelLoadDone:
 
+		// Handle async Ollama menu actions (connection test / model refresh)
+		for {
+			select {
+			case resp := <-ollamaTestResponses:
+				if resp.err != nil {
+					settingsMenu.StatusMessage = "Ollama test failed: " + resp.err.Error()
+				} else {
+					settingsMenu.StatusMessage = "Ollama connection OK"
+				}
+			case resp := <-ollamaModelsResponses:
+				if resp.err != nil {
+					settingsMenu.StatusMessage = "Model refresh failed: " + resp.err.Error()
+				} else {
+					settingsMenu.OllamaModels = resp.models
+					if len(resp.models) == 0 {
+						settingsMenu.StatusMessage = "No models found"
+					} else {
+						settingsMenu.StatusMessage = fmt.Sprintf("Models loaded (%d)", len(resp.models))
+					}
+				}
+			default:
+				goto ollamaMenuDone
+			}
+		}
+	ollamaMenuDone:
+
 		// Handle cursor blinking. Blink only when enabled in config, the active
 		// terminal's DECSCUSR style requests it, the window is focused, and the
 		// user hasn't just typed (typing forces a solid cursor). Otherwise the
@@ -1900,13 +2156,8 @@ func main() {
 								g.ScrollViewDown(1)
 							}
 							if g.GetScrollOffset() != prevOffset {
-								if dir < 0 {
-									selection.startRow++
-								} else {
-									selection.startRow--
-								}
-								selection.startRow = clampInt(selection.startRow, 0, g.Rows-1)
-
+								// The anchor is absolute: extending at the edge
+								// cell grows the selection into scrollback.
 								fx := float32(lastCursorX)
 								fy := float32(lastCursorY)
 								if fx < rectX {
@@ -1924,7 +2175,7 @@ func main() {
 								row := int((fy - rectY) / cellH)
 								col = clampInt(col, 0, g.Cols-1)
 								row = clampInt(row, 0, g.Rows-1)
-								g.SetSelection(selection.startCol, selection.startRow, col, row)
+								g.ExtendSelection(col, row)
 								renderer.ClearHoverURL()
 								lastAutoScroll = now
 							}
@@ -1934,20 +2185,109 @@ func main() {
 			}
 		}
 
-		// Render
+		// Render — gated: a frame is drawn only when a trigger in
+		// render.RedrawTriggers fired (the single enumeration of every
+		// condition that must force a redraw).
 		width, height := win.GetFramebufferSize()
-		win.SetViewport(width, height)
+
+		// HiDPI: apply content-scale changes (startup on a 2x display, or the
+		// window moving to a monitor with a different scale). Fonts are
+		// re-rasterized at 96*scale DPI and the grid re-fit to the new cells.
+		scaleChanged := false
+		if s := win.ContentScale(); s != lastScale {
+			lastScale = s
+			cwOld, chOld := renderer.CellDimensions()
+			if err := renderer.SetContentScale(s); err == nil {
+				if cw, ch := renderer.CellDimensions(); cw != cwOld || ch != chOld {
+					scaleChanged = true
+					cols, rows := renderer.CalculateGridSize(width, height)
+					tabManager.ResizeAll(uint16(cols), uint16(rows))
+				}
+			}
+		}
+
+		activeTab := tabManager.ActiveTab()
 		drawCursor := cursorVisible
-		if activeTab := tabManager.ActiveTab(); activeTab != nil && activeTab.Terminal != nil {
+		if activeTab != nil && activeTab.Terminal != nil {
 			drawCursor = drawCursor && activeTab.Terminal.IsCursorVisible()
 		}
-		if settingsMenu.IsOpen() {
-			renderer.RenderWithMenu(tabManager, width, height, drawCursor, settingsMenu)
-		} else {
-			renderer.RenderWithHelpAndPanels(tabManager, width, height, drawCursor, showHelp, searchPanel, aiPanel)
+
+		// Peek (without clearing) whether any visible pane changed, and detect
+		// active-grid pointer swaps (alt screen enter/exit, new panes) that
+		// per-grid dirty tracking cannot see.
+		paneDirty := false
+		gridSwapped := false
+		if activeTab != nil {
+			for _, pl := range activeTab.GetPaneLayouts() {
+				if pl.Pane == nil || pl.Pane.Terminal == nil {
+					continue
+				}
+				pg := pl.Pane.Terminal.GetGrid()
+				if lastGrids[pl.Pane] != pg {
+					lastGrids[pl.Pane] = pg
+					gridSwapped = true
+				}
+				if !paneDirty && pg.RedrawNeeded() {
+					paneDirty = true
+				}
+			}
 		}
-		if now.Before(toast.expiresAt) {
-			renderer.DrawToast(toast.message, width, height)
+
+		syncActive := false
+		if activeTab != nil && activeTab.Terminal != nil {
+			syncActive = activeTab.Terminal.SyncActive()
+		}
+
+		toastVisible := now.Before(toast.expiresAt)
+		menuOpen := settingsMenu.IsOpen()
+		trig := render.RedrawTriggers{
+			PaneContentDirty:   paneDirty,
+			GridSwapped:        gridSwapped,
+			ActiveTabChanged:   activeTab != prevActiveTab,
+			CursorPhaseChanged: drawCursor != prevDrawCursor,
+			SelectionDragging:  selection.active,
+			ToastVisible:       toastVisible,
+			ToastJustExpired:   prevToastVisible && !toastVisible,
+			MenuOpen:           menuOpen || prevMenuOpen,
+			SearchPanelOpen:    searchPanel.Open || prevSearchOpen,
+			AIPanelOpen:        aiPanel.Open || prevAIOpen,
+			HelpOpen:           showHelp || prevHelpOpen,
+			SizeChanged:        width != prevFBWidth || height != prevFBHeight,
+			FocusChanged:       windowFocused != prevFocused,
+			ScaleChanged:       scaleChanged,
+			SyncActiveOrEnded:  syncActive || prevSyncActive,
+			UIStateChanged:     renderer.ConsumeUIDirty(),
+		}
+		prevSyncActive = syncActive
+		prevActiveTab = activeTab
+		prevDrawCursor = drawCursor
+		prevToastVisible = toastVisible
+		prevMenuOpen = menuOpen
+		prevSearchOpen = searchPanel.Open
+		prevAIOpen = aiPanel.Open
+		prevHelpOpen = showHelp
+		prevFocused = windowFocused
+		prevFBWidth, prevFBHeight = width, height
+
+		if render.ShouldRedraw(trig) {
+			win.SetViewport(width, height)
+			if settingsMenu.IsOpen() {
+				renderer.RenderWithMenu(tabManager, width, height, drawCursor, settingsMenu)
+			} else {
+				renderer.RenderWithHelpAndPanels(tabManager, width, height, drawCursor, showHelp, searchPanel, aiPanel)
+			}
+			if toastVisible {
+				renderer.DrawToast(toast.message, width, height)
+			}
+
+			// Swap buffers. While an app holds synchronized output (?2026),
+			// skip presenting the partial frame but keep polling input so the
+			// UI stays responsive; a watchdog in SyncActive() resumes within
+			// ~100ms (the SyncActiveOrEnded trigger guarantees one presented
+			// frame after release).
+			if !syncActive {
+				win.SwapBuffers()
+			}
 		}
 
 		// Drain any OSC 52 clipboard writes queued from PTY reader goroutines
@@ -1955,16 +2295,11 @@ func main() {
 		if text, ok := tab.DrainClipboard(); ok {
 			glfw.SetClipboardString(text)
 		}
-
-		// Swap buffers and poll events. While an app holds synchronized output
-		// (?2026), skip presenting the partial frame but keep polling input so the UI
-		// stays responsive; a watchdog in SyncActive() resumes within ~100ms.
-		skipPresent := false
-		if activeTab := tabManager.ActiveTab(); activeTab != nil && activeTab.Terminal != nil {
-			skipPresent = activeTab.Terminal.SyncActive()
-		}
-		if !skipPresent {
-			win.SwapBuffers()
+		// Answer any pending OSC 52 clipboard read (see requestClipboardRead).
+		select {
+		case reply := <-clipboardReadReq:
+			reply <- glfw.GetClipboardString()
+		default:
 		}
 
 		// Event-driven wait: returns immediately when a key/mouse event arrives or a
@@ -1981,17 +2316,19 @@ func main() {
 	}
 }
 
-// writePaste sends clipboard text to the active terminal, normalizing newlines and,
+// writePaste sends clipboard text to a terminal, normalizing newlines and,
 // when the application has enabled bracketed paste (?2004), wrapping the text in
-// paste markers. Any embedded end-marker is stripped first to prevent paste-injection.
-func writePaste(activeTab *tab.Tab, clip string) {
+// paste markers. Any embedded end-marker is stripped first to prevent
+// paste-injection. The target is the terminal's PTY writer (a *tab.Tab or a
+// *tab.Pane), so split panes paste into the pane under the cursor.
+func writePaste(term *parser.Terminal, target interface{ Write([]byte) error }, clip string) {
 	clip = strings.ReplaceAll(clip, "\r\n", "\n")
 	clip = strings.ReplaceAll(clip, "\n", "\r")
-	if activeTab.Terminal.BracketedPasteEnabled() {
+	if term.BracketedPasteEnabled() {
 		clip = strings.ReplaceAll(clip, "\x1b[201~", "")
 		clip = "\x1b[200~" + clip + "\x1b[201~"
 	}
-	activeTab.Write([]byte(clip))
+	target.Write([]byte(clip))
 }
 
 func clampInt(value, min, max int) int {
