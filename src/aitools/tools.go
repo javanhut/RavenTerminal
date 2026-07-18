@@ -198,7 +198,7 @@ func (r *Registry) fetchPageTool() Tool {
 			if err := websearch.ValidatePublicHTTPURL(ctx, pageURL); err != nil {
 				return "", err
 			}
-			lines, _, _, err := websearch.FetchText(ctx, pageURL, maxFetchChars, r.cfg.UseReaderProxy, r.cfg.ProxyURLs)
+			lines, _, _, _, err := websearch.FetchText(ctx, pageURL, maxFetchChars, r.cfg.UseReaderProxy, r.cfg.ProxyURLs)
 			if err != nil {
 				return "", err
 			}

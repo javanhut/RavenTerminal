@@ -1,7 +1,9 @@
 package websearch
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,9 +14,45 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/net/html"
+	"golang.org/x/net/html/charset"
 )
+
+// ErrNoResults means both search endpoints returned pages we could not pull
+// results out of — usually a markup change, not a genuinely empty query.
+var ErrNoResults = errors.New("no results (page layout may have changed)")
+
+// StatusError reports a non-success HTTP status so callers can tell rate
+// limiting apart from other failures.
+type StatusError struct {
+	Code int
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("server returned %d", e.Code)
+}
+
+// ErrorReason condenses a search/fetch error into a short cause suitable for
+// a one-line status display.
+func ErrorReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	var statusErr *StatusError
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.As(err, &statusErr):
+		if statusErr.Code == http.StatusTooManyRequests {
+			return "rate limited (429)"
+		}
+		return fmt.Sprintf("HTTP %d", statusErr.Code)
+	}
+	return err.Error()
+}
 
 // ValidatePublicHTTPURL rejects targets that could expose services on the
 // local machine or private network. Ollama has its own explicitly configured
@@ -123,7 +161,7 @@ func doWithRetry(ctx context.Context, client *http.Client, req *http.Request) (*
 		// Retry on server errors (5xx) or rate limiting (429)
 		if resp.StatusCode >= 500 || resp.StatusCode == 429 {
 			resp.Body.Close()
-			lastErr = fmt.Errorf("server returned %d", resp.StatusCode)
+			lastErr = &StatusError{Code: resp.StatusCode}
 			continue
 		}
 
@@ -142,6 +180,153 @@ type Result struct {
 	Snippet string
 }
 
+// Link is a followable link extracted from a fetched page. Link i (0-based)
+// carries the inline "[i+1]" marker appended after its text in the extracted
+// lines. Occ disambiguates that marker from identical literal page text (e.g.
+// a Wikipedia citation "[3]"): it counts how many "[i+1]" occurrences appear
+// in the extracted text before the marker itself.
+type Link struct {
+	Text string
+	URL  string
+	Occ  int
+}
+
+// maxLinks caps how many links are extracted (and numbered) per page.
+const maxLinks = 99
+
+// resolveLink resolves an anchor href against the page URL, returning "" for
+// anything that is not a followable http(s) link (fragments, javascript:,
+// mailto:, malformed URLs).
+func resolveLink(base *url.URL, href string) string {
+	href = strings.TrimSpace(href)
+	if href == "" || strings.HasPrefix(href, "#") {
+		return ""
+	}
+	u, err := url.Parse(href)
+	if err != nil {
+		return ""
+	}
+	if base != nil {
+		u = base.ResolveReference(u)
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return ""
+	}
+	return u.String()
+}
+
+// DirectURL reports whether query looks like a URL rather than search terms
+// (explicit http(s) scheme, or a dotted host with no spaces whose last label
+// looks like a TLD) and returns it normalized with a scheme.
+func DirectURL(query string) (string, bool) {
+	q := strings.TrimSpace(query)
+	if q == "" || strings.ContainsAny(q, " \t") {
+		return "", false
+	}
+	if strings.HasPrefix(q, "http://") || strings.HasPrefix(q, "https://") {
+		if u, err := url.Parse(q); err == nil && u.Host != "" {
+			return q, true
+		}
+		return "", false
+	}
+	if !strings.Contains(q, ".") {
+		return "", false
+	}
+	u, err := url.Parse("https://" + q)
+	if err != nil || u.Host == "" || !strings.Contains(u.Host, ".") {
+		return "", false
+	}
+	// Schemeless matching is a heuristic: require a letters-only last label
+	// (a plausible TLD) or an IP literal so dotted search terms like "3.14"
+	// or "go1.22.1" stay searches.
+	if net.ParseIP(u.Hostname()) == nil && !plausibleTLD(u.Hostname()) {
+		return "", false
+	}
+	return "https://" + q, true
+}
+
+// plausibleTLD reports whether host's last dot label looks like a TLD
+// (letters only, at least two of them).
+func plausibleTLD(host string) bool {
+	last := host[strings.LastIndexByte(host, '.')+1:]
+	if len(last) < 2 {
+		return false
+	}
+	for _, r := range last {
+		if !unicode.IsLetter(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// parseMarkdownLinkLine rewrites markdown [text](url) links in one line to
+// "text[n]" markers, appending each followable target to links. Image links
+// ("![alt](src)") are reduced to their alt text without a marker. prior is
+// the already-emitted text of earlier lines, used to count "[n]" occurrences
+// so markers stay distinguishable from identical literal text.
+func parseMarkdownLinkLine(line string, base *url.URL, links *[]Link, prior string) string {
+	var sb strings.Builder
+	for i := 0; i < len(line); {
+		start := strings.Index(line[i:], "[")
+		if start < 0 {
+			sb.WriteString(line[i:])
+			break
+		}
+		start += i
+		mid := strings.Index(line[start:], "](")
+		if mid < 0 {
+			sb.WriteString(line[i:])
+			break
+		}
+		mid += start
+		end := strings.Index(line[mid+2:], ")")
+		if end < 0 {
+			sb.WriteString(line[i:])
+			break
+		}
+		end += mid + 2
+		text := line[start+1 : mid]
+		target := line[mid+2 : end]
+		// Drop a markdown title suffix: (url "title").
+		if sp := strings.IndexByte(target, ' '); sp >= 0 {
+			target = target[:sp]
+		}
+		isImage := start > 0 && line[start-1] == '!'
+		if isImage {
+			sb.WriteString(line[i : start-1])
+		} else {
+			sb.WriteString(line[i:start])
+		}
+		resolved := ""
+		if !isImage && len(*links) < maxLinks {
+			resolved = resolveLink(base, target)
+		}
+		sb.WriteString(text)
+		if resolved != "" {
+			marker := fmt.Sprintf("[%d]", len(*links)+1)
+			*links = append(*links, Link{Text: collapseSpace(text), URL: resolved,
+				Occ: strings.Count(prior, marker) + strings.Count(sb.String(), marker)})
+			sb.WriteString(marker)
+		}
+		i = end + 1
+	}
+	return sb.String()
+}
+
+// extractMarkdownLinks runs parseMarkdownLinkLine over reader-proxy lines.
+func extractMarkdownLinks(lines []string, base *url.URL) ([]string, []Link) {
+	var links []Link
+	var prior strings.Builder // emitted text so far, for marker occurrence counts
+	out := make([]string, len(lines))
+	for i, line := range lines {
+		out[i] = parseMarkdownLinkLine(line, base, &links, prior.String())
+		prior.WriteString(out[i])
+		prior.WriteByte('\n')
+	}
+	return out, links
+}
+
 func SearchDuckDuckGo(ctx context.Context, query string, maxResults int) ([]Result, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
@@ -151,7 +336,33 @@ func SearchDuckDuckGo(ctx context.Context, query string, maxResults int) ([]Resu
 		maxResults = 8
 	}
 
-	searchURL := "https://duckduckgo.com/html/?q=" + url.QueryEscape(query)
+	doc, err := fetchSearchPage(ctx, "https://duckduckgo.com/html/?q="+url.QueryEscape(query))
+	if err == nil {
+		if results := parseHTMLResults(doc, maxResults); len(results) > 0 {
+			return results, nil
+		}
+	}
+
+	// Fall back to the lite endpoint when the html one fails or its markup
+	// changed under us and parsed to nothing.
+	liteDoc, liteErr := fetchSearchPage(ctx, "https://lite.duckduckgo.com/lite/?q="+url.QueryEscape(query))
+	if liteErr == nil {
+		if results := parseLiteResults(liteDoc, maxResults); len(results) > 0 {
+			return results, nil
+		}
+	}
+
+	if err != nil {
+		return nil, err
+	}
+	if liteErr != nil {
+		return nil, liteErr
+	}
+	return nil, ErrNoResults
+}
+
+// fetchSearchPage fetches and parses one search endpoint page.
+func fetchSearchPage(ctx context.Context, searchURL string) (*html.Node, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
 	if err != nil {
 		return nil, err
@@ -167,14 +378,19 @@ func SearchDuckDuckGo(ctx context.Context, query string, maxResults int) ([]Resu
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("search failed: server returned %d", resp.StatusCode)
+		return nil, fmt.Errorf("search failed: %w", &StatusError{Code: resp.StatusCode})
 	}
 
 	doc, err := html.Parse(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("search parse failed: %w", err)
 	}
+	return doc, nil
+}
 
+// parseHTMLResults extracts results from the duckduckgo.com/html markup
+// (anchors classed result__a / result-link).
+func parseHTMLResults(doc *html.Node, maxResults int) []Result {
 	results := make([]Result, 0, maxResults)
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
@@ -204,17 +420,49 @@ func SearchDuckDuckGo(ctx context.Context, query string, maxResults int) ([]Resu
 		}
 	}
 	walk(doc)
-
-	return results, nil
+	return results
 }
 
-func FetchText(ctx context.Context, pageURL string, maxChars int, useReaderProxy bool, proxyURLs []string) ([]string, string, string, error) {
+// parseLiteResults extracts results from the lite.duckduckgo.com table
+// markup: result anchors carry class "result-link" and each is followed (in
+// document order) by a cell classed "result-snippet". Tolerant of wrapper
+// changes — it only keys off those class names.
+func parseLiteResults(doc *html.Node, maxResults int) []Result {
+	var results []Result
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode {
+			class := attr(n, "class")
+			if n.Data == "a" && strings.Contains(class, "result-link") {
+				title := collapseSpace(textContent(n))
+				href := normalizeURL(attr(n, "href"))
+				if title != "" && href != "" && len(results) < maxResults {
+					results = append(results, Result{Title: title, URL: href})
+				}
+				return
+			}
+			if strings.Contains(class, "result-snippet") {
+				if len(results) > 0 && results[len(results)-1].Snippet == "" {
+					results[len(results)-1].Snippet = collapseSpace(textContent(n))
+				}
+				return
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+	return results
+}
+
+func FetchText(ctx context.Context, pageURL string, maxChars int, useReaderProxy bool, proxyURLs []string) ([]string, []Link, string, string, error) {
 	pageURL = strings.TrimSpace(pageURL)
 	if pageURL == "" {
-		return nil, "html", "", errors.New("empty url")
+		return nil, nil, "html", "", errors.New("empty url")
 	}
 	if err := ValidatePublicHTTPURL(ctx, pageURL); err != nil {
-		return nil, "html", "", err
+		return nil, nil, "html", "", err
 	}
 	if maxChars <= 0 {
 		maxChars = 8000
@@ -224,9 +472,9 @@ func FetchText(ctx context.Context, pageURL string, maxChars int, useReaderProxy
 
 	// Try reader proxy first if enabled - it handles JS-rendered pages better
 	if useReaderProxy {
-		lines, err := fetchViaReaderProxy(ctx, pageURL, maxChars, proxyURLs)
+		lines, links, err := fetchViaReaderProxy(ctx, pageURL, maxChars, proxyURLs)
 		if err == nil && len(lines) > 0 && !isEmptyReaderLines(lines) {
-			return lines, "proxy", "", nil
+			return lines, links, "proxy", "", nil
 		}
 		if err != nil {
 			proxyErr = err.Error()
@@ -251,7 +499,7 @@ func FetchText(ctx context.Context, pageURL string, maxChars int, useReaderProxy
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
 	if err != nil {
-		return nil, "html", proxyErr, err
+		return nil, nil, "html", proxyErr, err
 	}
 	req.Header.Set("User-Agent", getRandomUserAgent())
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
@@ -264,69 +512,80 @@ func FetchText(ctx context.Context, pageURL string, maxChars int, useReaderProxy
 	if err != nil {
 		// If direct fetch fails and we haven't tried proxy yet, try it now
 		if !useReaderProxy {
-			lines, proxyErr2 := fetchViaReaderProxy(ctx, pageURL, maxChars, proxyURLs)
+			lines, links, proxyErr2 := fetchViaReaderProxy(ctx, pageURL, maxChars, proxyURLs)
 			if proxyErr2 == nil && len(lines) > 0 && !isEmptyReaderLines(lines) {
-				return lines, "proxy", "", nil
+				return lines, links, "proxy", "", nil
 			}
 		}
-		return nil, "html", proxyErr, fmt.Errorf("fetch failed: %w", err)
+		return nil, nil, "html", proxyErr, fmt.Errorf("fetch failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		// Try proxy as fallback on HTTP errors
 		if !useReaderProxy {
-			lines, _ := fetchViaReaderProxy(ctx, pageURL, maxChars, proxyURLs)
+			lines, links, _ := fetchViaReaderProxy(ctx, pageURL, maxChars, proxyURLs)
 			if len(lines) > 0 && !isEmptyReaderLines(lines) {
-				return lines, "proxy", "", nil
+				return lines, links, "proxy", "", nil
 			}
 		}
-		return nil, "html", proxyErr, fmt.Errorf("preview failed: server returned %d", resp.StatusCode)
+		return nil, nil, "html", proxyErr, fmt.Errorf("preview failed: %w", &StatusError{Code: resp.StatusCode})
 	}
 
 	limitReader := io.LimitReader(resp.Body, int64(maxChars*20))
 	contentType := resp.Header.Get("Content-Type")
+	// Decode non-UTF-8 pages (charset sniffs the Content-Type and the body).
+	reader, err := charset.NewReader(limitReader, contentType)
+	if err != nil {
+		reader = limitReader
+	}
 
 	// Handle plain text
 	if strings.Contains(contentType, "text/plain") {
-		body, err := io.ReadAll(limitReader)
+		body, err := io.ReadAll(reader)
 		if err != nil {
-			return nil, "html", proxyErr, err
+			return nil, nil, "html", proxyErr, err
 		}
-		return splitLines(trimText(string(body), maxChars)), "html", proxyErr, nil
+		return splitLines(trimText(string(body), maxChars)), nil, "html", proxyErr, nil
 	}
 
 	// Handle JSON (API responses)
 	if strings.Contains(contentType, "application/json") {
-		body, err := io.ReadAll(limitReader)
+		body, err := io.ReadAll(reader)
 		if err != nil {
-			return nil, "html", proxyErr, err
+			return nil, nil, "html", proxyErr, err
 		}
-		// Pretty format JSON for readability
+		// Pretty format JSON for readability; fall back to raw text if invalid
 		text := string(body)
-		text = strings.ReplaceAll(text, ",", ",\n")
-		text = strings.ReplaceAll(text, "{", "{\n")
-		text = strings.ReplaceAll(text, "}", "\n}")
-		return splitLines(trimText(text, maxChars)), "json", proxyErr, nil
+		var pretty bytes.Buffer
+		if err := json.Indent(&pretty, body, "", "  "); err == nil {
+			text = pretty.String()
+		}
+		return splitLines(trimText(text, maxChars)), nil, "json", proxyErr, nil
 	}
 
-	doc, err := html.Parse(limitReader)
+	doc, err := html.Parse(reader)
 	if err != nil {
-		return nil, "html", proxyErr, err
+		return nil, nil, "html", proxyErr, fmt.Errorf("preview parse failed: %w", err)
 	}
+
+	// Resolve relative anchor hrefs against the final (post-redirect) URL.
+	base := resp.Request.URL
 
 	// Try to find main content first (article, main tags)
-	text := extractMainContent(doc, maxChars)
+	var links []Link
+	text := extractMainContent(doc, maxChars, base, &links)
 	if strings.TrimSpace(text) == "" {
 		// Fall back to full text extraction
-		text = extractText(doc, maxChars)
+		links = nil
+		text = extractText(doc, maxChars, base, &links)
 	}
 
 	if strings.TrimSpace(text) == "" {
 		// Try proxy as last resort for JS-rendered pages
-		proxyLines, proxyErr2 := fetchViaReaderProxy(ctx, pageURL, maxChars, proxyURLs)
+		proxyLines, proxyLinks, proxyErr2 := fetchViaReaderProxy(ctx, pageURL, maxChars, proxyURLs)
 		if proxyErr2 == nil && len(proxyLines) > 0 && !isEmptyReaderLines(proxyLines) {
-			return proxyLines, "proxy", "", nil
+			return proxyLines, proxyLinks, "proxy", "", nil
 		}
 		if proxyErr2 != nil && proxyErr == "" {
 			proxyErr = proxyErr2.Error()
@@ -342,13 +601,13 @@ func FetchText(ctx context.Context, pageURL string, maxChars int, useReaderProxy
 		if desc != "" {
 			fallbackLines = append(fallbackLines, "Description: "+desc)
 		}
-		return fallbackLines, "html", proxyErr, nil
+		return fallbackLines, nil, "html", proxyErr, nil
 	}
-	return splitLines(text), "html", proxyErr, nil
+	return splitLines(text), links, "html", proxyErr, nil
 }
 
 // extractMainContent tries to find and extract content from main/article elements
-func extractMainContent(doc *html.Node, maxChars int) string {
+func extractMainContent(doc *html.Node, maxChars int, base *url.URL, links *[]Link) string {
 	// Look for article or main content areas
 	var mainNode *html.Node
 	var findMain func(*html.Node)
@@ -420,7 +679,26 @@ func extractMainContent(doc *html.Node, maxChars int) string {
 					sb.WriteString("`")
 					return
 				}
-			case "p", "div", "section", "li", "ul", "ol", "h1", "h2", "h3", "h4", "h5", "h6", "table", "tr", "blockquote":
+			// Followable links get an inline "[n]" marker after their text.
+			case "a":
+				if links != nil && len(*links) < maxLinks {
+					if target := resolveLink(base, attr(n, "href")); target != "" {
+						for c := n.FirstChild; c != nil; c = c.NextSibling {
+							walk(c, inPre, depth+1)
+						}
+						marker := fmt.Sprintf("[%d]", len(*links)+1)
+						*links = append(*links, Link{Text: collapseSpace(textContent(n)), URL: target, Occ: strings.Count(sb.String(), marker)})
+						sb.WriteString(marker + " ")
+						return
+					}
+				}
+			// Structure markers: the preview renderer highlights headings and
+			// bullets keyed off these prefixes.
+			case "h1", "h2", "h3", "h4", "h5", "h6":
+				sb.WriteString("\n## ")
+			case "li":
+				sb.WriteString("\n• ")
+			case "p", "div", "section", "ul", "ol", "table", "tr", "blockquote":
 				sb.WriteString("\n")
 			}
 		}
@@ -450,7 +728,7 @@ func extractMainContent(doc *html.Node, maxChars int) string {
 	return trimText(sb.String(), maxChars)
 }
 
-func extractText(doc *html.Node, maxChars int) string {
+func extractText(doc *html.Node, maxChars int, base *url.URL, links *[]Link) string {
 	var sb strings.Builder
 	var walk func(*html.Node, bool, int)
 	walk = func(n *html.Node, inPre bool, depth int) {
@@ -492,9 +770,28 @@ func extractText(doc *html.Node, maxChars int) string {
 					sb.WriteString("`")
 					return
 				}
+			// Followable links get an inline "[n]" marker after their text.
+			case "a":
+				if links != nil && len(*links) < maxLinks {
+					if target := resolveLink(base, attr(n, "href")); target != "" {
+						for c := n.FirstChild; c != nil; c = c.NextSibling {
+							walk(c, inPre, depth+1)
+						}
+						marker := fmt.Sprintf("[%d]", len(*links)+1)
+						*links = append(*links, Link{Text: collapseSpace(textContent(n)), URL: target, Occ: strings.Count(sb.String(), marker)})
+						sb.WriteString(marker + " ")
+						return
+					}
+				}
+			// Structure markers: the preview renderer highlights headings and
+			// bullets keyed off these prefixes.
+			case "h1", "h2", "h3", "h4", "h5", "h6":
+				sb.WriteString("\n## ")
+			case "li":
+				sb.WriteString("\n• ")
 			// Block elements get newlines
-			case "p", "div", "section", "article", "li", "ul", "ol",
-				"h1", "h2", "h3", "h4", "h5", "h6", "table", "tr", "blockquote":
+			case "p", "div", "section", "article", "ul", "ol",
+				"table", "tr", "blockquote":
 				sb.WriteString("\n")
 			}
 		}
@@ -552,7 +849,12 @@ func trimText(text string, maxChars int) string {
 	}
 	text = strings.Join(lines, "\n")
 	if len(text) > maxChars {
-		text = text[:maxChars] + "..."
+		cut := maxChars
+		// Never cut in the middle of a multi-byte rune.
+		for cut > 0 && !utf8.RuneStart(text[cut]) {
+			cut--
+		}
+		text = text[:cut] + "..."
 	}
 	return text
 }
@@ -655,8 +957,9 @@ func textContent(n *html.Node) string {
 	return sb.String()
 }
 
-func fetchViaReaderProxy(ctx context.Context, pageURL string, maxChars int, proxyURLs []string) ([]string, error) {
+func fetchViaReaderProxy(ctx context.Context, pageURL string, maxChars int, proxyURLs []string) ([]string, []Link, error) {
 	normalizedURL := normalizeReaderURL(pageURL)
+	linkBase, _ := url.Parse(normalizedURL)
 	proxies := proxyURLs
 	if len(proxies) == 0 {
 		// Default reader proxies - jina.ai is most reliable
@@ -703,15 +1006,18 @@ func fetchViaReaderProxy(ctx context.Context, pageURL string, maxChars int, prox
 		rawLines := splitLines(raw)
 		cleaned := cleanReaderLines(rawLines)
 		if len(cleaned) == 0 {
-			return rawLines, nil
+			cleaned = rawLines
 		}
-		return cleaned, nil
+		// Reader output is markdown: rewrite [text](url) links to text[n]
+		// markers and collect the targets.
+		lines, links := extractMarkdownLinks(cleaned, linkBase)
+		return lines, links, nil
 	}
 
 	if lastErr == nil {
 		lastErr = errors.New("reader proxy failed")
 	}
-	return nil, lastErr
+	return nil, nil, lastErr
 }
 
 func normalizeReaderURL(pageURL string) string {

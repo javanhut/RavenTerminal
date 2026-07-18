@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/javanhut/RavenTerminal/src/aipanel"
 	"github.com/javanhut/RavenTerminal/src/aitools"
@@ -111,9 +112,66 @@ type previewResponse struct {
 	url      string
 	title    string
 	lines    []string
+	links    []websearch.Link
 	source   string
 	proxyErr string
+	cacheKey string
 	err      error
+}
+
+const memoCacheMax = 24
+
+// memoCache memoizes up to memoCacheMax values, evicting the oldest
+// insertion. Main-thread only (key callbacks and channel drains both run on
+// the GLFW thread), so no locking.
+// ponytail: session-lifetime cache; Ctrl+R deletes the current entry so retry
+// hits the network, other entries live until restart — add a TTL if stale
+// data ever bites.
+type memoCache[V any] struct {
+	entries map[string]V
+	order   []string
+}
+
+func newMemoCache[V any]() *memoCache[V] {
+	return &memoCache[V]{entries: make(map[string]V)}
+}
+
+func (c *memoCache[V]) get(key string) (V, bool) {
+	v, ok := c.entries[key]
+	return v, ok
+}
+
+func (c *memoCache[V]) put(key string, v V) {
+	if _, ok := c.entries[key]; !ok {
+		if len(c.order) >= memoCacheMax {
+			delete(c.entries, c.order[0])
+			c.order = c.order[1:]
+		}
+		c.order = append(c.order, key)
+	}
+	c.entries[key] = v
+}
+
+// delete evicts an entry so the next get misses (Ctrl+R re-fetch).
+func (c *memoCache[V]) delete(key string) {
+	if _, ok := c.entries[key]; !ok {
+		return
+	}
+	delete(c.entries, key)
+	for i, k := range c.order {
+		if k == key {
+			c.order = append(c.order[:i], c.order[i+1:]...)
+			break
+		}
+	}
+}
+
+// cachedPreview is a previewCache entry: the fetched page plus which source
+// (proxy/direct) produced it, so the status line stays honest on hits.
+type cachedPreview struct {
+	lines  []string
+	links  []websearch.Link
+	source string
 }
 
 type aiResponse struct {
@@ -325,6 +383,8 @@ func main() {
 		toast.expiresAt = time.Now().Add(900 * time.Millisecond)
 	}
 	searchPanel := searchpanel.New()
+	searchPanel.LoadHistory(config.LoadSearchHistory())
+	bookmarks := config.LoadBookmarks()
 	aiPanel := aipanel.New()
 	searchResponses := make(chan searchResponse, 4)
 	previewResponses := make(chan previewResponse, 4)
@@ -332,7 +392,9 @@ func main() {
 	modelLoadResponses := make(chan modelLoadResponse, 2)
 	ollamaTestResponses := make(chan ollamaModelsResponse, 2)
 	ollamaModelsResponses := make(chan ollamaModelsResponse, 2)
-	const maxSearchResults = 8
+	// 20 (not 8): DDG pagination needs a per-query vqd token and ignores GET
+	// offsets, so one bigger first page replaces a load-more key.
+	const maxSearchResults = 20
 	const maxChatMessages = 6
 	settingsMenu := menu.NewMenu()
 	settingsMenu.OnConfigReload = func(cfg *config.Config) error {
@@ -421,15 +483,73 @@ func main() {
 		applyClipboardReadGate(settingsMenu.Config.AllowClipboardRead)
 	}
 
-	startSearch := func(query string) {
-		searchPanel.Mode = searchpanel.ModeResults
-		searchPanel.Status = "Searching..."
+	searchCache := newMemoCache[[]searchpanel.Result]()
+	previewCache := newMemoCache[cachedPreview]()
+
+	// Proxy and direct fetches return different text, so key on both.
+	previewCacheKey := func(useProxy bool, url string) string {
+		return fmt.Sprintf("%t|%s", useProxy, url)
+	}
+
+	// Fallback for heuristic direct-URL queries ("node.js" parses as a host
+	// but is really a search term): when the preview fetch for this PreviewID
+	// fails, the query is re-run as a normal search instead.
+	directFallbackQuery := ""
+	directFallbackID := 0
+
+	startPreview := func(result searchpanel.Result) {
+		searchPanel.NavPush(result.URL, result.Title)
+		searchPanel.Mode = searchpanel.ModePreview
+		searchPanel.PreviewTitle = result.Title
+		searchPanel.PreviewURL = result.URL
+		searchPanel.PreviewLines = nil
+		searchPanel.PreviewScroll = 0
+		searchPanel.PreviewID++
+		useReaderProxy := searchPanel.ProxyEnabled
+		cacheKey := previewCacheKey(useReaderProxy, result.URL)
+		if entry, ok := previewCache.get(cacheKey); ok {
+			searchPanel.SetPreview(result.URL, result.Title, entry.lines, entry.links, nil)
+			if entry.source == "proxy" {
+				searchPanel.Status = "Source: reader proxy (cached)"
+			} else {
+				searchPanel.Status = "Source: direct HTML (cached)"
+			}
+			return
+		}
+		searchPanel.Status = "Loading preview..."
 		searchPanel.StartLoading()
+		previewID := searchPanel.PreviewID
+		var proxyURLs []string
+		if settingsMenu.Config != nil {
+			proxyURLs = settingsMenu.Config.WebSearch.ReaderProxyURLs
+		}
+		go func(id int, url, title string, useProxy bool) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			lines, links, source, proxyErr, err := websearch.FetchText(ctx, url, 12000, useProxy, proxyURLs)
+			previewResponses <- previewResponse{id: id, url: url, title: title, lines: lines, links: links, source: source, proxyErr: proxyErr, cacheKey: cacheKey, err: err}
+		}(previewID, result.URL, result.Title, useReaderProxy)
+	}
+
+	// runSearch always performs a web search (no direct-URL sniffing); it is
+	// also the fallback when a heuristic direct-URL preview fails to load.
+	runSearch := func(query string) {
+		searchPanel.Mode = searchpanel.ModeResults
 		searchPanel.Results = nil
 		searchPanel.Selected = 0
 		searchPanel.ResultsScroll = 0
 		searchPanel.ResetHistory()
+		searchPanel.ResetNav()
 		searchPanel.SearchID++
+		if results, ok := searchCache.get(strings.TrimSpace(query)); ok {
+			searchPanel.SetResults(query, results, nil)
+			searchPanel.AddToHistory(query)
+			config.SaveSearchHistory(searchPanel.History)
+			searchPanel.Status = fmt.Sprintf("%d results (cached)", len(results))
+			return
+		}
+		searchPanel.Status = "Searching..."
+		searchPanel.StartLoading()
 		searchID := searchPanel.SearchID
 		go func(id int, q string) {
 			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
@@ -439,27 +559,21 @@ func main() {
 		}(searchID, query)
 	}
 
-	startPreview := func(result searchpanel.Result) {
-		searchPanel.Mode = searchpanel.ModePreview
-		searchPanel.Status = "Loading preview..."
-		searchPanel.StartLoading()
-		searchPanel.PreviewTitle = result.Title
-		searchPanel.PreviewURL = result.URL
-		searchPanel.PreviewLines = nil
-		searchPanel.PreviewScroll = 0
-		searchPanel.PreviewID++
-		previewID := searchPanel.PreviewID
-		useReaderProxy := searchPanel.ProxyEnabled
-		var proxyURLs []string
-		if settingsMenu.Config != nil {
-			proxyURLs = settingsMenu.Config.WebSearch.ReaderProxyURLs
+	startSearch := func(query string) {
+		// A query that looks like a URL skips the search and previews the
+		// page directly. Schemeless matches are only a heuristic ("node.js"
+		// is a search term, not a host), so remember the query and fall back
+		// to a real search if that preview fetch fails.
+		if u, ok := websearch.DirectURL(query); ok {
+			startPreview(searchpanel.Result{Title: u, URL: u})
+			q := strings.TrimSpace(query)
+			if !strings.HasPrefix(q, "http://") && !strings.HasPrefix(q, "https://") {
+				directFallbackQuery = query
+				directFallbackID = searchPanel.PreviewID
+			}
+			return
 		}
-		go func(id int, url, title string, useProxy bool) {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			lines, source, proxyErr, err := websearch.FetchText(ctx, url, 12000, useProxy, proxyURLs)
-			previewResponses <- previewResponse{id: id, url: url, title: title, lines: lines, source: source, proxyErr: proxyErr, err: err}
-		}(previewID, result.URL, result.Title, useReaderProxy)
+		runSearch(query)
 	}
 
 	startAIChat := func(prompt string) {
@@ -929,6 +1043,9 @@ func main() {
 					searchPanel.Status = "Reader proxy disabled"
 				}
 				if searchPanel.Mode == searchpanel.ModePreview && searchPanel.PreviewURL != "" {
+					// A deliberate source switch must re-fetch, not replay
+					// the cached copy for the new proxy state.
+					previewCache.delete(previewCacheKey(searchPanel.ProxyEnabled, searchPanel.PreviewURL))
 					startPreview(searchpanel.Result{
 						Title: searchPanel.PreviewTitle,
 						URL:   searchPanel.PreviewURL,
@@ -938,7 +1055,59 @@ func main() {
 			}
 
 			if mods&glfw.ModControl != 0 && key == glfw.KeyU {
+				// While editing the find query, Ctrl+U clears it, not the
+				// search query (mirrors the find-aware Backspace).
+				if searchPanel.FindEditing {
+					searchPanel.FindClear()
+					return
+				}
 				searchPanel.ClearQuery()
+				return
+			}
+
+			// Ctrl+R: re-run the last search / re-fetch the current preview.
+			// Retry must hit the network, so evict the cached copy first.
+			if mods&glfw.ModControl != 0 && key == glfw.KeyR {
+				if searchPanel.Mode == searchpanel.ModePreview && searchPanel.PreviewURL != "" {
+					previewCache.delete(previewCacheKey(searchPanel.ProxyEnabled, searchPanel.PreviewURL))
+					startPreview(searchpanel.Result{
+						Title: searchPanel.PreviewTitle,
+						URL:   searchPanel.PreviewURL,
+					})
+					return
+				}
+				q := searchPanel.Query
+				if strings.TrimSpace(q) == "" {
+					q = searchPanel.LastQuery
+				}
+				if strings.TrimSpace(q) != "" {
+					searchCache.delete(strings.TrimSpace(q))
+					startSearch(q)
+				}
+				return
+			}
+
+			// Ctrl+Left / Ctrl+Right: back/forward through previewed pages.
+			// (Backspace is not used for back: in preview it still edits the
+			// search query, which is existing behavior.)
+			if mods&glfw.ModControl != 0 && key == glfw.KeyLeft && searchPanel.Mode == searchpanel.ModePreview {
+				if entry, ok := searchPanel.NavBack(); ok {
+					searchPanel.PendingScroll = entry.Scroll
+					startPreview(searchpanel.Result{Title: entry.Title, URL: entry.URL})
+				} else {
+					// Back past the first page returns to the results list,
+					// mirroring Esc.
+					searchPanel.ExitFind()
+					searchPanel.Mode = searchpanel.ModeResults
+					searchPanel.PreviewScroll = 0
+				}
+				return
+			}
+			if mods&glfw.ModControl != 0 && key == glfw.KeyRight && searchPanel.Mode == searchpanel.ModePreview {
+				if entry, ok := searchPanel.NavForward(); ok {
+					searchPanel.PendingScroll = entry.Scroll
+					startPreview(searchpanel.Result{Title: entry.Title, URL: entry.URL})
+				}
 				return
 			}
 
@@ -960,9 +1129,104 @@ func main() {
 				return
 			}
 
+			// Ctrl+Y: copy the previewed / selected result URL to the clipboard
+			if mods&glfw.ModControl != 0 && key == glfw.KeyY {
+				urlToCopy := searchPanel.GetSelectedURL()
+				if searchPanel.Mode == searchpanel.ModePreview {
+					urlToCopy = searchPanel.PreviewURL
+				}
+				if urlToCopy != "" {
+					glfw.SetClipboardString(urlToCopy)
+					showToast("URL copied")
+				}
+				return
+			}
+
+			// Ctrl+I: insert the preview mouse selection into the shell
+			if mods&glfw.ModControl != 0 && key == glfw.KeyI && searchPanel.Mode == searchpanel.ModePreview {
+				if text := searchPanel.SelectedPreviewText(); strings.TrimSpace(text) != "" {
+					writePaste(activeTab.Terminal, activeTab, text)
+					showToast("Inserted into shell")
+				}
+				return
+			}
+
+			// Ctrl+A: send the previewed page (or the mouse selection) to the
+			// AI panel for a summary.
+			if mods&glfw.ModControl != 0 && key == glfw.KeyA && searchPanel.Mode == searchpanel.ModePreview {
+				if !aiPanel.Enabled {
+					showToast("Enable Ollama chat in settings")
+					return
+				}
+				if aiPanel.Loading {
+					return
+				}
+				text := strings.Join(searchPanel.PreviewLines, "\n")
+				if sel := searchPanel.SelectedPreviewText(); strings.TrimSpace(sel) != "" {
+					text = sel
+				}
+				// Cap like the fetch_page tool does, cutting on a rune boundary.
+				const maxAIPageChars = 8000
+				if len(text) > maxAIPageChars {
+					cut := maxAIPageChars
+					for cut > 0 && !utf8.RuneStart(text[cut]) {
+						cut--
+					}
+					text = text[:cut]
+				}
+				if strings.TrimSpace(text) == "" {
+					return
+				}
+				// Swap panels like Leader+A does, then reuse the normal chat path.
+				searchPanel.Open = false
+				aiPanel.Open = true
+				aiPanel.Focused = true
+				showHelp = false
+				renderer.ResetHelpScroll()
+				startAIChat(fmt.Sprintf("Here is the text of %s (%s):\n\n%s\n\nSummarize the key points.",
+					searchPanel.PreviewURL, searchPanel.PreviewTitle, text))
+				return
+			}
+
+			// Ctrl+B: bookmark the previewed page; in results mode, toggle
+			// showing the bookmark list as the results.
+			if mods&glfw.ModControl != 0 && key == glfw.KeyB {
+				if searchPanel.Mode == searchpanel.ModePreview {
+					if searchPanel.PreviewURL != "" {
+						bookmarks = config.AddBookmark(bookmarks, config.Bookmark{
+							Title: searchPanel.PreviewTitle,
+							URL:   searchPanel.PreviewURL,
+						})
+						config.SaveBookmarks(bookmarks)
+						showToast("Bookmarked")
+					}
+					return
+				}
+				if searchPanel.ShowingBookmarks {
+					searchPanel.HideBookmarks()
+					return
+				}
+				results := make([]searchpanel.Result, len(bookmarks))
+				for i, b := range bookmarks {
+					results[i] = searchpanel.Result{Title: b.Title, URL: b.URL}
+				}
+				searchPanel.ShowBookmarks(results)
+				return
+			}
+
 			switch key {
 			case glfw.KeyEscape:
 				if searchPanel.Mode == searchpanel.ModePreview {
+					// Esc peels one layer at a time: find mode, then a
+					// persisted mouse selection, then the preview itself.
+					if searchPanel.FindActive {
+						searchPanel.ExitFind()
+						return
+					}
+					if searchPanel.SelectionActive {
+						searchPanel.SelectionActive = false
+						return
+					}
 					searchPanel.Mode = searchpanel.ModeResults
 					searchPanel.PreviewScroll = 0
 				} else {
@@ -971,8 +1235,30 @@ func main() {
 				return
 			case glfw.KeyEnter, glfw.KeyKPEnter:
 				if searchPanel.Mode == searchpanel.ModePreview {
+					if searchPanel.FindEditing {
+						searchPanel.ConfirmFind(previewVisible)
+						return
+					}
+					// Follow the selected link (Tab cycles) instead of
+					// leaving the preview.
+					if link, ok := searchPanel.SelectedLinkTarget(); ok {
+						title := link.Text
+						if title == "" {
+							title = link.URL
+						}
+						startPreview(searchpanel.Result{Title: title, URL: link.URL})
+						return
+					}
+					searchPanel.ExitFind()
 					searchPanel.Mode = searchpanel.ModeResults
 					searchPanel.PreviewScroll = 0
+					return
+				}
+				if searchPanel.ShowingBookmarks {
+					// Enter previews the selected bookmark.
+					if searchPanel.Selected >= 0 && searchPanel.Selected < len(searchPanel.Results) {
+						startPreview(searchPanel.Results[searchPanel.Selected])
+					}
 					return
 				}
 				if strings.TrimSpace(searchPanel.Query) == "" {
@@ -989,7 +1275,7 @@ func main() {
 			case glfw.KeyUp:
 				if searchPanel.Mode == searchpanel.ModePreview {
 					searchPanel.ScrollPreview(-1, previewVisible)
-				} else if searchPanel.QueryDirty || len(searchPanel.Results) == 0 {
+				} else if !searchPanel.ShowingBookmarks && (searchPanel.QueryDirty || len(searchPanel.Results) == 0) {
 					// Navigate history when editing query
 					searchPanel.HistoryUp()
 				} else {
@@ -999,7 +1285,7 @@ func main() {
 			case glfw.KeyDown:
 				if searchPanel.Mode == searchpanel.ModePreview {
 					searchPanel.ScrollPreview(1, previewVisible)
-				} else if searchPanel.HistoryIndex >= 0 {
+				} else if !searchPanel.ShowingBookmarks && searchPanel.HistoryIndex >= 0 {
 					// Navigate history back to current
 					searchPanel.HistoryDown()
 				} else {
@@ -1038,6 +1324,7 @@ func main() {
 				return
 			case glfw.KeyLeft:
 				if searchPanel.Mode == searchpanel.ModePreview {
+					searchPanel.ExitFind()
 					searchPanel.Mode = searchpanel.ModeResults
 					searchPanel.PreviewScroll = 0
 				}
@@ -1047,7 +1334,22 @@ func main() {
 					startPreview(searchPanel.Results[searchPanel.Selected])
 				}
 				return
+			case glfw.KeyTab:
+				// Tab / Shift+Tab cycle the extracted page links in preview.
+				// Ctrl/Super chords (tab and pane cycling) stay untouched.
+				if searchPanel.Mode == searchpanel.ModePreview && mods&(glfw.ModControl|glfw.ModSuper) == 0 {
+					delta := 1
+					if mods&glfw.ModShift != 0 {
+						delta = -1
+					}
+					searchPanel.CycleLink(delta, previewVisible)
+				}
+				return
 			case glfw.KeyBackspace:
+				if searchPanel.FindEditing {
+					searchPanel.FindBackspace()
+					return
+				}
 				searchPanel.Backspace()
 				return
 			}
@@ -1287,6 +1589,28 @@ func main() {
 		}
 
 		if searchPanel.Open && searchPanel.Focused {
+			// In preview mode "/" starts in-page find; while find is active,
+			// runes edit the find query (or n/N step matches) instead of the
+			// search query.
+			if searchPanel.Mode == searchpanel.ModePreview {
+				width, height := win.GetFramebufferSize()
+				cellW, cellH := renderer.CellDimensions()
+				layout := searchPanel.Layout(width, height, cellW, cellH)
+				previewVisible := max(layout.VisibleLines-1, 1)
+				switch {
+				case searchPanel.FindEditing:
+					searchPanel.AppendFind(char)
+				case char == '/':
+					searchPanel.StartFind()
+				case searchPanel.FindActive && char == 'n':
+					searchPanel.FindStep(1, previewVisible)
+				case searchPanel.FindActive && char == 'N':
+					searchPanel.FindStep(-1, previewVisible)
+				default:
+					searchPanel.AppendQuery(char)
+				}
+				return
+			}
 			searchPanel.AppendQuery(char)
 			return
 		}
@@ -1529,6 +1853,7 @@ func main() {
 								// Start text selection in preview
 								lineIdx := int((fy-layout.ResultsStart-layout.LineHeight)/layout.LineHeight) + searchPanel.PreviewScroll
 								searchPanel.SelectionActive = true
+								searchPanel.SelectionDragging = true
 								searchPanel.SelectionStart = lineIdx
 								searchPanel.SelectionEnd = lineIdx
 							} else if len(searchPanel.Results) > 0 {
@@ -1545,6 +1870,7 @@ func main() {
 					}
 					// Click is outside search panel
 					searchPanel.Focused = false
+					searchPanel.SelectionActive = false
 				}
 				// Tab bar: click a chip to switch tabs, or the "+" to open a new one.
 				if idx, newTab, hit := renderer.HitTestTabBar(tabManager, x, y); hit {
@@ -1658,8 +1984,10 @@ func main() {
 					aiPanel.SelectionActive = false
 					return
 				}
-				// Handle search panel preview text selection release
-				if searchPanel.SelectionActive {
+				// Handle search panel preview text selection release. A drag
+				// selection stays active (highlighted) so Ctrl+A / Ctrl+I can
+				// act on it; only the drag tracking stops.
+				if searchPanel.SelectionDragging {
 					cellW, cellH := renderer.CellDimensions()
 					layout := searchPanel.Layout(width, height, cellW, cellH)
 					fy := float32(y) * renderer.ContentScale()
@@ -1669,26 +1997,18 @@ func main() {
 					if fy > layout.ResultsEnd {
 						fy = layout.ResultsEnd
 					}
-					endLine := int((fy-layout.ResultsStart-layout.LineHeight)/layout.LineHeight) + searchPanel.PreviewScroll
-					startLine := searchPanel.SelectionStart
-					if endLine < startLine {
-						startLine, endLine = endLine, startLine
+					searchPanel.SelectionEnd = int((fy-layout.ResultsStart-layout.LineHeight)/layout.LineHeight) + searchPanel.PreviewScroll
+					searchPanel.SelectionDragging = false
+					// A click with no drag is just focus/positioning: keep no
+					// selection and leave the clipboard alone.
+					if searchPanel.SelectionStart == searchPanel.SelectionEnd {
+						searchPanel.SelectionActive = false
+						return
 					}
-					var selectedText strings.Builder
-					for i := startLine; i <= endLine && i < len(searchPanel.PreviewWrapped); i++ {
-						if i < 0 {
-							continue
-						}
-						if i > startLine {
-							selectedText.WriteString("\n")
-						}
-						selectedText.WriteString(searchPanel.PreviewWrapped[i])
-					}
-					if text := selectedText.String(); strings.TrimSpace(text) != "" {
+					if text := searchPanel.SelectedPreviewText(); strings.TrimSpace(text) != "" {
 						glfw.SetClipboardString(text)
 						showToast("Copied to clipboard")
 					}
-					searchPanel.SelectionActive = false
 					return
 				}
 				if !selection.active || selection.pane == nil {
@@ -1805,7 +2125,7 @@ func main() {
 		}
 
 		// Track search panel preview text selection during drag
-		if searchPanel.SelectionActive && searchPanel.Open {
+		if searchPanel.SelectionDragging && searchPanel.Open {
 			width, height := win.GetFramebufferSize()
 			cellW, cellH := renderer.CellDimensions()
 			layout := searchPanel.Layout(width, height, cellW, cellH)
@@ -1968,8 +2288,12 @@ func main() {
 				}
 				searchPanel.SetResults(resp.query, results, resp.err)
 				if resp.err == nil {
+					if len(results) > 0 {
+						searchCache.put(strings.TrimSpace(resp.query), results)
+					}
 					// Add successful query to history
 					searchPanel.AddToHistory(resp.query)
+					config.SaveSearchHistory(searchPanel.History)
 					if len(results) == 0 {
 						searchPanel.Status = "No results"
 					} else {
@@ -1988,8 +2312,17 @@ func main() {
 				if resp.id != searchPanel.PreviewID {
 					break
 				}
-				searchPanel.SetPreview(resp.url, resp.title, resp.lines, resp.err)
+				if resp.err != nil && resp.id == directFallbackID && directFallbackQuery != "" {
+					// The dotted query wasn't a real host after all: run the
+					// search it was mistaken for.
+					q := directFallbackQuery
+					directFallbackQuery = ""
+					runSearch(q)
+					break
+				}
+				searchPanel.SetPreview(resp.url, resp.title, resp.lines, resp.links, resp.err)
 				if resp.err == nil {
+					previewCache.put(resp.cacheKey, cachedPreview{lines: resp.lines, links: resp.links, source: resp.source})
 					if resp.source == "proxy" {
 						searchPanel.Status = "Source: reader proxy"
 					} else {

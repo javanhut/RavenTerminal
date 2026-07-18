@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -373,6 +374,99 @@ func GetConfigPath() string {
 // GetScriptsDir returns the path to the scripts directory
 func GetScriptsDir() string {
 	return filepath.Join(GetConfigDir(), "scripts")
+}
+
+// GetSearchHistoryPath returns the path to the persisted search history file
+func GetSearchHistoryPath() string {
+	return filepath.Join(GetConfigDir(), "search_history.json")
+}
+
+// LoadSearchHistory loads persisted search queries (newest first). A missing
+// or unreadable file just means no history.
+func LoadSearchHistory() []string {
+	data, err := os.ReadFile(GetSearchHistoryPath())
+	if err != nil {
+		return nil
+	}
+	var history []string
+	if err := json.Unmarshal(data, &history); err != nil {
+		return nil
+	}
+	return history
+}
+
+// SaveSearchHistory persists search queries best-effort; errors are ignored
+// because losing history is harmless.
+func SaveSearchHistory(history []string) {
+	data, err := json.MarshalIndent(history, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = writeFileAtomic(GetSearchHistoryPath(), data)
+}
+
+// writeFileAtomic writes via a temp file in the same directory plus rename so
+// a crash mid-write never leaves a truncated file behind — a truncated
+// bookmarks/history file would load as empty and be overwritten on the next
+// save, silently losing everything.
+func writeFileAtomic(path string, data []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// Bookmark is a saved page from the search panel preview.
+type Bookmark struct {
+	Title string `json:"title"`
+	URL   string `json:"url"`
+}
+
+const maxBookmarks = 100
+
+// GetBookmarksPath returns the path to the persisted bookmarks file
+func GetBookmarksPath() string {
+	return filepath.Join(GetConfigDir(), "bookmarks.json")
+}
+
+// LoadBookmarks loads persisted bookmarks (newest first). A missing or
+// unreadable file just means no bookmarks.
+func LoadBookmarks() []Bookmark {
+	data, err := os.ReadFile(GetBookmarksPath())
+	if err != nil {
+		return nil
+	}
+	var bookmarks []Bookmark
+	if err := json.Unmarshal(data, &bookmarks); err != nil {
+		return nil
+	}
+	return bookmarks
+}
+
+// SaveBookmarks persists bookmarks best-effort; errors are ignored because
+// losing bookmarks is harmless.
+func SaveBookmarks(bookmarks []Bookmark) {
+	data, err := json.MarshalIndent(bookmarks, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = writeFileAtomic(GetBookmarksPath(), data)
+}
+
+// AddBookmark prepends b, deduping by URL and trimming to the max size.
+func AddBookmark(bookmarks []Bookmark, b Bookmark) []Bookmark {
+	for i, existing := range bookmarks {
+		if existing.URL == b.URL {
+			bookmarks = append(bookmarks[:i], bookmarks[i+1:]...)
+			break
+		}
+	}
+	bookmarks = append([]Bookmark{b}, bookmarks...)
+	if len(bookmarks) > maxBookmarks {
+		bookmarks = bookmarks[:maxBookmarks]
+	}
+	return bookmarks
 }
 
 // Load loads the configuration from disk

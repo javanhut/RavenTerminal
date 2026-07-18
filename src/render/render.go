@@ -735,7 +735,14 @@ func (r *Renderer) renderSearchPanel(panel *searchpanel.Panel, width, height int
 
 	status := panel.Status
 	statusColor := r.theme.Cursor
-	if panel.Loading {
+	if panel.Mode == searchpanel.ModePreview && panel.FindActive {
+		matches := panel.FindMatchLines()
+		cur := 0
+		if panel.FindMatch >= 0 && panel.FindMatch < len(matches) {
+			cur = panel.FindMatch + 1
+		}
+		status = fmt.Sprintf("find: %s (%d/%d)", panel.FindQuery, cur, len(matches))
+	} else if panel.Loading {
 		if status == "" {
 			status = "Loading..."
 		}
@@ -770,12 +777,40 @@ func (r *Renderer) renderSearchPanel(panel *searchpanel.Panel, width, height int
 	case !panel.Focused:
 		footerText = fitToCells(maxChars, panelFocusChord()+": focus panel", "Focus: "+panelFocusChord())
 	case panel.Mode == searchpanel.ModePreview:
+		// Position indicator: first visible wrapped line / total, plus scroll
+		// percentage. PreviewScroll is clamped here for display only.
+		pos := ""
+		if total := len(panel.PreviewWrapped); total > 0 {
+			vis := max(layout.VisibleLines-1, 1)
+			first := min(panel.PreviewScroll, max(total-vis, 0))
+			pct := 100
+			if maxScroll := total - vis; maxScroll > 0 {
+				pct = first * 100 / maxScroll
+			}
+			pos = fmt.Sprintf("L%d/%d %d%% | ", first+1, total, pct)
+		}
+		if n := len(panel.Links); n > 0 {
+			pos += fmt.Sprintf("[%d/%d links] ", panel.SelectedLink+1, n)
+		}
 		footerText = fitToCells(maxChars,
-			"Esc: back | Up/Down: scroll | Ctrl+O: browser",
-			"Esc: back | Up/Down: scroll",
+			pos+"Tab: links | /: find | Ctrl+A: to AI | Ctrl+B: bookmark | Ctrl+Y: URL | Esc: back",
+			pos+"Tab: links | Enter: follow | Ctrl+Left/Right: back/fwd | /: find | Esc: back",
+			pos+"Tab: links | /: find | n/N: next/prev | Esc: back | Ctrl+O: browser",
+			pos+"/: find | Esc: back | Up/Down: scroll | Ctrl+O: browser",
+			pos+"Esc: back | Up/Down: scroll",
+			pos+"Esc: back",
 			"Esc: back")
+	case panel.ShowingBookmarks:
+		// Bookmark view: Enter previews and Ctrl+B returns to the results,
+		// regardless of QueryDirty (main.go checks ShowingBookmarks first).
+		footerText = fitToCells(maxChars,
+			"Enter: preview | Ctrl+B: back to results | Esc: close",
+			"Enter: preview | Ctrl+B: back to results",
+			"Enter: preview | Ctrl+B: back")
 	case len(panel.Results) > 0 && !panel.QueryDirty:
 		footerText = fitToCells(maxChars,
+			fmt.Sprintf("%d/%d | Enter: preview | Ctrl+B: bookmarks | Ctrl+Y: URL | Ctrl+O: browser", panel.Selected+1, len(panel.Results)),
+			fmt.Sprintf("%d/%d | Enter: preview | Ctrl+R: retry | Ctrl+O: browser", panel.Selected+1, len(panel.Results)),
 			fmt.Sprintf("%d/%d | Enter: preview | Ctrl+O: browser", panel.Selected+1, len(panel.Results)),
 			fmt.Sprintf("%d/%d | Enter: preview", panel.Selected+1, len(panel.Results)),
 			"Enter: preview")
@@ -1093,6 +1128,21 @@ func (r *Renderer) renderSearchPreview(panel *searchpanel.Panel, layout searchpa
 		selStart, selEnd = selEnd, selStart
 	}
 
+	findNeedle := ""
+	if panel.FindActive {
+		findNeedle = strings.ToLower(strings.TrimSpace(panel.FindQuery))
+	}
+
+	// Resolve the selected link's marker to its exact line and offset so a
+	// literal "[n]" elsewhere on the page (Wikipedia citations) is not
+	// highlighted by mistake.
+	linkMarker := ""
+	markerLine, markerCol := -1, -1
+	if panel.SelectedLink >= 0 && panel.SelectedLink < len(panel.Links) {
+		linkMarker = fmt.Sprintf("[%d]", panel.SelectedLink+1)
+		markerLine, markerCol = panel.SelectedLinkMarkerPos()
+	}
+
 	lineY := layout.ResultsStart + layout.LineHeight
 	for i := 0; i < visibleLines && startLine+i < len(wrappedLines); i++ {
 		lineIdx := startLine + i
@@ -1104,7 +1154,34 @@ func (r *Renderer) renderSearchPreview(panel *searchpanel.Panel, layout searchpa
 			r.drawRect(layout.ContentX, lineY-layout.LineHeight*0.75, layout.ContentWidth, layout.LineHeight, selColor, proj)
 		}
 
-		r.drawText(layout.ContentX, lineY, line.text, line.color, proj)
+		// Highlight in-page find matches (same rect pattern as the selection).
+		if findNeedle != "" {
+			lower := strings.ToLower(line.text)
+			hlColor := withAlpha(r.theme.Cursor, 0.35)
+			for from := 0; ; {
+				idx := strings.Index(lower[from:], findNeedle)
+				if idx < 0 {
+					break
+				}
+				matchStart := from + idx
+				matchEnd := matchStart + len(findNeedle)
+				x := layout.ContentX + float32(textCells(lower[:matchStart]))*r.cellWidth
+				w := float32(textCells(lower[matchStart:matchEnd])) * r.cellWidth
+				r.drawRect(x, lineY-layout.LineHeight*0.75, w, layout.LineHeight, hlColor, proj)
+				from = matchEnd
+			}
+		}
+
+		// Highlight the selected link's "[n]" marker (selection color, a bit
+		// stronger than the mouse selection so it reads as a cursor).
+		if linkMarker != "" && lineIdx == markerLine && markerCol >= 0 {
+			selColor := [4]float32{r.theme.Selection[0], r.theme.Selection[1], r.theme.Selection[2], 0.55}
+			x := layout.ContentX + float32(textCells(line.text[:markerCol]))*r.cellWidth
+			w := float32(textCells(linkMarker)) * r.cellWidth
+			r.drawRect(x, lineY-layout.LineHeight*0.75, w, layout.LineHeight, selColor, proj)
+		}
+
+		r.drawTextStyled(layout.ContentX, lineY, line.text, line.color, line.bold, proj)
 		lineY += layout.LineHeight
 	}
 
@@ -1116,6 +1193,7 @@ func (r *Renderer) renderSearchPreview(panel *searchpanel.Panel, layout searchpa
 type styledLine struct {
 	text  string
 	color [4]float32
+	bold  bool
 }
 
 func buildWrappedPreview(lines []string, maxChars int, theme Theme) []styledLine {
@@ -1123,16 +1201,16 @@ func buildWrappedPreview(lines []string, maxChars int, theme Theme) []styledLine
 	inCode := false
 
 	codeColor := [4]float32{0.7, 0.8, 0.6, 1.0}   // Greenish for code
-	headerColor := [4]float32{0.9, 0.7, 0.4, 1.0} // Orange/gold for headers
 	bulletColor := [4]float32{0.7, 0.7, 0.9, 1.0} // Light blue for bullets
 	quoteColor := [4]float32{0.6, 0.7, 0.6, 1.0}  // Muted green for quotes
 
 	for _, raw := range lines {
 		trimmed := strings.TrimSpace(raw)
 
-		// Toggle code block state
+		// Toggle code block state; keep the fence line, dimmed.
 		if strings.HasPrefix(trimmed, "```") {
 			inCode = !inCode
+			out = append(out, styledLine{text: truncateToCells(trimmed, maxChars), color: panelDimText})
 			continue
 		}
 
@@ -1176,15 +1254,19 @@ func buildWrappedPreview(lines []string, maxChars int, theme Theme) []styledLine
 			text = stripInlineMarkdown(text)
 			wrapped := wrapText(text, maxChars, prefix, "   ")
 			for _, line := range wrapped {
-				out = append(out, styledLine{text: line, color: headerColor})
+				out = append(out, styledLine{text: line, color: theme.TabActive, bold: true})
 			}
 			continue
 		}
 
-		// Handle bullet points
-		if strings.HasPrefix(text, "- ") || strings.HasPrefix(text, "* ") || strings.HasPrefix(text, "+ ") {
+		// Handle bullet points ("• " comes pre-marked from the extractors)
+		if strings.HasPrefix(text, "- ") || strings.HasPrefix(text, "* ") || strings.HasPrefix(text, "+ ") || strings.HasPrefix(text, "• ") {
 			prefix = "• "
-			text = strings.TrimSpace(text[2:])
+			if after, ok := strings.CutPrefix(text, "• "); ok {
+				text = strings.TrimSpace(after)
+			} else {
+				text = strings.TrimSpace(text[2:])
+			}
 			indent = "  "
 			text = stripInlineMarkdown(text)
 			wrapped := wrapText(text, maxChars, prefix, indent)
@@ -3107,6 +3189,12 @@ func (r *Renderer) drawCharStyled(x, y float32, char rune, clr [4]float32, proj 
 
 // drawText draws a string of text
 func (r *Renderer) drawText(x, y float32, text string, clr [4]float32, proj [16]float32) {
+	r.drawTextStyled(x, y, text, clr, false, proj)
+}
+
+// drawTextStyled draws a string with optional faux-bold, advancing per rune
+// width exactly like drawText.
+func (r *Renderer) drawTextStyled(x, y float32, text string, clr [4]float32, bold bool, proj [16]float32) {
 	for _, char := range text {
 		w := grid.RuneWidth(char)
 		if w == 0 {
@@ -3114,7 +3202,7 @@ func (r *Renderer) drawText(x, y float32, text string, clr [4]float32, proj [16]
 			// in panel text; skip rather than draw the '?' fallback glyph.
 			continue
 		}
-		r.drawChar(x, y, char, clr, proj)
+		r.drawCharStyled(x, y, char, clr, proj, bold, false)
 		x += r.cellWidth * float32(w)
 	}
 }

@@ -80,6 +80,58 @@ Scrolling is reset to the bottom when any input is typed.
 | Right-click | Copy selection if one exists, otherwise paste clipboard |
 | Ctrl+Right-click | Open the URL under the pointer |
 
+## Web Search Panel
+
+While the search panel (Leader+F) is open and focused (typed characters go to
+the query field):
+
+| Keybinding | Action |
+|------------|--------|
+| Enter | Run search (or open preview of the selected result; in preview, follow the selected link) |
+| Up / Down | Move selection, browse query history, or scroll preview |
+| Left / Right | Back to results / open preview |
+| Tab / Shift+Tab | (Preview) Cycle through the page's numbered `[n]` links; Enter follows |
+| Ctrl+Left / Ctrl+Right | (Preview) Go back / forward through visited pages (restores scroll position) |
+| Ctrl+R | Retry: re-run the last search, or re-fetch the current preview (evicts the cached copy, so it always hits the network) |
+| Ctrl+Shift+R | Toggle reader proxy (reloads the preview) |
+| Ctrl+O | Open the selected result / previewed page in the browser |
+| Ctrl+Y | Copy the previewed page's / selected result's URL to the clipboard |
+| Ctrl+A | (Preview) Send the page text — or the mouse selection, if one is active — to the AI panel for a summary |
+| Ctrl+I | (Preview, mouse selection active) Insert the selected text into the shell |
+| Ctrl+B | (Preview) Bookmark the current page; (Results) toggle showing bookmarks as the results list |
+| Ctrl+U | Clear the query (while editing a find term, clears the find term instead) |
+| / | (Preview) Start in-page find: type the term, Enter jumps to the first match |
+| n / N | (Preview, after Enter confirms a find) Jump to next / previous match |
+| Escape | Exit find, clear a mouse selection, back to results, then close the panel |
+
+Note: while the search panel is focused, Ctrl+R retries the search instead of
+toggling pane resize mode. Results and previewed pages are cached for the
+session, so revisiting them is instant; Ctrl+R evicts the cached copy and
+re-fetches. In preview mode, matches of the find term are highlighted and the
+status line shows `find: <term> (current/total)`; the footer shows the scroll
+position as `L<line>/<total> <percent>%`. Search history persists across
+sessions (last 100 queries, stored in
+`~/.config/raven-terminal/search_history.json`).
+
+Links extracted from a previewed page are marked inline as `[n]`; the footer
+shows `[selected/total links]`. Tab selects the next link (highlighting its
+marker and scrolling it into view), Enter opens it, and Ctrl+Left / Ctrl+Right
+walk the back/forward history — going back past the first page returns to the
+results list. Typing a URL as the query (explicit `http(s)://`, or a dotted
+host with no spaces and a plausible TLD, e.g. `go.dev/dl`) skips the search
+and previews that page directly; if a schemeless guess fails to load (e.g.
+`node.js`), the query falls back to a normal search.
+
+A mouse drag selection in the preview is copied to the clipboard on release
+and stays highlighted, so Ctrl+A (send to AI) and Ctrl+I (insert into shell)
+can act on it; a plain click only focuses the panel and never selects. Esc, a
+new click, page load, or click outside the panel clears the selection.
+Bookmarks are `{title, url}` pairs persisted to
+`~/.config/raven-terminal/bookmarks.json` (deduped by URL, newest first, last
+100). In the bookmark list (status shows `Bookmarks`), Enter previews the
+selected bookmark; Ctrl+B again, typing, or a new search returns to the normal
+results.
+
 ## Help Panel
 
 While the help panel (Leader+K) is open:

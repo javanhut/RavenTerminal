@@ -199,6 +199,12 @@ reader_proxy_urls = ["https://r.jina.ai/"]
 - **use_reader_proxy**: Use a text-only proxy fallback for JS-heavy pages
 - **reader_proxy_urls**: Proxy base URLs to try in order (target URL appended)
 
+Search history is persisted best-effort to
+`~/.config/raven-terminal/search_history.json` next to the config file (last
+100 queries, newest first). Bookmarks (Ctrl+B in the search panel preview) are
+persisted the same way to `~/.config/raven-terminal/bookmarks.json` (last 100,
+deduped by URL, newest first). Delete either file to clear it.
+
 ### Ollama Chat
 
 ```toml
