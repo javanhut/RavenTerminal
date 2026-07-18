@@ -70,6 +70,9 @@ func NewWindow(config Config) (*Window, error) {
 	glfw.WindowHint(glfw.OpenGLForwardCompatible, glfw.True)
 	glfw.WindowHint(glfw.Resizable, glfw.True)
 	glfw.WindowHint(glfw.DoubleBuffer, glfw.True)
+	// Don't auto-minimize exclusive-fullscreen windows on focus loss
+	// (macOS: swiping to another Space was hiding the window)
+	glfw.WindowHint(glfw.AutoIconify, glfw.False)
 
 	// Set X11 window class for proper WM integration (Hyprland, i3, etc.)
 	glfw.WindowHintString(glfw.X11ClassName, "raven-terminal")
