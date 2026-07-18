@@ -121,6 +121,16 @@ run = [
   "go test ./src/...",
 ]
 
+[commands.format]
+desc = "Running go format"
+alias = ["fmt"]
+run  = ["go fmt ./..."]
+
+
+[commands.fix]
+desc = "Running go fix on the repo"
+run  = ["go fix ./..."]
+
 [commands.check]
 desc = "Format check + vet + tests"
 run = [
