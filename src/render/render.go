@@ -1819,13 +1819,19 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 	r.drawRect(panelX, panelY, borderThickness, panelHeight, borderColor, proj)
 	r.drawRect(panelX+panelWidth-borderThickness, panelY, borderThickness, panelHeight, borderColor, proj)
 
-	// Content area with margins
-	marginX := float32(20)
+	// Match the side-panel title inset so switching between Settings and the
+	// Web/AI panels does not make the header text jump horizontally.
+	marginX := float32(18)
 	contentX := panelX + marginX
 	contentWidth := panelWidth - marginX*2
 
 	lineHeight := r.cellHeight * 1.5
-	headerY := panelY + 35
+	// drawText takes the bottom of a cell box, not its top.  A fixed pixel
+	// offset here used to put the title almost against the upper border when
+	// the font (or framebuffer scale) grew.  Use the same font-relative header
+	// baseline as the Web Search and AI Chat panels instead.
+	panelHeaderLineHeight := r.cellHeight * 1.35
+	headerY := panelY + panelHeaderLineHeight*1.2
 	separatorY := headerY + lineHeight*0.5
 
 	// Calculate footer area height
