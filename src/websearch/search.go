@@ -7,6 +7,7 @@ import (
 	"io"
 	"maps"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,6 +15,56 @@ import (
 
 	"golang.org/x/net/html"
 )
+
+// ValidatePublicHTTPURL rejects targets that could expose services on the
+// local machine or private network. Ollama has its own explicitly configured
+// client; arbitrary page fetching is intentionally public-web only.
+func ValidatePublicHTTPURL(ctx context.Context, rawURL string) error {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return fmt.Errorf("invalid url: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return errors.New("only http(s) URLs are supported")
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if host == "" {
+		return errors.New("url has no host")
+	}
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return errors.New("local and private network URLs are not allowed")
+	}
+
+	var ips []net.IP
+	if ip := net.ParseIP(host); ip != nil {
+		ips = []net.IP{ip}
+	} else {
+		resolved, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+		if err != nil {
+			return fmt.Errorf("resolve host: %w", err)
+		}
+		ips = resolved
+	}
+	if len(ips) == 0 {
+		return errors.New("host resolved to no addresses")
+	}
+	for _, ip := range ips {
+		if !isPublicIP(ip) {
+			return errors.New("local and private network URLs are not allowed")
+		}
+	}
+	return nil
+}
+
+func isPublicIP(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+		return false
+	}
+	// Carrier-grade NAT is not covered by net.IP.IsPrivate.
+	_, cgnat, _ := net.ParseCIDR("100.64.0.0/10")
+	return !cgnat.Contains(ip)
+}
 
 // userAgents is a list of common user agents to rotate through
 var userAgents = []string{
@@ -162,6 +213,9 @@ func FetchText(ctx context.Context, pageURL string, maxChars int, useReaderProxy
 	if pageURL == "" {
 		return nil, "html", "", errors.New("empty url")
 	}
+	if err := ValidatePublicHTTPURL(ctx, pageURL); err != nil {
+		return nil, "html", "", err
+	}
 	if maxChars <= 0 {
 		maxChars = 8000
 	}
@@ -185,6 +239,9 @@ func FetchText(ctx context.Context, pageURL string, maxChars int, useReaderProxy
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
 				return errors.New("too many redirects")
+			}
+			if err := ValidatePublicHTTPURL(req.Context(), req.URL.String()); err != nil {
+				return err
 			}
 			// Update user agent on redirect
 			req.Header.Set("User-Agent", getRandomUserAgent())

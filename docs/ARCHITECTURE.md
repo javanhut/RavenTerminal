@@ -158,7 +158,7 @@ Scripts in `scripts/`:
 
 ### Build Dependencies
 
-- Go 1.21+
+- Go 1.24+
 - OpenGL 4.1 development libraries
 - X11/Wayland development libraries
 - pkg-config
@@ -173,5 +173,5 @@ Scripts in `scripts/`:
 - `github.com/go-gl/gl` - OpenGL bindings
 - `github.com/go-gl/glfw` - Window management
 - `github.com/creack/pty` - PTY handling
-- `github.com/pelletier/go-toml` - Configuration parsing
+- `github.com/BurntSushi/toml` - Configuration parsing
 - `golang.org/x/image` - Font rendering support

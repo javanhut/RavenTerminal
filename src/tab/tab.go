@@ -481,7 +481,7 @@ func (t *Tab) NextPane() {
 	}
 
 	// Move to next
-	nextIdx := (currentIdx - 1 + len(leaves)) % len(leaves)
+	nextIdx := (currentIdx + 1) % len(leaves)
 	t.activeNode = leaves[nextIdx]
 	t.updateTerminalRef()
 }
@@ -508,7 +508,7 @@ func (t *Tab) PrevPane() {
 	}
 
 	// Move to previous
-	prevIdx := (currentIdx + 1) % len(leaves)
+	prevIdx := (currentIdx - 1 + len(leaves)) % len(leaves)
 	t.activeNode = leaves[prevIdx]
 	t.updateTerminalRef()
 }

@@ -32,7 +32,7 @@ type Tool struct {
 type Config struct {
 	UseReaderProxy bool     // route fetch_page through reader proxies
 	ProxyURLs      []string // reader proxy bases (websearch config)
-	WorkDir        string   // base for relative paths and run_command cwd
+	WorkDir        string   // workspace root for local tools and run_command cwd
 }
 
 // Registry holds the available tools.
@@ -56,6 +56,9 @@ const (
 func NewRegistry(cfg Config) *Registry {
 	if cfg.WorkDir == "" {
 		cfg.WorkDir, _ = os.Getwd()
+	}
+	if absolute, err := filepath.Abs(cfg.WorkDir); err == nil {
+		cfg.WorkDir = filepath.Clean(absolute)
 	}
 	r := &Registry{cfg: cfg}
 	r.tools = []Tool{
@@ -101,6 +104,11 @@ Rules:
 - You are strictly read-only. You cannot and must not create, modify, or
   delete files, push code, install software, or change any state. The
   run_command tool only accepts read-only commands.
+- Local file, directory, and command inspection is limited to the active
+  terminal directory. Never attempt to access secrets or send local content
+  to a web tool.
+- Web page fetching only permits public HTTP(S) destinations; localhost and
+  private-network targets are blocked.
 - Package questions: you can check whether something is installed and where,
   inspect versions, search for packages, and list outdated ones with the
   system package manager's query commands (e.g. brew list/info/search/
@@ -174,7 +182,7 @@ func (r *Registry) webSearchTool() Tool {
 func (r *Registry) fetchPageTool() Tool {
 	return Tool{
 		Name:        "fetch_page",
-		Description: "Fetch a web page and return its readable text content.",
+		Description: "Fetch a public web page and return its readable text content. Local and private-network URLs are blocked.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -187,8 +195,8 @@ func (r *Registry) fetchPageTool() Tool {
 			if pageURL == "" {
 				return "", fmt.Errorf("url is required")
 			}
-			if !strings.HasPrefix(pageURL, "http://") && !strings.HasPrefix(pageURL, "https://") {
-				return "", fmt.Errorf("only http(s) URLs are supported")
+			if err := websearch.ValidatePublicHTTPURL(ctx, pageURL); err != nil {
+				return "", err
 			}
 			lines, _, _, err := websearch.FetchText(ctx, pageURL, maxFetchChars, r.cfg.UseReaderProxy, r.cfg.ProxyURLs)
 			if err != nil {
@@ -224,10 +232,29 @@ func (r *Registry) resolvePath(p string) string {
 	return filepath.Clean(p)
 }
 
+// workspacePath resolves an existing path and ensures symlinks cannot escape
+// the active terminal directory exposed to the model.
+func (r *Registry) workspacePath(p string) (string, error) {
+	path := r.resolvePath(p)
+	root := r.cfg.WorkDir
+	if evaluated, err := filepath.EvalSymlinks(root); err == nil {
+		root = evaluated
+	}
+	evaluated, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(root, evaluated)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path is outside the active terminal directory")
+	}
+	return evaluated, nil
+}
+
 func (r *Registry) readFileTool() Tool {
 	return Tool{
 		Name:        "read_file",
-		Description: "Read a text file from the local filesystem (read-only). Returns numbered lines.",
+		Description: "Read a text file within the active terminal directory (read-only). Returns numbered lines.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -242,7 +269,10 @@ func (r *Registry) readFileTool() Tool {
 			if path == "" {
 				return "", fmt.Errorf("path is required")
 			}
-			path = r.resolvePath(path)
+			path, err := r.workspacePath(path)
+			if err != nil {
+				return "", err
+			}
 			info, err := os.Stat(path)
 			if err != nil {
 				return "", err
@@ -294,7 +324,7 @@ func isBinary(data []byte) bool {
 func (r *Registry) listDirTool() Tool {
 	return Tool{
 		Name:        "list_dir",
-		Description: "List the entries of a directory (read-only).",
+		Description: "List entries within the active terminal directory (read-only).",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -302,7 +332,10 @@ func (r *Registry) listDirTool() Tool {
 			},
 		},
 		Run: func(ctx context.Context, args map[string]any) (string, error) {
-			path := r.resolvePath(argString(args, "path"))
+			path, err := r.workspacePath(argString(args, "path"))
+			if err != nil {
+				return "", err
+			}
 			entries, err := os.ReadDir(path)
 			if err != nil {
 				return "", err

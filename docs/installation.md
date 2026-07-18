@@ -3,7 +3,7 @@
 ## Prerequisites
 
 ### Required
-- Go 1.21 or later
+- Go 1.24 or later
 - OpenGL 4.1 compatible graphics driver
 
 ### Build Dependencies
@@ -21,6 +21,11 @@ sudo apt install golang build-essential libgl1-mesa-dev xorg-dev
 **Fedora:**
 ```bash
 sudo dnf install golang mesa-libGL-devel libX11-devel libXcursor-devel libXrandr-devel libXinerama-devel libXi-devel
+```
+
+**macOS:**
+```bash
+brew install go pkg-config librsvg
 ```
 
 ## Installation
@@ -69,7 +74,7 @@ This only builds the binary without installing it.
 | Binary | `~/.local/bin/raven-terminal` |
 | Desktop Entry | `~/.local/share/applications/raven-terminal.desktop` |
 | Icon | `~/.local/share/icons/hicolor/scalable/apps/raven-terminal.svg` |
-| Config | `~/.config/raven-terminal/config.json` |
+| Config | `~/.config/raven-terminal/config.toml` |
 
 ### Global Installation (`--global`)
 | Component | Location |
@@ -77,7 +82,7 @@ This only builds the binary without installing it.
 | Binary | `/usr/local/bin/raven-terminal` |
 | Desktop Entry | `/usr/share/applications/raven-terminal.desktop` |
 | Icon | `/usr/share/icons/hicolor/scalable/apps/raven-terminal.svg` |
-| Config | `~/.config/raven-terminal/config.json` (per-user) |
+| Config | `~/.config/raven-terminal/config.toml` (per-user) |
 
 ## Uninstallation
 
@@ -165,7 +170,7 @@ If you prefer manual installation:
 
 ```bash
 # Build
-go build -o raven-terminal .
+go build -o raven-terminal ./src
 
 # Install binary
 sudo cp raven-terminal /usr/local/bin/
@@ -173,7 +178,7 @@ sudo cp raven-terminal /usr/local/bin/
 cp raven-terminal ~/.local/bin/
 
 # Install icon
-sudo cp assets/raven_terminal_icon.svg /usr/share/icons/hicolor/scalable/apps/raven-terminal.svg
+sudo cp src/assets/raven_terminal_icon.svg /usr/share/icons/hicolor/scalable/apps/raven-terminal.svg
 
 # Create desktop file (see scripts/install.sh for template)
 ```

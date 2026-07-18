@@ -69,7 +69,7 @@ var readSubcommands = map[string]map[string]bool{
 		"status": true, "log": true, "diff": true, "show": true,
 		"branch": true, "tag": true, "remote": true, "blame": true,
 		"shortlog": true, "describe": true, "rev-parse": true,
-		"ls-files": true, "ls-remote": true,
+		"ls-files": true,
 	},
 	"ivaldi": {
 		"status": true, "log": true, "diff": true, "show": true,
@@ -294,6 +294,9 @@ func checkReadOnly(argv []string) error {
 // execReadOnly runs argv with no shell, a closed stdin, pagers disabled, and
 // capped combined output.
 func (r *Registry) execReadOnly(ctx context.Context, argv []string) (string, error) {
+	if err := r.checkCommandWorkspace(argv); err != nil {
+		return "", err
+	}
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = r.cfg.WorkDir
 	cmd.Stdin = nil // exec gives the child /dev/null; nothing can prompt
@@ -327,6 +330,36 @@ func (r *Registry) execReadOnly(ctx context.Context, argv []string) (string, err
 		return "(no output)", nil
 	}
 	return text, nil
+}
+
+// checkCommandWorkspace prevents otherwise read-only utilities from being
+// used to inspect paths outside the active terminal directory.
+func (r *Registry) checkCommandWorkspace(argv []string) error {
+	for _, arg := range argv[1:] {
+		candidate := arg
+		if _, value, ok := strings.Cut(arg, "="); ok {
+			candidate = value
+		}
+		if candidate == "" || strings.HasPrefix(candidate, "http://") || strings.HasPrefix(candidate, "https://") {
+			continue
+		}
+		if strings.HasPrefix(candidate, "file:") {
+			return fmt.Errorf("file URLs are outside the active terminal directory")
+		}
+		clean := filepath.Clean(candidate)
+		if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("path %q is outside the active terminal directory", candidate)
+		}
+		// If an argument names an existing path, resolve symlinks and enforce
+		// the same workspace boundary used by read_file/list_dir.
+		path := filepath.Join(r.cfg.WorkDir, candidate)
+		if _, err := os.Lstat(path); err == nil {
+			if _, err := r.workspacePath(candidate); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func sortedCopy(in []string) []string {

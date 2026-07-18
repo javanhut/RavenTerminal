@@ -10,7 +10,7 @@ import (
 
 func TestCheckReadOnlyAllows(t *testing.T) {
 	allowed := [][]string{
-		{"ls", "-la", "/tmp"},
+		{"ls", "-la", "."},
 		{"git", "status"},
 		{"git", "log", "--oneline", "-5"},
 		{"git", "diff", "HEAD~1"},
@@ -28,18 +28,19 @@ func TestCheckReadOnlyAllows(t *testing.T) {
 
 func TestCheckReadOnlyRejects(t *testing.T) {
 	rejected := [][]string{
-		{"rm", "-rf", "/tmp/x"},            // not allowlisted
-		{"touch", "file"},                  // not allowlisted
-		{"git", "push"},                    // mutating subcommand
-		{"git", "commit", "-m", "x"},       // mutating subcommand
-		{"git", "checkout", "main"},        // mutating subcommand
-		{"git", "config", "user.name"},     // can write config
-		{"git", "diff", "--output=f"},      // write-capable flag
-		{"find", ".", "-delete"},           // destructive flag
-		{"find", ".", "-exec", "rm", "{}"}, // arbitrary exec
-		{"find", ".", "-fprint0", "out"},   // file-writing variant
-		{"curl", "http://example.com"},     // network side effects, not listed
-		{"sh", "-c", "ls"},                 // shell escape
+		{"rm", "-rf", "/tmp/x"},                          // not allowlisted
+		{"touch", "file"},                                // not allowlisted
+		{"git", "push"},                                  // mutating subcommand
+		{"git", "commit", "-m", "x"},                     // mutating subcommand
+		{"git", "checkout", "main"},                      // mutating subcommand
+		{"git", "config", "user.name"},                   // can write config
+		{"git", "ls-remote", "https://example.com/repo"}, // invokes remote helpers
+		{"git", "diff", "--output=f"},                    // write-capable flag
+		{"find", ".", "-delete"},                         // destructive flag
+		{"find", ".", "-exec", "rm", "{}"},               // arbitrary exec
+		{"find", ".", "-fprint0", "out"},                 // file-writing variant
+		{"curl", "http://example.com"},                   // network side effects, not listed
+		{"sh", "-c", "ls"},                               // shell escape
 	}
 	for _, argv := range rejected {
 		if err := checkReadOnly(argv); err == nil {
@@ -130,6 +131,33 @@ func TestUnknownToolErrors(t *testing.T) {
 	r := NewRegistry(Config{WorkDir: t.TempDir()})
 	if _, err := r.Execute(context.Background(), "write_file", map[string]any{}); err == nil {
 		t.Error("unknown tool should error")
+	}
+}
+
+func TestLocalToolsStayInsideWorkspace(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	r := NewRegistry(Config{WorkDir: root})
+
+	for _, tc := range []struct {
+		name string
+		args map[string]any
+	}{
+		{"read_file", map[string]any{"path": filepath.Join(outside, "secret.txt")}},
+		{"read_file", map[string]any{"path": "escape/secret.txt"}},
+		{"list_dir", map[string]any{"path": outside}},
+		{"run_command", map[string]any{"command": "cat " + filepath.Join(outside, "secret.txt")}},
+		{"run_command", map[string]any{"command": "cat escape/secret.txt"}},
+	} {
+		if _, err := r.Execute(context.Background(), tc.name, tc.args); err == nil {
+			t.Errorf("%s unexpectedly allowed outside-workspace access", tc.name)
+		}
 	}
 }
 

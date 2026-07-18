@@ -23,7 +23,7 @@ Raven Terminal includes several built-in commands:
 
 ## Opening Settings
 
-Press `Ctrl+Shift+P` to open the settings menu.
+Press `Ctrl+Shift+S` to open the settings menu.
 
 ## Settings Menu Navigation
 

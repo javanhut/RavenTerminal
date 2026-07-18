@@ -10,14 +10,21 @@ modify, or delete anything. When you ask for something that would change state
 (create files, push code, install software), the model is instructed to give
 you the exact commands to run yourself instead.
 
+Local file, directory, and command inspection is restricted to the active
+terminal directory, including symlink resolution. Page fetching is restricted
+to public HTTP(S) targets: localhost, link-local, and private-network addresses
+are rejected, including redirects. Tool results are sent to the configured
+Ollama model, so do not enable tools in a directory containing secrets you do
+not want that model to process.
+
 ## Tools
 
 | Tool | What it does |
 | --- | --- |
 | `web_search` | DuckDuckGo search; returns titles, URLs, snippets |
 | `fetch_page` | Fetches a page's readable text (honors the Reader Proxy setting) |
-| `read_file` | Reads a text file (size/line capped, binary files rejected) |
-| `list_dir` | Lists directory entries |
+| `read_file` | Reads a workspace text file (size/line capped, binary files rejected) |
+| `list_dir` | Lists workspace directory entries |
 | `run_command` | Runs ONE read-only command, no shell |
 
 ## run_command policy
@@ -42,8 +49,8 @@ softwareupdate`
   `git --output`, `go env -w`, …).
 - Pagers are forced off, stdin is closed, output is capped, and every tool
   call has a 20 second timeout.
-- Relative paths and command working directories follow the active pane's
-  directory.
+- Local paths and command working directories are confined to the active
+  pane's directory; absolute paths, traversal, and escaping symlinks are rejected.
 
 Models that don't support tool calling fall back to a plain chat
 automatically.

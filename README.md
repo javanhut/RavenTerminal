@@ -12,12 +12,22 @@ A GPU-accelerated terminal emulator written in Go using OpenGL for rendering. Ra
 - **Scrollback Buffer**: Scroll through terminal history with mouse wheel or keyboard
 - **Fullscreen Mode**: Toggle fullscreen with Shift+Enter
 - **256 Color Support**: Full indexed and RGB color support
+- **Modern Protocols**: Kitty keyboard/mouse support and Sixel graphics
+- **Optional Local AI**: Ollama chat with workspace-scoped, read-only tools
 
 ## Requirements
 
-- Go 1.21 or later
+- Go 1.24 or later
 - OpenGL 4.1 compatible graphics driver
-- Linux (X11/Wayland)
+- Linux (X11/Wayland) or macOS
+
+### Compatibility
+
+| Platform | Status | Notes |
+| --- | --- | --- |
+| Linux | Supported | X11/Wayland through GLFW |
+| macOS | Supported | OpenGL 4.1; Homebrew setup is available |
+| Windows | Not currently supported | PTY and install integration are Unix-oriented |
 
 ## Installation
 
@@ -61,6 +71,8 @@ Press `Ctrl+Shift+K` to show the keybindings help panel, or `Ctrl+Shift+S` to op
 - [Split Panes](docs/splits.md) - Split pane usage and navigation
 - [Architecture](docs/ARCHITECTURE.md) - Project structure and internal architecture
 - [Icon](docs/icon.md) - Application icon customization
+- [AI Tools and privacy](docs/ai-tools.md) - Tool capabilities and boundaries
+- [Contributing](CONTRIBUTING.md) - Development checks and contribution guidance
 
 ## License
 
