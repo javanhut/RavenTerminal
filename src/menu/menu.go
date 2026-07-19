@@ -125,6 +125,11 @@ type Menu struct {
 	// Messages
 	StatusMessage string
 
+	// Set when the startup config.Load failed (parse error): the menu is
+	// editing defaults, not the user's real file. Cleared on successful
+	// save or reload.
+	configLoadErr string
+
 	// Optional hook for applying config without closing the menu
 	OnConfigReload func(cfg *config.Config) error
 	// Optional hook for applying updated init script to the active shell
@@ -141,17 +146,23 @@ type Menu struct {
 
 // NewMenu creates a new menu instance
 func NewMenu() *Menu {
-	cfg, _ := config.Load()
+	cfg, err := config.Load()
 	if cfg == nil {
 		cfg = config.DefaultConfig()
 	}
-	return &Menu{
+	m := &Menu{
 		State:        MenuClosed,
 		Config:       cfg,
 		EditingIndex: -1,
 		savedIndex:   make(map[MenuState]int),
 		savedScroll:  make(map[MenuState]int),
 	}
+	if err != nil {
+		// Surfaced via StatusMessage on Open; saving keeps the broken
+		// original as config.toml.bak (see Config.Save).
+		m.configLoadErr = err.Error()
+	}
+	return m
 }
 
 // savePosition stores the current position for the current state
@@ -204,6 +215,9 @@ func (m *Menu) Open() {
 	m.InputActive = false
 	m.InputState = InputNone
 	m.StatusMessage = ""
+	if m.configLoadErr != "" {
+		m.StatusMessage = "config.toml unreadable (editing defaults; save backs it up): " + m.configLoadErr
+	}
 	m.buildMainMenu()
 	m.debugf("open state=%s", m.stateName())
 }
@@ -896,6 +910,7 @@ func (m *Menu) handleMainSelect() {
 			}
 		}
 		m.Config = cfg
+		m.configLoadErr = ""
 		m.rebuildCurrent()
 		if m.StatusMessage == "" {
 			m.StatusMessage = "Config reloaded"
@@ -914,7 +929,12 @@ func (m *Menu) handleMainSelect() {
 		}
 		m.Close()
 	case label == "Cancel":
-		m.Config, _ = config.Load()
+		// Discard edits by reloading from disk; if the file is unreadable
+		// keep the in-memory config rather than going nil (panic on next use).
+		if cfg, err := config.Load(); err == nil {
+			m.Config = cfg
+			m.configLoadErr = ""
+		}
 		m.Close()
 	}
 }
@@ -1634,6 +1654,7 @@ func (m *Menu) saveConfig() bool {
 		return false
 	}
 	m.debugf("save ok")
+	m.configLoadErr = "" // on-disk file now matches what we're editing
 	return true
 }
 

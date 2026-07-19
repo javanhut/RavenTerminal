@@ -1193,6 +1193,21 @@ func (g *Grid) ClearLineToStart() {
 	g.ClearLineToStartWithBg(g.eraseBg)
 }
 
+// ClearScrollback drops all scrollback history (ED 3 / CSI 3 J "erase saved
+// lines"). The visible screen is untouched.
+func (g *Grid) ClearScrollback() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for i, r := range g.history {
+		g.releaseRow(r)
+		g.history[i] = nil
+	}
+	// Keep absolute-row accounting consistent: the rows "left the top".
+	g.scrolledOut += len(g.history)
+	g.history = nil
+	g.scrollOffset = 0
+}
+
 // ClearAllWithBg clears the entire grid with a specific background color (BCE)
 func (g *Grid) ClearAllWithBg(bg Color) {
 	g.mu.Lock()
@@ -1580,42 +1595,14 @@ func (g *Grid) EraseChars(n int) {
 	}
 }
 
-// RepeatChar repeats the last written character n times
+// RepeatChar repeats the last written character n times. Reuses the normal
+// write path so wide chars get their continuation cells and wrap/soft-wrap
+// behave exactly as if the app had re-sent the character.
 func (g *Grid) RepeatChar(n int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	for range n {
-		if g.wrapPending {
-			if g.autoWrap {
-				g.cursorNewline()
-			}
-			g.wrapPending = false
-		}
-		if g.CursorCol >= g.Cols {
-			if g.autoWrap {
-				g.cursorNewline()
-			} else {
-				g.CursorCol = g.Cols - 1
-			}
-		}
-		idx := g.index(g.CursorCol, g.CursorRow)
-		g.putCell(idx, Cell{
-			Char:           g.lastChar,
-			Fg:             g.lastFg,
-			Bg:             g.lastBg,
-			UnderlineColor: g.lastUnderlineColor,
-			Flags:          g.lastFlags,
-			Width:          CellWidthNormal,
-			UnderlineStyle: g.lastUnderlineStyle,
-			Link:           g.lastLink,
-		})
-		g.CursorCol++
-		if g.CursorCol >= g.Cols {
-			if g.autoWrap {
-				g.wrapPending = true
-			}
-			g.CursorCol = g.Cols - 1
-		}
+		g.writeCharLocked(g.lastChar, g.lastFg, g.lastBg, g.lastFlags, g.lastLink, g.lastUnderlineStyle, g.lastUnderlineColor)
 	}
 }
 

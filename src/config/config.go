@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -524,15 +525,20 @@ func (c *Config) Save() error {
 		return err
 	}
 
-	// Write config file
-	f, err := os.Create(configPath)
-	if err != nil {
+	// If an existing file is present but unparseable, this save would clobber
+	// a config the user could still repair by hand (callers fall back to
+	// defaults when Load fails). Keep the original as .bak first.
+	if _, err := os.Stat(configPath); err == nil {
+		if _, err := toml.DecodeFile(configPath, DefaultConfig()); err != nil {
+			_ = os.Rename(configPath, configPath+".bak")
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(c); err != nil {
 		return err
 	}
-	defer f.Close()
-
-	encoder := toml.NewEncoder(f)
-	return encoder.Encode(c)
+	return writeFileAtomic(configPath, buf.Bytes())
 }
 
 // GetAvailableShells returns a list of available shells on the system

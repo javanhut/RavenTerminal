@@ -29,7 +29,9 @@ func (t *Terminal) processAPC(b byte) {
 		t.handleAPC(t.apcBuf)
 		t.state = StateGround
 	default:
-		t.apcBuf = append(t.apcBuf, b)
+		if len(t.apcBuf) < maxAPCLen {
+			t.apcBuf = append(t.apcBuf, b)
+		}
 	}
 }
 
@@ -41,7 +43,9 @@ func (t *Terminal) processAPCEscape(b byte) {
 		return
 	}
 	// Not a terminator: the ESC was literal payload.
-	t.apcBuf = append(t.apcBuf, 0x1b, b)
+	if len(t.apcBuf) < maxAPCLen {
+		t.apcBuf = append(t.apcBuf, 0x1b, b)
+	}
 	t.state = StateAPC
 }
 
@@ -55,8 +59,8 @@ func (t *Terminal) activeImages() *images.Store {
 
 // handleAPC dispatches a Kitty graphics APC command ("G<controls>;<payload>").
 func (t *Terminal) handleAPC(buf []byte) {
-	if len(buf) == 0 || buf[0] != 'G' {
-		return // only the Kitty graphics APC is supported
+	if len(buf) == 0 || len(buf) >= maxAPCLen || buf[0] != 'G' {
+		return // only the Kitty graphics APC is supported; drop overflowed payloads
 	}
 	body := buf[1:]
 	var ctrlPart, payloadPart []byte

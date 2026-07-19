@@ -64,6 +64,9 @@ type Pane struct {
 	exited   bool
 	exitedMu sync.Mutex
 	readerMu sync.Mutex
+	// respDone stops the query-reply drain goroutine on Close.
+	respDone  chan struct{}
+	closeOnce sync.Once
 }
 
 // clipboardOut is a thread-safe mailbox for OSC 52 clipboard writes. The PTY reader
@@ -118,8 +121,30 @@ func NewPane(id int, cols, rows uint16, startDir string) (*Pane, error) {
 		id:       id,
 		exited:   false,
 	}
+	// Query replies (DA1, DSR, XTGETTCAP, ...) are emitted while the parser
+	// holds Terminal.mu, and pty.Write can block indefinitely if the child
+	// stops reading its input — which would wedge the render thread too (it
+	// takes Terminal.mu to snapshot). Route replies through a bounded channel
+	// drained by one goroutine: ordering is preserved, the parser never
+	// blocks, and overflow is dropped (a child ignoring its own query replies
+	// has already wedged itself).
+	pane.respDone = make(chan struct{})
+	responses := make(chan []byte, 256)
+	go func() {
+		for {
+			select {
+			case data := <-responses:
+				_, _ = pty.Write(data)
+			case <-pane.respDone:
+				return
+			}
+		}
+	}()
 	pane.Terminal.SetResponseWriter(func(data []byte) {
-		_, _ = pty.Write(data)
+		select {
+		case responses <- data:
+		default: // full: drop rather than block the parser
+		}
 	})
 	// OSC 52 clipboard writes originate on the PTY reader goroutine; GLFW clipboard
 	// calls must run on the main thread, so queue them for the render loop to drain.
@@ -200,6 +225,11 @@ func (p *Pane) Resize(cols, rows uint16) {
 
 // Close closes the pane
 func (p *Pane) Close() {
+	p.closeOnce.Do(func() {
+		if p.respDone != nil {
+			close(p.respDone)
+		}
+	})
 	p.pty.Close()
 }
 

@@ -31,8 +31,11 @@ type Result struct {
 }
 
 type Panel struct {
-	Open             bool
-	Enabled          bool
+	Open    bool
+	Enabled bool
+	// WidthPercent is the panel width as a percent of the window (25-50,
+	// from config panel_width_percent). Zero/out-of-range means default.
+	WidthPercent float32
 	Query            string
 	LastQuery        string
 	QueryDirty       bool
@@ -303,7 +306,11 @@ func (p *Panel) ensureSelectionVisible(visibleLines int) {
 }
 
 func (p *Panel) Layout(width, height int, cellWidth, cellHeight float32) Layout {
-	panelWidth := float32(width) * 0.35
+	pct := p.WidthPercent
+	if pct < 25 || pct > 50 {
+		pct = 35 // unset or out of range: default
+	}
+	panelWidth := float32(width) * pct / 100
 	minPanelWidth := float32(340)
 	if cellWidth > 0 {
 		wideMin := cellWidth * 32
@@ -322,9 +329,6 @@ func (p *Panel) Layout(width, height int, cellWidth, cellHeight float32) Layout 
 	}
 	if panelWidth < minPanelWidth {
 		panelWidth = minPanelWidth
-	}
-	if panelWidth > 560 {
-		panelWidth = 560
 	}
 	if panelWidth > maxWidth {
 		panelWidth = maxWidth

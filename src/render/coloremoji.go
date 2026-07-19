@@ -145,21 +145,23 @@ func (r *Renderer) ensureColorGlyph(ch rune) (colorGlyph, bool) {
 		return miss, false
 	}
 
-	// Normalize to RGBA (Apple's emoji decode as NRGBA).
-	rgba, isRGBA := src.(*image.RGBA)
-	if !isRGBA {
+	// Normalize to straight-alpha NRGBA. The blend state is straight alpha
+	// (SRC_ALPHA, ONE_MINUS_SRC_ALPHA), so uploading premultiplied image.RGBA
+	// would apply alpha twice and darken the fringes.
+	nrgba, isNRGBA := src.(*image.NRGBA)
+	if !isNRGBA {
 		b := src.Bounds()
-		rgba = image.NewRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
-		draw.Draw(rgba, rgba.Bounds(), src, b.Min, draw.Src)
+		nrgba = image.NewNRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
+		draw.Draw(nrgba, nrgba.Bounds(), src, b.Min, draw.Src)
 	}
-	w, h := rgba.Bounds().Dx(), rgba.Bounds().Dy()
+	w, h := nrgba.Bounds().Dx(), nrgba.Bounds().Dy()
 
 	var tex uint32
 	gl.GenTextures(1, &tex)
 	gl.BindTexture(gl.TEXTURE_2D, tex)
 	gl.PixelStorei(gl.UNPACK_ALIGNMENT, 1)
 	gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA, int32(w), int32(h), 0,
-		gl.RGBA, gl.UNSIGNED_BYTE, gl.Ptr(rgba.Pix))
+		gl.RGBA, gl.UNSIGNED_BYTE, gl.Ptr(nrgba.Pix))
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)

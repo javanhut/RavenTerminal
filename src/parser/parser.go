@@ -93,13 +93,24 @@ type CursorState struct {
 	flags grid.CellFlags
 }
 
+// Accumulation caps for escape-sequence payloads. An unterminated sequence in
+// binary/hostile output must not buffer the rest of the stream forever (xterm
+// caps these too). Oversized sequences are discarded, not executed truncated.
+// OSC/APC are generous to fit OSC 52 clipboard and Kitty graphics payloads.
+const (
+	maxCSILen = 1024
+	maxOSCLen = 8 << 20
+	maxDCSLen = 64 << 10
+	maxAPCLen = 8 << 20
+)
+
 // Terminal handles ANSI escape sequence parsing and state
 type Terminal struct {
 	Grid            *grid.Grid
 	state           ParserState
 	csiParams       string
-	oscParams       string
-	dcsParams       string
+	oscParams       []byte
+	dcsParams       []byte
 	currentFg       grid.Color
 	currentBg       grid.Color
 	currentFlags    grid.CellFlags
@@ -504,10 +515,10 @@ func (t *Terminal) processEscape(b byte) {
 		t.csiParams = ""
 	case ']': // OSC
 		t.state = StateOSC
-		t.oscParams = ""
+		t.oscParams = t.oscParams[:0]
 	case 'P': // DCS - Device Control String
 		t.state = StateDCS
-		t.dcsParams = ""
+		t.dcsParams = t.dcsParams[:0]
 	case '7': // DECSC - Save cursor
 		t.saveCursor()
 		t.state = StateGround
@@ -571,13 +582,19 @@ func (t *Terminal) processCSI(b byte) {
 	switch {
 	case b >= 0x30 && b <= 0x3f:
 		// Parameter byte
-		t.csiParams += string(b)
+		if len(t.csiParams) < maxCSILen {
+			t.csiParams += string(b)
+		}
 	case b >= 0x20 && b <= 0x2f:
 		// Intermediate byte
-		t.csiParams += string(b)
+		if len(t.csiParams) < maxCSILen {
+			t.csiParams += string(b)
+		}
 	case b >= 0x40 && b <= 0x7e:
-		// Final byte
-		t.executeCSI(b)
+		// Final byte (skip execution if the params overflowed the cap)
+		if len(t.csiParams) < maxCSILen {
+			t.executeCSI(b)
+		}
 		t.csiParams = "" // Clear params after execution
 		t.state = StateGround
 	case b == 0x1b: // ESC aborts the sequence and starts a new one
@@ -636,8 +653,10 @@ func (t *Terminal) executeCSI(final byte) {
 			t.Grid.ClearToEndWithBg(t.currentBg)
 		case 1:
 			t.Grid.ClearToStartWithBg(t.currentBg)
-		case 2, 3:
+		case 2:
 			t.Grid.ClearAllWithBg(t.currentBg)
+		case 3: // ED 3 erases saved lines (scrollback) only, not the screen
+			t.Grid.ClearScrollback()
 		}
 	case 'K': // EL - Erase in line (with BCE support)
 		n := t.getParam(params, 0, 0)
@@ -1012,30 +1031,32 @@ func (t *Terminal) exitAlternateScreen() {
 
 // processOSC handles OSC sequences (Operating System Command)
 func (t *Terminal) processOSC(b byte) {
-	if b == 0x07 { // BEL terminates OSC
-		t.handleOSC(t.oscParams)
-		t.oscParams = ""
-		t.state = StateGround
-	} else if b == 0x9c { // ST (8-bit)
-		t.handleOSC(t.oscParams)
-		t.oscParams = ""
-		t.state = StateGround
+	if b == 0x07 || b == 0x9c { // BEL or ST (8-bit) terminates OSC
+		t.finishOSC()
 	} else if b == 0x1b { // ESC - might be start of ST
 		t.state = StateOSCEscape
-	} else {
-		t.oscParams += string(b)
+	} else if len(t.oscParams) < maxOSCLen {
+		t.oscParams = append(t.oscParams, b)
 	}
+}
+
+// finishOSC dispatches a completed OSC (unless it overflowed the cap) and
+// returns to ground state.
+func (t *Terminal) finishOSC() {
+	if len(t.oscParams) < maxOSCLen {
+		t.handleOSC(string(t.oscParams))
+	}
+	t.oscParams = t.oscParams[:0]
+	t.state = StateGround
 }
 
 // processOSCEscape handles bytes after ESC in OSC state
 func (t *Terminal) processOSCEscape(b byte) {
 	if b == 0x5c { // Backslash completes ST (ESC \)
-		t.handleOSC(t.oscParams)
-		t.oscParams = ""
-		t.state = StateGround
+		t.finishOSC()
 	} else {
 		// Not ST, ESC starts new sequence
-		t.oscParams = ""
+		t.oscParams = t.oscParams[:0]
 		t.state = StateEscape
 		t.processEscape(b)
 	}
@@ -1045,28 +1066,32 @@ func (t *Terminal) processOSCEscape(b byte) {
 func (t *Terminal) processDCS(b byte) {
 	if b == 0x1b { // ESC - might be start of ST
 		t.state = StateDCSEscape
-	} else if b == 0x9c { // ST (8-bit)
-		t.handleDCS(t.dcsParams)
-		t.dcsParams = ""
-		t.state = StateGround
-	} else if b == 0x07 { // BEL also terminates (non-standard but common)
-		t.handleDCS(t.dcsParams)
-		t.dcsParams = ""
-		t.state = StateGround
-	} else {
-		t.dcsParams += string(b)
+	} else if b == 0x9c || b == 0x07 { // ST (8-bit); BEL is non-standard but common
+		t.finishDCS()
+	} else if len(t.dcsParams) < maxDCSLen {
+		t.dcsParams = append(t.dcsParams, b)
 	}
+}
+
+// finishDCS dispatches a completed DCS (unless it overflowed the cap) and
+// returns to ground state.
+func (t *Terminal) finishDCS() {
+	if len(t.dcsParams) < maxDCSLen {
+		t.handleDCS(string(t.dcsParams))
+	}
+	t.dcsParams = t.dcsParams[:0]
+	t.state = StateGround
 }
 
 // processDCSEscape handles bytes after ESC in DCS state
 func (t *Terminal) processDCSEscape(b byte) {
 	if b == 0x5c { // Backslash completes ST (ESC \)
-		t.handleDCS(t.dcsParams)
-		t.dcsParams = ""
-		t.state = StateGround
+		t.finishDCS()
 	} else {
 		// Not ST, treat as part of DCS
-		t.dcsParams += "\x1b" + string(b)
+		if len(t.dcsParams) < maxDCSLen {
+			t.dcsParams = append(t.dcsParams, 0x1b, b)
+		}
 		t.state = StateDCS
 	}
 }
@@ -1399,7 +1424,22 @@ func (t *Terminal) parseSGRParams(s string) []int {
 			subparts := strings.Split(part, ":")
 			first, _ := strconv.Atoi(subparts[0])
 			if first == 38 || first == 48 || first == 58 {
-				// Expand colon sub-params for extended color sequences
+				// Expand colon sub-params for extended color sequences.
+				// The ITU T.416 RGB form carries a colorspace ID slot
+				// ("38:2::R:G:B"); drop it, and truncate any trailing
+				// sub-params (tolerance etc.) so executeSGR sees exactly
+				// the semicolon stream (38;2;R;G;B / 38;5;n) with no
+				// leftovers that would run as spurious SGR codes.
+				if len(subparts) > 1 && subparts[1] == "2" {
+					if len(subparts) >= 6 {
+						subparts = append(subparts[:2], subparts[3:]...)
+					}
+					if len(subparts) > 5 {
+						subparts = subparts[:5]
+					}
+				} else if len(subparts) > 1 && subparts[1] == "5" && len(subparts) > 3 {
+					subparts = subparts[:3]
+				}
 				for _, sp := range subparts {
 					n, _ := strconv.Atoi(sp)
 					params = append(params, n)

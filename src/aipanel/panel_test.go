@@ -82,3 +82,16 @@ func TestBulletContinuationIndent(t *testing.T) {
 			second, len(wantIndent), first)
 	}
 }
+
+// panel_width_percent must actually control the panel width (it was once
+// persisted by the menu but ignored here).
+func TestLayoutWidthPercent(t *testing.T) {
+	p := &Panel{}
+	if got := p.Layout(2000, 1000, 10, 20).PanelWidth; got != 700 {
+		t.Fatalf("default width = %v, want 700 (35%%)", got)
+	}
+	p.WidthPercent = 50
+	if got := p.Layout(2000, 1000, 10, 20).PanelWidth; got != 1000 {
+		t.Fatalf("width at 50%% = %v, want 1000", got)
+	}
+}

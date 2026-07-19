@@ -198,6 +198,8 @@ func (a *App) onConfigReload(cfg *config.Config) error {
 	}
 	a.searchPanel.SetEnabled(cfg.WebSearch.Enabled)
 	a.aiPanel.SetEnabled(cfg.Ollama.Enabled)
+	a.searchPanel.WidthPercent = cfg.Appearance.PanelWidthPercent
+	a.aiPanel.WidthPercent = cfg.Appearance.PanelWidthPercent
 	a.aiPanel.ShowThinking = cfg.Ollama.ShowThinking
 	a.aiPanel.ThinkingMode = cfg.Ollama.ThinkingMode
 	a.settingsMenu.OllamaModels = nil
@@ -272,6 +274,8 @@ func (a *App) applyInitialConfig() {
 		a.currentTheme = a.settingsMenu.Config.Theme
 		a.searchPanel.SetEnabled(a.settingsMenu.Config.WebSearch.Enabled)
 		a.aiPanel.SetEnabled(a.settingsMenu.Config.Ollama.Enabled)
+		a.searchPanel.WidthPercent = a.settingsMenu.Config.Appearance.PanelWidthPercent
+		a.aiPanel.WidthPercent = a.settingsMenu.Config.Appearance.PanelWidthPercent
 		a.aiPanel.ShowThinking = a.settingsMenu.Config.Ollama.ShowThinking
 		a.aiPanel.ThinkingMode = a.settingsMenu.Config.Ollama.ThinkingMode
 		a.aiPanel.LoadedURL = a.settingsMenu.Config.Ollama.URL

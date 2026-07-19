@@ -66,3 +66,45 @@ func TestAddBookmarkCap(t *testing.T) {
 		t.Fatalf("newest not first: %v", list[0])
 	}
 }
+
+// Save must round-trip through Load, write atomically (no stray temp file),
+// and preserve an unparseable existing config as .bak instead of clobbering
+// the only copy the user could still repair.
+func TestSaveBacksUpBrokenConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path := GetConfigPath()
+
+	cfg := DefaultConfig()
+	cfg.Theme = "test-theme"
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	loaded, err := Load()
+	if err != nil || loaded.Theme != "test-theme" {
+		t.Fatalf("round-trip: theme=%q err=%v", loaded.Theme, err)
+	}
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Errorf("temp file left behind: %v", err)
+	}
+	if _, err := os.Stat(path + ".bak"); !os.IsNotExist(err) {
+		t.Errorf("valid config should not be backed up")
+	}
+
+	// Corrupt the file, then save again: the broken original must survive as .bak.
+	if err := os.WriteFile(path, []byte("theme = [broken\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(); err == nil {
+		t.Fatal("Load should fail on corrupt config")
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("Save over corrupt: %v", err)
+	}
+	bak, err := os.ReadFile(path + ".bak")
+	if err != nil || string(bak) != "theme = [broken\n" {
+		t.Fatalf("backup missing or wrong: %q, %v", bak, err)
+	}
+	if loaded, err := Load(); err != nil || loaded.Theme != "test-theme" {
+		t.Fatalf("post-backup round-trip: theme=%q err=%v", loaded.Theme, err)
+	}
+}
