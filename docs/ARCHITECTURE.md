@@ -158,7 +158,7 @@ Scripts in `scripts/`:
 
 ### Build Dependencies
 
-- Go 1.24+
+- Go 1.25+
 - OpenGL 4.1 development libraries
 - X11/Wayland development libraries
 - pkg-config

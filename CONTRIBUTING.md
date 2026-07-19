@@ -1,6 +1,6 @@
 # Contributing
 
-Raven Terminal requires Go 1.24 or newer and an OpenGL 4.1 development
+Raven Terminal requires Go 1.25 or newer and an OpenGL 4.1 development
 environment. See `docs/installation.md` for platform packages.
 
 Before opening a pull request, run:

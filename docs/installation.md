@@ -3,7 +3,7 @@
 ## Prerequisites
 
 ### Required
-- Go 1.24 or later
+- Go 1.25 or later
 - OpenGL 4.1 compatible graphics driver
 
 ### Build Dependencies
