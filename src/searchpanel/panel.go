@@ -35,7 +35,7 @@ type Panel struct {
 	Enabled bool
 	// WidthPercent is the panel width as a percent of the window (25-50,
 	// from config panel_width_percent). Zero/out-of-range means default.
-	WidthPercent float32
+	WidthPercent     float32
 	Query            string
 	LastQuery        string
 	QueryDirty       bool

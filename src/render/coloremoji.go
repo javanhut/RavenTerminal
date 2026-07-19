@@ -176,6 +176,7 @@ func (r *Renderer) ensureColorGlyph(ch rune) (colorGlyph, bool) {
 // drawColorGlyph draws a color-emoji texture as a square fitted to the cell
 // height and centered over the cell's column span.
 func (r *Renderer) drawColorGlyph(x, yTop float32, spanCols int, cg colorGlyph, alpha float32, proj [16]float32) {
+	r.uiFlush() // immediate textured draw: pending UI batches must land first
 	spanW := float32(spanCols) * r.cellWidth
 	side := r.cellHeight
 	if side > spanW {

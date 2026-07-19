@@ -326,7 +326,6 @@ func TestErrorReason(t *testing.T) {
 	}
 }
 
-
 // A target spliced into a proxy template's "{url}" query parameter must be
 // percent-encoded, or a "&"/"#" in the target breaks out of the parameter and
 // drops later template parameters. Path-style proxy forms keep the raw target.

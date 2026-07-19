@@ -95,3 +95,29 @@ func TestLayoutWidthPercent(t *testing.T) {
 		t.Fatalf("width at 50%% = %v, want 1000", got)
 	}
 }
+
+// WrappedForRender must reuse the cached wrap when nothing changed, and
+// rebuild when the last message grows (streaming), the width changes, or
+// thinking options toggle.
+func TestWrappedForRenderCache(t *testing.T) {
+	p := &Panel{Messages: []Message{{Role: "user", Content: "hello"}}}
+	a := p.WrappedForRender(40)
+	if len(a) == 0 {
+		t.Fatal("no wrapped lines")
+	}
+	if b := p.WrappedForRender(40); &a[0] != &b[0] {
+		t.Fatal("re-wrapped despite unchanged inputs")
+	}
+	p.Messages[0].Content = "hello world" // streaming growth of last message
+	c := p.WrappedForRender(40)
+	if &a[0] == &c[0] {
+		t.Fatal("stale wrap after message growth")
+	}
+	if d := p.WrappedForRender(30); &c[0] == &d[0] {
+		t.Fatal("stale wrap after width change")
+	}
+	p.ThinkingExpanded = true
+	if e := p.WrappedForRender(30); len(e) == 0 {
+		t.Fatal("wrap failed after option toggle")
+	}
+}

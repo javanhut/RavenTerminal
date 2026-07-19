@@ -103,6 +103,7 @@ func ThemeByName(name string) Theme {
 // SetThemeByName applies a named theme to the renderer.
 func (r *Renderer) SetThemeByName(name string) {
 	r.theme = ThemeByName(name)
+	r.themeGen++
 	r.uiDirty = true
 }
 
@@ -183,6 +184,13 @@ type Renderer struct {
 	// Reusable per-frame batch buffers (avoid re-allocation each frame).
 	gridRects  rectBatch
 	gridGlyphs glyphBatch
+	// UI batch state (see batch.go): drawRect/drawChar* accumulate here and
+	// flush on kind/projection change or before any non-batched draw.
+	uiRects    rectBatch
+	uiGlyphs   glyphBatch
+	uiKind     int
+	uiProj     [16]float32
+	uiAtlasGen uint64
 	// pass2 collects, during the batched pass, the minority of cells that need
 	// immediate decoration draws (block elements, underline, strikethrough),
 	// so pass 2 doesn't re-scan the whole grid.
@@ -205,8 +213,16 @@ type Renderer struct {
 	colorAlphaLoc int32
 	colorDraws    []colorDrawItem
 
-	// Help panel scroll state
+	// Help panel scroll state and cached section content
 	helpScrollOffset int
+	helpSections     []helpSection
+
+	// Search-preview wrap cache: rebuilt only when the preview content,
+	// width, or theme changes instead of every frame. themeGen bumps on
+	// SetThemeByName so a theme switch invalidates the styled colors.
+	themeGen         uint64
+	previewWrapKey   previewWrapKey
+	previewWrapLines []styledLine
 
 	// Hover underline state for URLs
 	hoverGrid     *grid.Grid
@@ -575,6 +591,7 @@ func (r *Renderer) RenderWithHelp(tm *tab.TabManager, width, height int, cursorV
 	if showHelp {
 		r.renderHelpPanel(width, height, proj)
 	}
+	r.uiFlush()
 }
 
 // RenderWithHelpAndPanels renders the terminal with optional help and overlay panels.
@@ -604,6 +621,7 @@ func (r *Renderer) RenderWithHelpAndPanels(tm *tab.TabManager, width, height int
 	if showHelp {
 		r.renderHelpPanel(width, height, proj)
 	}
+	r.uiFlush()
 }
 
 // Shared overlay-panel palette.
@@ -887,9 +905,7 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 			scrollIndicator, [4]float32{0.5, 0.5, 0.5, 1.0}, proj)
 	}
 
-	lines := aipanel.BuildWrappedLinesWithThinking(panel.Messages, maxChars, panel.ShowThinking, panel.ThinkingExpanded)
-	panel.WrapChars = maxChars
-	panel.WrappedLines = lines
+	lines := panel.WrappedForRender(maxChars)
 
 	// While waiting on the model, the spinner rides at the end of the
 	// conversation (where the reply will appear) rather than up in the header.
@@ -1108,11 +1124,24 @@ func (r *Renderer) renderSearchPreview(panel *searchpanel.Panel, layout searchpa
 	}
 	r.drawText(layout.ContentX, layout.ResultsStart, truncateToCells(header, maxChars), r.theme.TabActive, proj)
 
-	wrappedLines := buildWrappedPreview(panel.PreviewLines, maxChars, r.theme)
-	panel.PreviewWrapped = nil
-	panel.PreviewWrapChars = maxChars
-	for _, line := range wrappedLines {
-		panel.PreviewWrapped = append(panel.PreviewWrapped, line.text)
+	// Re-wrap only when the content, width, or theme changed; the preview is
+	// static text between navigations and this ran every frame.
+	key := previewWrapKey{n: len(panel.PreviewLines), chars: maxChars, themeGen: r.themeGen}
+	if key.n > 0 {
+		key.src = &panel.PreviewLines[0]
+	}
+	rewrapped := key != r.previewWrapKey || r.previewWrapLines == nil
+	if rewrapped {
+		r.previewWrapLines = buildWrappedPreview(panel.PreviewLines, maxChars, r.theme)
+		r.previewWrapKey = key
+	}
+	wrappedLines := r.previewWrapLines
+	if rewrapped || panel.PreviewWrapped == nil || panel.PreviewWrapChars != maxChars {
+		panel.PreviewWrapped = panel.PreviewWrapped[:0]
+		panel.PreviewWrapChars = maxChars
+		for _, line := range wrappedLines {
+			panel.PreviewWrapped = append(panel.PreviewWrapped, line.text)
+		}
 	}
 
 	visibleLines := max(layout.VisibleLines-1, 1)
@@ -1438,11 +1467,34 @@ func wrapText(text string, maxChars int, prefix, indent string) []string {
 	return lines
 }
 
-// getHelpSections returns all keybinding sections for the help panel
-func (r *Renderer) getHelpSections() []struct {
+// previewWrapKey fingerprints the inputs of buildWrappedPreview: the preview
+// lines slice is replaced wholesale on navigation (never mutated in place),
+// so its first-element pointer plus length captures content changes.
+type previewWrapKey struct {
+	src      *string
+	n        int
+	chars    int
+	themeGen uint64
+}
+
+// helpSection is one titled group of keybinding rows in the help panel.
+type helpSection struct {
 	title    string
 	bindings [][2]string
-} {
+}
+
+// getHelpSections returns all keybinding sections for the help panel. The
+// content is static per process, so it is built once and cached (the help
+// renderer asks for it several times per frame).
+func (r *Renderer) getHelpSections() []helpSection {
+	if r.helpSections != nil {
+		return r.helpSections
+	}
+	r.helpSections = buildHelpSections()
+	return r.helpSections
+}
+
+func buildHelpSections() []helpSection {
 	// Platform-aware modifier labels. The Super (Cmd) layer is identical on
 	// every platform; Linux shows its conventional Ctrl+Shift chords with
 	// the Super alias where the letters differ.
@@ -1466,10 +1518,7 @@ func (r *Renderer) getHelpSections() []struct {
 		cyclePanes = "Cmd+Shift+Tab"
 	}
 
-	return []struct {
-		title    string
-		bindings [][2]string
-	}{
+	return []helpSection{
 		{
 			title: "General",
 			bindings: [][2]string{
@@ -1759,6 +1808,7 @@ func (r *Renderer) RenderWithMenu(tm *tab.TabManager, width, height int, cursorV
 	if m != nil && m.IsOpen() {
 		r.renderMenu(m, width, height, proj)
 	}
+	r.uiFlush()
 }
 
 // renderMenu renders the settings menu overlay
@@ -2411,7 +2461,7 @@ func (r *Renderer) renderTabBar(tm *tab.TabManager, width, height int, proj [16]
 	tabs := tm.GetTabs()
 	activeIdx := tm.ActiveIndex()
 	isMac := runtime.GOOS == "darwin"
-	home, _ := os.UserHomeDir()
+	home := cachedHomeDir
 	charW := r.cellWidth * g.scale
 
 	for i, t := range tabs {
@@ -2724,6 +2774,7 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 			break
 		}
 	}
+	r.uiFlush() // anything batched earlier (tab bar, chrome) lands under grid content
 	r.flushRects(&r.gridRects, proj)
 	r.flushGlyphs(&r.gridGlyphs, proj)
 
@@ -2879,24 +2930,8 @@ func (r *Renderer) DrawToast(message string, width, height int) {
 
 // drawRect draws a colored rectangle
 func (r *Renderer) drawRect(x, y, w, h float32, clr [4]float32, proj [16]float32) {
-	vertices := []float32{
-		x, y,
-		x + w, y,
-		x + w, y + h,
-		x, y,
-		x + w, y + h,
-		x, y + h,
-	}
-
-	gl.UseProgram(r.program)
-	gl.UniformMatrix4fv(r.projLoc, 1, false, &proj[0])
-	gl.Uniform4fv(r.colorLoc, 1, &clr[0])
-
-	gl.BindVertexArray(r.quadVAO)
-	gl.BindBuffer(gl.ARRAY_BUFFER, r.quadVBO)
-	gl.BufferSubData(gl.ARRAY_BUFFER, 0, len(vertices)*4, gl.Ptr(vertices))
-	gl.DrawArrays(gl.TRIANGLES, 0, 6)
-	gl.BindVertexArray(0)
+	r.uiEnsure(uiKindRect, proj)
+	r.uiRects.addRect(x, y, w, h, clr)
 }
 
 // drawUnderlineStyled draws an underline across a cell in the given SGR 4:n style:
@@ -3160,37 +3195,19 @@ func (r *Renderer) drawCharStyled(x, y float32, char rune, clr [4]float32, proj 
 		shear = h * 0.2
 	}
 
-	vertices := []float32{
-		gx + shear, gyTop, tx, ty,
-		gx + w + shear, gyTop, tx + tw, ty,
-		gx + w, gy, tx + tw, ty + th,
-		gx + shear, gyTop, tx, ty,
-		gx + w, gy, tx + tw, ty + th,
-		gx, gy, tx, ty + th,
+	r.uiEnsure(uiKindGlyph, proj)
+	// resolveGlyph above may have grown (re-packed) the atlas, invalidating
+	// UVs already recorded in this batch. Drop them rather than draw garbage;
+	// the affected chars reappear next frame from the now-warm atlas.
+	if r.uiAtlasGen != r.atlasGen {
+		r.uiGlyphs.reset()
+		r.uiAtlasGen = r.atlasGen
 	}
-
-	gl.UseProgram(r.fontProgram)
-	gl.UniformMatrix4fv(r.texProjLoc, 1, false, &proj[0])
-	gl.Uniform4fv(r.texColorLoc, 1, &clr[0])
-	gl.Uniform1i(r.texLoc, 0)
-
-	gl.ActiveTexture(gl.TEXTURE0)
-	gl.BindTexture(gl.TEXTURE_2D, r.fontAtlas)
-
-	gl.BindVertexArray(r.fontVAO)
-	gl.BindBuffer(gl.ARRAY_BUFFER, r.fontVBO)
-	gl.BufferSubData(gl.ARRAY_BUFFER, 0, len(vertices)*4, gl.Ptr(vertices))
-	gl.DrawArrays(gl.TRIANGLES, 0, 6)
-
-	// Faux bold: redraw the glyph offset by 1px in x to thicken the strokes.
+	r.uiGlyphs.addGlyph(gx, gy, w, h, tx, ty, tw, th, clr, shear)
+	// Faux bold: a second quad offset by 1px in x thickens the strokes.
 	if bold {
-		for i := 0; i < len(vertices); i += 4 {
-			vertices[i] += 1
-		}
-		gl.BufferSubData(gl.ARRAY_BUFFER, 0, len(vertices)*4, gl.Ptr(vertices))
-		gl.DrawArrays(gl.TRIANGLES, 0, 6)
+		r.uiGlyphs.addGlyph(gx+1, gy, w, h, tx, ty, tw, th, clr, shear)
 	}
-	gl.BindVertexArray(0)
 }
 
 // drawText draws a string of text
@@ -3297,28 +3314,8 @@ func (r *Renderer) drawCharScaled(x, y float32, char rune, clr [4]float32, proj 
 	tw := glyph.Width
 	th := glyph.Height
 
-	vertices := []float32{
-		gx, gyTop, tx, ty,
-		gx + w, gyTop, tx + tw, ty,
-		gx + w, gy, tx + tw, ty + th,
-		gx, gyTop, tx, ty,
-		gx + w, gy, tx + tw, ty + th,
-		gx, gy, tx, ty + th,
-	}
-
-	gl.UseProgram(r.fontProgram)
-	gl.UniformMatrix4fv(r.texProjLoc, 1, false, &proj[0])
-	gl.Uniform4fv(r.texColorLoc, 1, &clr[0])
-	gl.Uniform1i(r.texLoc, 0)
-
-	gl.ActiveTexture(gl.TEXTURE0)
-	gl.BindTexture(gl.TEXTURE_2D, r.fontAtlas)
-
-	gl.BindVertexArray(r.fontVAO)
-	gl.BindBuffer(gl.ARRAY_BUFFER, r.fontVBO)
-	gl.BufferSubData(gl.ARRAY_BUFFER, 0, len(vertices)*4, gl.Ptr(vertices))
-	gl.DrawArrays(gl.TRIANGLES, 0, 6)
-	gl.BindVertexArray(0)
+	r.uiEnsure(uiKindGlyph, proj)
+	r.uiGlyphs.addGlyph(gx, gy, w, h, tx, ty, tw, th, clr, 0)
 }
 
 // colorToRGBA converts a grid.Color to RGBA
@@ -3522,6 +3519,12 @@ func (r *Renderer) Destroy() {
 	gl.DeleteBuffers(1, &r.fontVBO)
 	gl.DeleteProgram(r.program)
 	gl.DeleteProgram(r.fontProgram)
+	gl.DeleteVertexArrays(1, &r.rectBatchVAO)
+	gl.DeleteBuffers(1, &r.rectBatchVBO)
+	gl.DeleteProgram(r.rectBatchProgram)
+	gl.DeleteVertexArrays(1, &r.glyphBatchVAO)
+	gl.DeleteBuffers(1, &r.glyphBatchVBO)
+	gl.DeleteProgram(r.glyphBatchProgram)
 	gl.DeleteTextures(1, &r.fontAtlas)
 	if r.face != nil {
 		r.face.Close()
@@ -3531,6 +3534,10 @@ func (r *Renderer) Destroy() {
 	}
 	r.destroyColorEmoji()
 }
+
+// cachedHomeDir avoids an os.UserHomeDir syscall per tab-bar frame; the home
+// directory cannot change within a process.
+var cachedHomeDir, _ = os.UserHomeDir()
 
 // orthoMatrix creates an orthographic projection matrix
 func orthoMatrix(left, right, bottom, top, near, far float32) [16]float32 {
@@ -3551,6 +3558,7 @@ func createProgram(vertexSource, fragmentSource string) (uint32, error) {
 
 	fragmentShader, err := compileShader(fragmentSource, gl.FRAGMENT_SHADER)
 	if err != nil {
+		gl.DeleteShader(vertexShader)
 		return 0, err
 	}
 
@@ -3558,6 +3566,10 @@ func createProgram(vertexSource, fragmentSource string) (uint32, error) {
 	gl.AttachShader(program, vertexShader)
 	gl.AttachShader(program, fragmentShader)
 	gl.LinkProgram(program)
+	// Shaders are no longer needed once linked (or failed); freeing them here
+	// covers the error path too.
+	gl.DeleteShader(vertexShader)
+	gl.DeleteShader(fragmentShader)
 
 	var status int32
 	gl.GetProgramiv(program, gl.LINK_STATUS, &status)
@@ -3566,11 +3578,9 @@ func createProgram(vertexSource, fragmentSource string) (uint32, error) {
 		gl.GetProgramiv(program, gl.INFO_LOG_LENGTH, &logLength)
 		log := strings.Repeat("\x00", int(logLength+1))
 		gl.GetProgramInfoLog(program, logLength, nil, gl.Str(log))
+		gl.DeleteProgram(program)
 		return 0, fmt.Errorf("failed to link program: %v", log)
 	}
-
-	gl.DeleteShader(vertexShader)
-	gl.DeleteShader(fragmentShader)
 
 	return program, nil
 }
@@ -3591,6 +3601,7 @@ func compileShader(source string, shaderType uint32) (uint32, error) {
 		gl.GetShaderiv(shader, gl.INFO_LOG_LENGTH, &logLength)
 		log := strings.Repeat("\x00", int(logLength+1))
 		gl.GetShaderInfoLog(shader, logLength, nil, gl.Str(log))
+		gl.DeleteShader(shader)
 		return 0, fmt.Errorf("failed to compile shader: %v", log)
 	}
 

@@ -59,9 +59,9 @@ type WrappedLine struct {
 }
 
 type Panel struct {
-	Open         bool
-	Enabled      bool
-	Focused      bool
+	Open    bool
+	Enabled bool
+	Focused bool
 	// WidthPercent is the panel width as a percent of the window (25-50,
 	// from config panel_width_percent). Zero/out-of-range means default.
 	WidthPercent float32
@@ -74,6 +74,7 @@ type Panel struct {
 	WasAtBottom  bool // Track if user was at bottom before new content
 	WrapChars    int
 	WrappedLines []WrappedLine
+	wrapCache    wrapCacheKey
 	RequestID    int
 	ModelLoaded  bool
 	LoadedURL    string
@@ -489,6 +490,46 @@ func (p *Panel) Layout(width, height int, cellWidth, cellHeight float32) Layout 
 
 func BuildWrappedLines(messages []Message, maxChars int) []WrappedLine {
 	return BuildWrappedLinesWithThinking(messages, maxChars, true, false)
+}
+
+// wrapCacheKey fingerprints the inputs of BuildWrappedLinesWithThinking.
+// The conversation is append-only and streaming only grows the last message,
+// so (first-message pointer, count, last content/thinking lengths) captures
+// every change; the pointer changes when the conversation is switched or
+// cleared.
+type wrapCacheKey struct {
+	first        *Message
+	count        int
+	lastContent  int
+	lastThinking int
+	maxChars     int
+	showThinking bool
+	expanded     bool
+}
+
+// WrappedForRender returns the wrapped conversation lines, rebuilding only
+// when the messages, wrap width, or thinking options changed since the last
+// call. Wrapping every message every frame was a per-frame O(conversation)
+// cost while the panel was open.
+func (p *Panel) WrappedForRender(maxChars int) []WrappedLine {
+	key := wrapCacheKey{
+		count:        len(p.Messages),
+		maxChars:     maxChars,
+		showThinking: p.ShowThinking,
+		expanded:     p.ThinkingExpanded,
+	}
+	if n := len(p.Messages); n > 0 {
+		key.first = &p.Messages[0]
+		key.lastContent = len(p.Messages[n-1].Content)
+		key.lastThinking = len(p.Messages[n-1].Thinking)
+	}
+	if key == p.wrapCache && p.WrappedLines != nil {
+		return p.WrappedLines
+	}
+	p.wrapCache = key
+	p.WrapChars = maxChars
+	p.WrappedLines = BuildWrappedLinesWithThinking(p.Messages, maxChars, p.ShowThinking, p.ThinkingExpanded)
+	return p.WrappedLines
 }
 
 // BuildWrappedLinesWithThinking builds wrapped lines with optional thinking content

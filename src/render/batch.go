@@ -151,6 +151,42 @@ func (r *Renderer) initBatches() error {
 	return nil
 }
 
+// UI batch layer. drawRect and drawChar*/drawText* (tab bar, panels, toasts,
+// help, cursor, underline decorations) append here instead of issuing one
+// draw call + one allocation per rect/char. Switching kind (rect<->glyph),
+// changing projection, or hitting a non-batched draw (grid batches, color
+// emoji) flushes, so paint order is exactly what immediate mode produced.
+const (
+	uiKindNone  = 0
+	uiKindRect  = 1
+	uiKindGlyph = 2
+)
+
+// uiEnsure prepares the UI batch of the given kind, flushing pending work of
+// the other kind (or a different projection) first.
+func (r *Renderer) uiEnsure(kind int, proj [16]float32) {
+	if r.uiKind != kind || r.uiProj != proj {
+		r.uiFlush()
+		r.uiKind = kind
+		r.uiProj = proj
+		r.uiAtlasGen = r.atlasGen
+	}
+}
+
+// uiFlush issues any pending UI batch. Must run before any draw that bypasses
+// the UI batches and at the end of every top-level Render* entry point.
+func (r *Renderer) uiFlush() {
+	switch r.uiKind {
+	case uiKindRect:
+		r.flushRects(&r.uiRects, r.uiProj)
+		r.uiRects.reset()
+	case uiKindGlyph:
+		r.flushGlyphs(&r.uiGlyphs, r.uiProj)
+		r.uiGlyphs.reset()
+	}
+	r.uiKind = uiKindNone
+}
+
 // flushRects uploads and draws all accumulated rectangles in one call.
 func (r *Renderer) flushRects(b *rectBatch, proj [16]float32) {
 	if len(b.verts) == 0 {

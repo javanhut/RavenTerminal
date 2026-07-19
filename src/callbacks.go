@@ -210,7 +210,7 @@ func (a *App) onKey(w *glfw.Window, key glfw.Key, scancode int, action glfw.Acti
 		cellW, cellH := a.renderer.CellDimensions()
 		layout := a.aiPanel.Layout(width, height, cellW, cellH)
 		maxChars := max(int(layout.ContentWidth/cellW)-2, 10)
-		wrapped := aipanel.BuildWrappedLinesWithThinking(a.aiPanel.Messages, maxChars, a.aiPanel.ShowThinking, a.aiPanel.ThinkingExpanded)
+		wrapped := a.aiPanel.WrappedForRender(maxChars)
 		totalLines := len(wrapped)
 		visibleLines := layout.VisibleLines
 		maxScroll := max(totalLines-visibleLines, 0)
@@ -1043,7 +1043,7 @@ func (a *App) onScroll(w *glfw.Window, xoff, yoff float64) {
 		cellW, cellH := a.renderer.CellDimensions()
 		layout := a.aiPanel.Layout(width, height, cellW, cellH)
 		maxChars := max(int(layout.ContentWidth/cellW)-2, 10)
-		totalLines := len(aipanel.BuildWrappedLinesWithThinking(a.aiPanel.Messages, maxChars, a.aiPanel.ShowThinking, a.aiPanel.ThinkingExpanded))
+		totalLines := len(a.aiPanel.WrappedForRender(maxChars))
 		visibleLines := layout.VisibleLines
 		maxScroll := max(totalLines-visibleLines, 0)
 		steps := int(math.Abs(yoff))
