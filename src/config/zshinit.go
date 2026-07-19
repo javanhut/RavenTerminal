@@ -141,7 +141,7 @@ func (c *Config) writeZshInitScript() (string, error) {
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			b.WriteString("export " + name + "=\"" + escapeDoubleQuotes(c.Exports[name]) + "\"\n")
+			b.WriteString("export " + name + "=\"" + bashDoubleQuote(c.Exports[name]) + "\"\n")
 		}
 	}
 
@@ -149,7 +149,7 @@ func (c *Config) writeZshInitScript() (string, error) {
 	if len(c.Shell.Paths) > 0 {
 		b.WriteString("\n# Raven PATH additions\n")
 		for _, dir := range c.Shell.Paths {
-			d := escapeDoubleQuotes(dir)
+			d := bashDoubleQuote(dir)
 			b.WriteString("case \":$PATH:\" in *\":" + d + ":\"*) ;; *) PATH=\"" + d + ":$PATH\";; esac\n")
 		}
 		b.WriteString("export PATH\n")

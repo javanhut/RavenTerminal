@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -106,5 +107,36 @@ func TestSaveBacksUpBrokenConfig(t *testing.T) {
 	}
 	if loaded, err := Load(); err != nil || loaded.Theme != "test-theme" {
 		t.Fatalf("post-backup round-trip: theme=%q err=%v", loaded.Theme, err)
+	}
+}
+
+// Init-script emission must not let config values execute commands: aliases
+// are single-quoted (a ' can't break out), exports keep $VAR live but
+// neutralize backticks and $( command substitution.
+func TestInitScriptEscaping(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := DefaultConfig()
+	cfg.Aliases = map[string]string{"evil": "echo '; rm -rf ~; '"}
+	cfg.Exports = map[string]string{
+		"INJECT": "$(touch /tmp/pwned)`date`",
+		"KEEP":   "$HOME/bin",
+	}
+	path, err := cfg.WriteInitScript()
+	if err != nil {
+		t.Fatalf("WriteInitScript: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(data)
+	for _, want := range []string{
+		`alias evil='echo '\''; rm -rf ~; '\'''`,
+		"export INJECT=\"\\$(touch /tmp/pwned)\\`date\\`\"",
+		`export KEEP="$HOME/bin"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("init.sh missing %q\nscript:\n%s", want, script)
+		}
 	}
 }

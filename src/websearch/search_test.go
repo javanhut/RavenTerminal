@@ -325,3 +325,49 @@ func TestErrorReason(t *testing.T) {
 		}
 	}
 }
+
+
+// A target spliced into a proxy template's "{url}" query parameter must be
+// percent-encoded, or a "&"/"#" in the target breaks out of the parameter and
+// drops later template parameters. Path-style proxy forms keep the raw target.
+func TestBuildProxyURLEncodesTemplateTarget(t *testing.T) {
+	const tpl = "https://web.scraper.workers.dev/?url={url}&selector=body"
+	const target = "https://example.com/a?b=1&c=2#frag"
+	u, err := url.Parse(buildProxyURL(tpl, target))
+	if err != nil {
+		t.Fatalf("buildProxyURL produced an unparseable URL: %v", err)
+	}
+	if u.Query().Get("url") != target {
+		t.Errorf("url param = %q, want %q", u.Query().Get("url"), target)
+	}
+	if u.Query().Get("selector") != "body" {
+		t.Errorf("selector param = %q; target broke out of the url param", u.Query().Get("selector"))
+	}
+
+	for _, c := range []struct{ base, want string }{
+		{"https://r.jina.ai/", "https://r.jina.ai/" + target},
+		{"https://r.jina.ai/http://", "https://r.jina.ai/http://example.com/a?b=1&c=2#frag"},
+	} {
+		if got := buildProxyURL(c.base, target); got != c.want {
+			t.Errorf("buildProxyURL(%q, target) = %q, want %q", c.base, got, c.want)
+		}
+	}
+}
+
+// The validating dialer must refuse loopback/private targets at dial time —
+// this is what closes the DNS-rebinding gap between URL validation and
+// connect. Literal IPs and localhost resolve without external DNS.
+func TestPublicHTTPTransportRejectsPrivateDial(t *testing.T) {
+	transport := publicHTTPTransport()
+	defer transport.CloseIdleConnections()
+	for _, addr := range []string{
+		"127.0.0.1:80", "[::1]:80", "10.0.0.1:443",
+		"169.254.169.254:80", "100.64.0.1:80", "localhost:80",
+	} {
+		conn, err := transport.DialContext(context.Background(), "tcp", addr)
+		if err == nil {
+			conn.Close()
+			t.Errorf("DialContext(%q) connected to a private address", addr)
+		}
+	}
+}

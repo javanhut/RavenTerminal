@@ -241,10 +241,13 @@ type PtySession struct {
 
 	// cwdMu guards a short-lived cache of the working directory used on
 	// platforms without a /proc cwd link (macOS/BSD), where each lookup shells
-	// out to lsof. The cache keeps CurrentDir cheap to call from the render loop.
-	cwdMu       sync.Mutex
-	cwdCache    string
-	cwdCachedAt time.Time
+	// out to lsof. The mutex is never held while lsof runs — refreshes happen
+	// on a goroutine (cwdRefreshing marks one in flight) and callers get the
+	// cached value immediately, so the render loop never blocks on lsof.
+	cwdMu         sync.Mutex
+	cwdCache      string
+	cwdCachedAt   time.Time
+	cwdRefreshing bool
 }
 
 // ShellName returns the basename of the shell this session runs (e.g.
@@ -379,8 +382,14 @@ func NewPtySession(cols, rows uint16, startDir string) (*PtySession, error) {
 	// The PTY winsize (set below and on every Resize) is the source of truth.
 	env = removeEnv(env, "COLUMNS")
 	env = removeEnv(env, "LINES")
-	env = replaceEnv(env, "LANG", "en_US.UTF-8")
-	env = replaceEnv(env, "LC_ALL", "en_US.UTF-8")
+	// Default the locale for UTF-8 rendering, but keep any value the user
+	// already configured rather than clobbering it.
+	if os.Getenv("LANG") == "" {
+		env = replaceEnv(env, "LANG", "en_US.UTF-8")
+	}
+	if os.Getenv("LC_ALL") == "" {
+		env = replaceEnv(env, "LC_ALL", "en_US.UTF-8")
+	}
 	if xdgRuntimeDir != "" {
 		env = replaceEnv(env, "XDG_RUNTIME_DIR", xdgRuntimeDir)
 	}
@@ -485,16 +494,36 @@ func (p *PtySession) CurrentDir() string {
 		return path
 	}
 
-	// Elsewhere, fall back to a rate-limited lsof query.
+	// Elsewhere, serve the cache and refresh it in the background at most
+	// once per TTL. lsof takes 5-50ms; running it inline here (as this once
+	// did) was a recurring per-pane hitch on the render loop.
 	p.cwdMu.Lock()
-	defer p.cwdMu.Unlock()
-	if !p.cwdCachedAt.IsZero() && time.Since(p.cwdCachedAt) < time.Second {
-		return p.cwdCache
+	cached := p.cwdCache
+	fresh := !p.cwdCachedAt.IsZero() && time.Since(p.cwdCachedAt) < cwdCacheTTL
+	if fresh || p.cwdRefreshing {
+		p.cwdMu.Unlock()
+		return cached
 	}
-	p.cwdCache = processCwd(pid)
-	p.cwdCachedAt = time.Now()
-	return p.cwdCache
+	p.cwdRefreshing = true
+	p.cwdMu.Unlock()
+
+	go func() {
+		cwd := processCwd(pid)
+		p.cwdMu.Lock()
+		if cwd != "" {
+			p.cwdCache = cwd
+		}
+		p.cwdCachedAt = time.Now()
+		p.cwdRefreshing = false
+		p.cwdMu.Unlock()
+	}()
+	return cached
 }
+
+// cwdCacheTTL bounds how often CurrentDir spawns lsof on platforms without a
+// /proc cwd link: the render loop calls it once per tab per frame, so the
+// cache limits lsof to at most one subprocess per TTL per pane.
+const cwdCacheTTL = 5 * time.Second
 
 // processCwd returns the working directory of the given pid using lsof, or ""
 // on any failure. It is used on platforms without a /proc cwd link (macOS/BSD).

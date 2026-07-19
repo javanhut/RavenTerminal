@@ -397,6 +397,9 @@ func urlAtCellRange(g *grid.Grid, col, row int) (string, int, int) {
 }
 
 func openURL(target string) error {
+	if err := validateOpenTarget(target); err != nil {
+		return err
+	}
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
@@ -407,4 +410,18 @@ func openURL(target string) error {
 		cmd = exec.Command("xdg-open", target)
 	}
 	return cmd.Start()
+}
+
+// validateOpenTarget gates which links the OS opener may see. Terminal
+// content can come from a remote SSH session or a cat'ed file, so schemes
+// like file:// or smb:// must not be handed to open/xdg-open/rundll32.
+func validateOpenTarget(target string) error {
+	u, err := url.Parse(strings.TrimSpace(target))
+	if err != nil {
+		return fmt.Errorf("invalid url: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("refusing to open non-http(s) url: %q", target)
+	}
+	return nil
 }

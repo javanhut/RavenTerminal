@@ -104,6 +104,62 @@ func isPublicIP(ip net.IP) bool {
 	return !cgnat.Contains(ip)
 }
 
+// publicHTTPTransport returns an http.Transport that re-resolves the host at
+// dial time and connects only to addresses passing isPublicIP. ValidatePublicHTTPURL
+// and the connect would otherwise resolve DNS separately, and a DNS-rebinding
+// answer could swap in a private address between the two lookups; validating
+// the fresh answer on every dial closes that gap. The request still carries
+// the URL's hostname in the Host header and TLS SNI, so HTTPS keeps working.
+func publicHTTPTransport() *http.Transport {
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+		if err != nil {
+			return nil, err
+		}
+		var lastErr error
+		for _, ip := range ips {
+			if !isPublicIP(ip) {
+				continue
+			}
+			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+			if err == nil {
+				return conn, nil
+			}
+			lastErr = err
+		}
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, errors.New("host resolved to no public addresses")
+	}
+	return transport
+}
+
+// sharedPublicTransport is the one validating transport for all fetches, so
+// connections pool; a per-request transport would defeat keep-alive and
+// leave idle conns behind.
+var sharedPublicTransport = publicHTTPTransport()
+
+// checkPublicRedirect applies the public-URL rules to every redirect target,
+// so a page cannot bounce a fetch onto a private address.
+func checkPublicRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("too many redirects")
+	}
+	if err := ValidatePublicHTTPURL(req.Context(), req.URL.String()); err != nil {
+		return err
+	}
+	// Update user agent on redirect
+	req.Header.Set("User-Agent", getRandomUserAgent())
+	return nil
+}
+
 // userAgents is a list of common user agents to rotate through
 var userAgents = []string{
 	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -361,6 +417,10 @@ func SearchDuckDuckGo(ctx context.Context, query string, maxResults int) ([]Resu
 	return nil, ErrNoResults
 }
 
+// maxSearchPageBytes caps how much of a search page is read into the parser —
+// the same cap FetchText applies to page bodies at its default maxChars.
+const maxSearchPageBytes = 8000 * 20
+
 // fetchSearchPage fetches and parses one search endpoint page.
 func fetchSearchPage(ctx context.Context, searchURL string) (*html.Node, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
@@ -371,7 +431,11 @@ func fetchSearchPage(ctx context.Context, searchURL string) (*html.Node, error) 
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{
+		Timeout:       10 * time.Second,
+		Transport:     sharedPublicTransport,
+		CheckRedirect: checkPublicRedirect,
+	}
 	resp, err := doWithRetry(ctx, client, req)
 	if err != nil {
 		return nil, fmt.Errorf("search request failed: %w", err)
@@ -381,7 +445,7 @@ func fetchSearchPage(ctx context.Context, searchURL string) (*html.Node, error) 
 		return nil, fmt.Errorf("search failed: %w", &StatusError{Code: resp.StatusCode})
 	}
 
-	doc, err := html.Parse(resp.Body)
+	doc, err := html.Parse(io.LimitReader(resp.Body, maxSearchPageBytes))
 	if err != nil {
 		return nil, fmt.Errorf("search parse failed: %w", err)
 	}
@@ -481,20 +545,12 @@ func FetchText(ctx context.Context, pageURL string, maxChars int, useReaderProxy
 		}
 	}
 
-	// Create client that follows redirects
+	// Create client that follows redirects; the transport validates the
+	// resolved address on every dial (see publicHTTPTransport).
 	client := &http.Client{
-		Timeout: 15 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
-				return errors.New("too many redirects")
-			}
-			if err := ValidatePublicHTTPURL(req.Context(), req.URL.String()); err != nil {
-				return err
-			}
-			// Update user agent on redirect
-			req.Header.Set("User-Agent", getRandomUserAgent())
-			return nil
-		},
+		Timeout:       15 * time.Second,
+		Transport:     sharedPublicTransport,
+		CheckRedirect: checkPublicRedirect,
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
@@ -1041,7 +1097,10 @@ func buildProxyURL(base, target string) string {
 		return target
 	}
 	if strings.Contains(base, "{url}") {
-		return strings.ReplaceAll(base, "{url}", target)
+		// The target lands in a query parameter, so percent-encode it: a raw
+		// "&" or "#" would break out of the parameter and drop anything the
+		// template appends after it (e.g. "&selector=body").
+		return strings.ReplaceAll(base, "{url}", url.QueryEscape(target))
 	}
 	if strings.HasSuffix(base, "/http://") {
 		return base + stripScheme(target)

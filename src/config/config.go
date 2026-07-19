@@ -649,7 +649,9 @@ func (c *Config) WriteInitScript() (string, error) {
 	if len(c.Aliases) > 0 {
 		script.WriteString("\n# Aliases\n")
 		for name, cmd := range c.Aliases {
-			script.WriteString("alias " + name + "='" + cmd + "'\n")
+			// zshQuote is plain POSIX single-quoting; a ' in the alias body
+			// must not break out of the quotes.
+			script.WriteString("alias " + name + "=" + zshQuote(cmd) + "\n")
 		}
 	}
 
@@ -657,7 +659,7 @@ func (c *Config) WriteInitScript() (string, error) {
 	if len(c.Exports) > 0 {
 		script.WriteString("\n# Exports\n")
 		for name, value := range c.Exports {
-			script.WriteString("export " + name + "=\"" + escapeDoubleQuotes(value) + "\"\n")
+			script.WriteString("export " + name + "=\"" + bashDoubleQuote(value) + "\"\n")
 		}
 	}
 
@@ -667,7 +669,7 @@ func (c *Config) WriteInitScript() (string, error) {
 	if len(c.Shell.Paths) > 0 {
 		script.WriteString("\n# Raven PATH additions\n")
 		for _, dir := range c.Shell.Paths {
-			d := escapeDoubleQuotes(dir)
+			d := bashDoubleQuote(dir)
 			script.WriteString("case \":$PATH:\" in *\":" + d + ":\"*) ;; *) PATH=\"" + d + ":$PATH\";; esac\n")
 		}
 		script.WriteString("export PATH\n")
@@ -851,4 +853,14 @@ func (c *Config) RemoveExport(name string) {
 func escapeDoubleQuotes(s string) string {
 	s = strings.ReplaceAll(s, "\\", "\\\\")
 	return strings.ReplaceAll(s, "\"", "\\\"")
+}
+
+// bashDoubleQuote escapes a value for a double-quoted bash/zsh string: $VAR
+// expansion stays live (exports rely on it; the fish/rsh generators keep
+// parity), but backticks and $( are escaped so a config value can never run
+// a command. Not for fish, where both are already inert in double quotes.
+func bashDoubleQuote(s string) string {
+	s = escapeDoubleQuotes(s)
+	s = strings.ReplaceAll(s, "`", "\\`")
+	return strings.ReplaceAll(s, "$(", "\\$(")
 }
