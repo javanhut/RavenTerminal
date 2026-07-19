@@ -29,6 +29,6 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test ./...
-      - name: Race-test non-graphics core
-        run: go test -race ./src/grid ./src/parser ./src/aitools ./src/shell ./src/websearch ./src/ollama ./src/tab
+      - name: Race-test main package and non-graphics core
+        run: go test -race ./src ./src/grid ./src/parser ./src/aitools ./src/shell ./src/websearch ./src/ollama ./src/tab
 
