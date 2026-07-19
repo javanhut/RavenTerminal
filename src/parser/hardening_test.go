@@ -116,7 +116,7 @@ func TestRepeatWideChar(t *testing.T) {
 	if col != 6 {
 		t.Fatalf("cursor col = %d, want 6", col)
 	}
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		c := term.Grid.GetCell(i*2, 0)
 		if c.Char != '你' || c.Width != grid.CellWidthWide {
 			t.Fatalf("cell %d = char %q width %d, want wide 你", i*2, c.Char, c.Width)
