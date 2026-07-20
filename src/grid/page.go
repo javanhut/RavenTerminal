@@ -63,8 +63,8 @@ func (g *Grid) blankRowN(cols int, bg Color) *Row {
 // caller must own a row that is fresh or already released.
 func (g *Grid) fillRow(r *Row, bg Color) {
 	id := g.styles.intern(styleOf(NewCellWithBg(bg))) // ref=1 owner
+	g.styles.retainN(id, len(r.cells))                // one ref per cell, in bulk
 	for i := range r.cells {
-		g.styles.retain(id)
 		r.cells[i] = storedCell{Style: id, Char: ' ', Width: CellWidthNormal}
 	}
 	g.styles.release(id) // drop owner ref; cells hold len(cells) refs
@@ -86,12 +86,20 @@ func (g *Grid) fillSpan(row, col0, col1 int, bg Color) {
 		return
 	}
 	id := g.styles.intern(styleOf(NewCellWithBg(bg))) // ref=1 owner
-	base := row * g.Cols
-	for col := col0; col < col1; col++ {
-		p := g.cellAt(base + col)
-		g.styles.release(p.Style)
-		g.styles.retain(id)
-		*p = storedCell{Style: id, Char: ' ', Width: CellWidthNormal}
+	g.styles.retainN(id, col1-col0)                   // one ref per cell, in bulk
+	cells := g.rows[row].cells
+	// Release the overwritten cells' styles, coalescing runs of equal ids so a
+	// uniformly-styled span (the common case) costs one releaseN, not one
+	// release per cell.
+	for col := col0; col < col1; {
+		run := col + 1
+		for run < col1 && cells[run].Style == cells[col].Style {
+			run++
+		}
+		g.styles.releaseN(cells[col].Style, run-col)
+		for ; col < run; col++ {
+			cells[col] = storedCell{Style: id, Char: ' ', Width: CellWidthNormal}
+		}
 	}
 	g.styles.release(id) // drop owner ref; cells hold (col1-col0) refs
 	g.rows[row].flags |= RowDirty
@@ -116,10 +124,20 @@ func (g *Grid) recycleRow(r *Row) {
 }
 
 // releaseRow releases all style references held by a row (used when a row is
-// dropped from history). The row itself becomes garbage.
+// dropped from history). The row itself becomes garbage. Adjacent cells sharing
+// one style id are released as a single run — a uniformly-styled row (the
+// common case) is one releaseN instead of one release per cell.
 func (g *Grid) releaseRow(r *Row) {
-	for i := range r.cells {
-		g.styles.release(r.cells[i].Style)
+	cells := r.cells
+	i := 0
+	for i < len(cells) {
+		id := cells[i].Style
+		j := i + 1
+		for j < len(cells) && cells[j].Style == id {
+			j++
+		}
+		g.styles.releaseN(id, j-i)
+		i = j
 	}
 }
 

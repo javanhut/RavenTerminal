@@ -19,6 +19,12 @@ func (g *Grid) ensureTabStops() {
 func (g *Grid) SetTabStop() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.SetTabStopLocked()
+}
+
+// SetTabStopLocked is SetTabStop without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) SetTabStopLocked() {
 	g.ensureTabStops()
 	if g.CursorCol >= 0 && g.CursorCol < len(g.tabStops) {
 		g.tabStops[g.CursorCol] = true
@@ -29,6 +35,12 @@ func (g *Grid) SetTabStop() {
 func (g *Grid) ClearTabStop(mode int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.ClearTabStopLocked(mode)
+}
+
+// ClearTabStopLocked is ClearTabStop without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) ClearTabStopLocked(mode int) {
 	g.ensureTabStops()
 	switch mode {
 	case 0:
@@ -47,6 +59,12 @@ func (g *Grid) ClearTabStop(mode int) {
 func (g *Grid) FillScreen(r rune) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.FillScreenLocked(r)
+}
+
+// FillScreenLocked is FillScreen without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) FillScreenLocked(r rune) {
 	cell := Cell{Char: r, Fg: DefaultFg(), Bg: DefaultBg(), Width: CellWidthNormal}
 	for row := 0; row < g.Rows; row++ {
 		for col := 0; col < g.Cols; col++ {

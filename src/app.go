@@ -343,6 +343,10 @@ func (a *App) Run() {
 		now := time.Now()
 		a.updateCursorBlink(now)
 		a.autoScrollSelection(now)
+		// Consume any outstanding output wake before rendering: chunks that
+		// arrived earlier are rendered below, and chunks arriving after this
+		// point re-arm the wake so WaitEventsTimeout returns immediately.
+		tab.ClearWakePending()
 		a.renderFrame(now)
 
 		// Drain any OSC 52 clipboard writes queued from PTY reader goroutines

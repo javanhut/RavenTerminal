@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/javanhut/RavenTerminal/src/grid"
 	"github.com/javanhut/RavenTerminal/src/images"
+	"math"
 	"net/url"
 	"strconv"
 	"strings"
@@ -108,7 +109,9 @@ const (
 type Terminal struct {
 	Grid            *grid.Grid
 	state           ParserState
-	csiParams       string
+	csiBuf          []byte
+	paramScratch    []int
+	subScratch      []int
 	oscParams       []byte
 	dcsParams       []byte
 	currentFg       grid.Color
@@ -122,7 +125,8 @@ type Terminal struct {
 	responseWriter  func([]byte)
 	mu              sync.Mutex
 	// UTF-8 decoding state
-	utf8Buf       []byte
+	utf8Buf       [4]byte
+	utf8Len       int
 	utf8Remaining int
 	// Per-screen cursor state (fixes shared cursor bug)
 	savedMainCursor      CursorState
@@ -185,8 +189,10 @@ type Terminal struct {
 	clipboardReader func() string
 	// Reusable render snapshot buffer (double-buffered across frames).
 	snapPrev *grid.Snapshot
-	// Reusable rune buffer for Process's batch fast path (guarded by mu).
-	runBuf []rune
+	// batchGrid is the grid whose Grid.mu Process currently holds (via
+	// LockBatch) for the duration of a chunk. It tracks the lock across
+	// alternate-screen swaps; nil outside Process. Guarded by mu.
+	batchGrid *grid.Grid
 }
 
 // NewTerminal creates a new terminal parser
@@ -213,30 +219,39 @@ func NewTerminal(cols, rows int) *Terminal {
 
 // Process processes incoming bytes from the PTY.
 //
-// LOCK ORDER: t.mu is held for the whole chunk; Grid methods called beneath it
-// take Grid.mu. Terminal.mu is always acquired before Grid.mu (see Snapshot);
-// never the reverse.
+// LOCK ORDER: t.mu is held for the whole chunk, and beneath it Grid.mu is held
+// for the whole chunk too (via Grid.LockBatch; every grid call below uses an
+// exported XxxLocked variant — a locking public method would self-deadlock).
+// Terminal.mu is always acquired before Grid.mu (see Snapshot); never the
+// reverse. Grid.mu is a leaf lock: grid code never calls out of its package.
+// The batch lock follows the grid across alternate-screen swaps (batchGrid).
+// Worst-case hold time is bounded by one chunk (the PTY read buffer), so
+// Grid.mu-only callers (selection, scrollbar) see at most one extra chunk of
+// wait, while the renderer already waits on t.mu for the same span.
 func (t *Terminal) Process(data []byte) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	t.batchGrid = t.Grid
+	t.batchGrid.LockBatch()
+	defer func() {
+		t.batchGrid.UnlockBatch()
+		t.batchGrid = nil
+	}()
 
 	for i := 0; i < len(data); {
 		b := data[i]
 		// Fast path: a run of printable ASCII in ground state with plain
 		// charset and no insert mode is written through the grid's batch path,
-		// taking Grid.mu once per run instead of once per rune. Everything
-		// else falls back to the per-byte state machine.
+		// byte-direct (no []rune conversion). Everything else falls back to
+		// the per-byte state machine.
 		if b >= 0x20 && b < 0x7f && t.state == StateGround && t.utf8Remaining == 0 &&
 			!t.insertMode && !t.activeCharsetMapped() {
 			j := i + 1
 			for j < len(data) && data[j] >= 0x20 && data[j] < 0x7f {
 				j++
 			}
-			t.runBuf = t.runBuf[:0]
-			for _, c := range data[i:j] {
-				t.runBuf = append(t.runBuf, rune(c))
-			}
-			t.Grid.WriteRunes(t.runBuf, t.currentFg, t.currentBg, t.currentFlags,
+			t.Grid.WriteBytesLocked(data[i:j], t.currentFg, t.currentBg, t.currentFlags,
 				t.currentLinkID, t.currentUnderlineStyle, t.currentUnderlineColor)
 			i = j
 			continue
@@ -283,7 +298,7 @@ func (t *Terminal) processByte(b byte) {
 	case StateHash:
 		// DEC special sequences. ESC # 8 is DECALN (fill screen with 'E').
 		if b == '8' {
-			t.Grid.FillScreen('E')
+			t.Grid.FillScreenLocked('E')
 		}
 		t.state = StateGround
 	}
@@ -294,17 +309,18 @@ func (t *Terminal) processGround(b byte) {
 	// If we're in the middle of a UTF-8 sequence, continue it
 	if t.utf8Remaining > 0 {
 		if b&0xC0 == 0x80 { // Valid continuation byte
-			t.utf8Buf = append(t.utf8Buf, b)
+			t.utf8Buf[t.utf8Len] = b
+			t.utf8Len++
 			t.utf8Remaining--
 			if t.utf8Remaining == 0 {
 				// Complete UTF-8 sequence - decode and write
-				r := t.mapCharsetRune(decodeUTF8(t.utf8Buf))
+				r := t.mapCharsetRune(decodeUTF8(t.utf8Buf[:t.utf8Len]))
 				t.printRune(r)
-				t.utf8Buf = nil
+				t.utf8Len = 0
 			}
 		} else {
 			// Invalid continuation - discard and process this byte normally
-			t.utf8Buf = nil
+			t.utf8Len = 0
 			t.utf8Remaining = 0
 			t.processGround(b)
 		}
@@ -320,21 +336,21 @@ func (t *Terminal) processGround(b byte) {
 	case 0x07: // BEL
 		// Bell - ignore
 	case 0x08: // BS
-		t.Grid.Backspace()
+		t.Grid.BackspaceLocked()
 	case 0x09: // HT (Tab)
-		t.Grid.Tab()
+		t.Grid.TabLocked()
 	case 0x0e: // SO (Shift Out) - select G1
 		t.activeCharset = 1
 	case 0x0f: // SI (Shift In) - select G0
 		t.activeCharset = 0
 	case 0x0a, 0x0b, 0x0c: // LF, VT, FF
 		if t.lnmMode { // LNM: LF also performs CR
-			t.Grid.CarriageReturn()
+			t.Grid.CarriageReturnLocked()
 		}
-		t.Grid.Newline()
+		t.Grid.NewlineLocked()
 		// Scroll position preserved - reset happens on user input instead
 	case 0x0d: // CR
-		t.Grid.CarriageReturn()
+		t.Grid.CarriageReturnLocked()
 	default:
 		if b >= 0x20 && b < 0x7f {
 			// ASCII printable character
@@ -342,15 +358,18 @@ func (t *Terminal) processGround(b byte) {
 			t.printRune(r)
 		} else if b >= 0xC0 && b < 0xE0 {
 			// Start of 2-byte UTF-8 sequence
-			t.utf8Buf = []byte{b}
+			t.utf8Buf[0] = b
+			t.utf8Len = 1
 			t.utf8Remaining = 1
 		} else if b >= 0xE0 && b < 0xF0 {
 			// Start of 3-byte UTF-8 sequence
-			t.utf8Buf = []byte{b}
+			t.utf8Buf[0] = b
+			t.utf8Len = 1
 			t.utf8Remaining = 2
 		} else if b >= 0xF0 && b < 0xF8 {
 			// Start of 4-byte UTF-8 sequence
-			t.utf8Buf = []byte{b}
+			t.utf8Buf[0] = b
+			t.utf8Len = 1
 			t.utf8Remaining = 3
 		}
 		// Ignore other bytes (control characters, invalid UTF-8 start bytes)
@@ -362,10 +381,10 @@ func (t *Terminal) processGround(b byte) {
 func (t *Terminal) printRune(r rune) {
 	if t.insertMode {
 		if w := grid.RuneWidth(r); w > 0 {
-			t.Grid.InsertChars(w)
+			t.Grid.InsertCharsLocked(w)
 		}
 	}
-	t.Grid.WriteChar(r, t.currentFg, t.currentBg, t.currentFlags, t.currentLinkID, t.currentUnderlineStyle, t.currentUnderlineColor)
+	t.Grid.WriteCharLocked(r, t.currentFg, t.currentBg, t.currentFlags, t.currentLinkID, t.currentUnderlineStyle, t.currentUnderlineColor)
 }
 
 // decodeUTF8 decodes a UTF-8 byte sequence to a rune
@@ -415,7 +434,7 @@ func decodeUTF8(buf []byte) rune {
 // setCursorPos applies origin mode if enabled, then clamps to bounds.
 func (t *Terminal) setCursorPos(col, row int) {
 	if t.originMode {
-		top, bottom := t.Grid.GetScrollRegion()
+		top, bottom := t.Grid.GetScrollRegionLocked()
 		row = top + row - 1
 		if row < top {
 			row = top
@@ -423,16 +442,16 @@ func (t *Terminal) setCursorPos(col, row int) {
 			row = bottom
 		}
 	}
-	t.Grid.SetCursorPos(col, row)
+	t.Grid.SetCursorPosLocked(col, row)
 }
 
 // moveCursor moves the cursor and clamps to the scroll region if origin mode is enabled.
 func (t *Terminal) moveCursor(dCol, dRow int) {
 	if !t.originMode {
-		t.Grid.MoveCursor(dCol, dRow)
+		t.Grid.MoveCursorLocked(dCol, dRow)
 		return
 	}
-	col, row := t.Grid.GetCursor()
+	col, row := t.Grid.GetCursorLocked()
 	col += dCol
 	row += dRow
 	if col < 0 {
@@ -440,7 +459,7 @@ func (t *Terminal) moveCursor(dCol, dRow int) {
 	} else if col >= t.Grid.Cols {
 		col = t.Grid.Cols - 1
 	}
-	top, bottom := t.Grid.GetScrollRegion()
+	top, bottom := t.Grid.GetScrollRegionLocked()
 	top--
 	bottom--
 	if row < top {
@@ -448,7 +467,7 @@ func (t *Terminal) moveCursor(dCol, dRow int) {
 	} else if row > bottom {
 		row = bottom
 	}
-	t.Grid.SetCursorPos(col+1, row+1)
+	t.Grid.SetCursorPosLocked(col+1, row+1)
 }
 
 // mapCharsetRune applies DEC line drawing mapping if a graphics charset is active.
@@ -512,7 +531,7 @@ func (t *Terminal) processEscape(b byte) {
 	switch b {
 	case '[': // CSI
 		t.state = StateCSI
-		t.csiParams = ""
+		t.csiBuf = t.csiBuf[:0]
 	case ']': // OSC
 		t.state = StateOSC
 		t.oscParams = t.oscParams[:0]
@@ -529,26 +548,26 @@ func (t *Terminal) processEscape(b byte) {
 		t.reset()
 		t.state = StateGround
 	case 'D': // IND - Index (down, respects scroll region, with BCE)
-		_, row := t.Grid.GetCursor()
-		_, bottom := t.Grid.GetScrollRegion()
+		_, row := t.Grid.GetCursorLocked()
+		_, bottom := t.Grid.GetScrollRegionLocked()
 		if row == bottom-1 { // At bottom of scroll region (0-based vs 1-based)
-			t.Grid.ScrollUpWithBg(1, t.currentBg)
+			t.Grid.ScrollUpWithBgLocked(1, t.currentBg)
 		} else {
-			t.Grid.MoveCursor(0, 1)
+			t.Grid.MoveCursorLocked(0, 1)
 		}
 		t.state = StateGround
 	case 'M': // RI - Reverse index (up, respects scroll region, with BCE)
-		_, row := t.Grid.GetCursor()
-		top, _ := t.Grid.GetScrollRegion()
+		_, row := t.Grid.GetCursorLocked()
+		top, _ := t.Grid.GetScrollRegionLocked()
 		if row == top-1 { // At top of scroll region (0-based vs 1-based)
-			t.Grid.ScrollDownWithBg(1, t.currentBg)
+			t.Grid.ScrollDownWithBgLocked(1, t.currentBg)
 		} else if row > 0 {
-			t.Grid.MoveCursor(0, -1)
+			t.Grid.MoveCursorLocked(0, -1)
 		}
 		t.state = StateGround
 	case 'E': // NEL - Next line
-		t.Grid.CarriageReturn()
-		t.Grid.Newline()
+		t.Grid.CarriageReturnLocked()
+		t.Grid.NewlineLocked()
 		t.state = StateGround
 	case '(', ')', '*', '+': // Character set designation - need to consume next byte
 		switch b {
@@ -567,7 +586,7 @@ func (t *Terminal) processEscape(b byte) {
 	case '#': // DEC line drawing - need to consume next byte
 		t.state = StateHash
 	case 'H': // HTS - set tab stop at cursor
-		t.Grid.SetTabStop()
+		t.Grid.SetTabStopLocked()
 		t.state = StateGround
 	case '_': // APC - Application Program Command (Kitty graphics)
 		t.state = StateAPC
@@ -582,40 +601,57 @@ func (t *Terminal) processCSI(b byte) {
 	switch {
 	case b >= 0x30 && b <= 0x3f:
 		// Parameter byte
-		if len(t.csiParams) < maxCSILen {
-			t.csiParams += string(b)
+		if len(t.csiBuf) < maxCSILen {
+			t.csiBuf = append(t.csiBuf, b)
 		}
 	case b >= 0x20 && b <= 0x2f:
 		// Intermediate byte
-		if len(t.csiParams) < maxCSILen {
-			t.csiParams += string(b)
+		if len(t.csiBuf) < maxCSILen {
+			t.csiBuf = append(t.csiBuf, b)
 		}
 	case b >= 0x40 && b <= 0x7e:
 		// Final byte (skip execution if the params overflowed the cap)
-		if len(t.csiParams) < maxCSILen {
+		if len(t.csiBuf) < maxCSILen {
 			t.executeCSI(b)
 		}
-		t.csiParams = "" // Clear params after execution
+		t.csiBuf = t.csiBuf[:0] // Clear params after execution
 		t.state = StateGround
 	case b == 0x1b: // ESC aborts the sequence and starts a new one
-		t.csiParams = ""
+		t.csiBuf = t.csiBuf[:0]
 		t.state = StateEscape
 	case b == 0x18 || b == 0x1a: // CAN/SUB abort
-		t.csiParams = ""
+		t.csiBuf = t.csiBuf[:0]
 		t.state = StateGround
 	case b < 0x20:
 		// C0 controls embedded in a CSI sequence execute immediately without
 		// aborting it (VT behavior; curses output relies on this).
 		t.processGround(b)
 	default:
-		t.csiParams = "" // Clear params on abort
+		t.csiBuf = t.csiBuf[:0] // Clear params on abort
 		t.state = StateGround
 	}
 }
 
+// csiHasPrefix reports whether the accumulated CSI bytes start with c.
+func (t *Terminal) csiHasPrefix(c byte) bool {
+	return len(t.csiBuf) > 0 && t.csiBuf[0] == c
+}
+
+// csiHasSuffix reports whether the accumulated CSI bytes end with c.
+func (t *Terminal) csiHasSuffix(c byte) bool {
+	return len(t.csiBuf) > 0 && t.csiBuf[len(t.csiBuf)-1] == c
+}
+
 // executeCSI executes a CSI sequence
 func (t *Terminal) executeCSI(final byte) {
-	params := t.parseParams(t.csiParams)
+	if final == 'm' { // SGR - Select graphic rendition
+		// Parsed in a single pass here; the generic parseParams is skipped so
+		// SGR sequences are not parsed twice.
+		t.executeSGR(t.parseSGRParams())
+		return
+	}
+
+	params := t.parseParams()
 
 	switch final {
 	case 'A': // CUU - Cursor up
@@ -632,16 +668,16 @@ func (t *Terminal) executeCSI(final byte) {
 		t.moveCursor(-n, 0)
 	case 'E': // CNL - Cursor next line
 		n := t.getParam(params, 0, 1)
-		t.Grid.CarriageReturn()
+		t.Grid.CarriageReturnLocked()
 		t.moveCursor(0, n)
 	case 'F': // CPL - Cursor previous line
 		n := t.getParam(params, 0, 1)
-		t.Grid.CarriageReturn()
+		t.Grid.CarriageReturnLocked()
 		t.moveCursor(0, -n)
 	case 'G': // CHA - Cursor horizontal absolute
 		n := t.getParam(params, 0, 1)
-		_, row := t.Grid.GetCursor()
-		t.Grid.SetCursorPos(n, row+1)
+		_, row := t.Grid.GetCursorLocked()
+		t.Grid.SetCursorPosLocked(n, row+1)
 	case 'H', 'f': // CUP - Cursor position
 		row := t.getParam(params, 0, 1)
 		col := t.getParam(params, 1, 1)
@@ -650,55 +686,52 @@ func (t *Terminal) executeCSI(final byte) {
 		n := t.getParam(params, 0, 0)
 		switch n {
 		case 0:
-			t.Grid.ClearToEndWithBg(t.currentBg)
+			t.Grid.ClearToEndWithBgLocked(t.currentBg)
 		case 1:
-			t.Grid.ClearToStartWithBg(t.currentBg)
+			t.Grid.ClearToStartWithBgLocked(t.currentBg)
 		case 2:
-			t.Grid.ClearAllWithBg(t.currentBg)
+			t.Grid.ClearAllWithBgLocked(t.currentBg)
 		case 3: // ED 3 erases saved lines (scrollback) only, not the screen
-			t.Grid.ClearScrollback()
+			t.Grid.ClearScrollbackLocked()
 		}
 	case 'K': // EL - Erase in line (with BCE support)
 		n := t.getParam(params, 0, 0)
 		switch n {
 		case 0:
-			t.Grid.ClearLineToEndWithBg(t.currentBg)
+			t.Grid.ClearLineToEndWithBgLocked(t.currentBg)
 		case 1:
-			t.Grid.ClearLineToStartWithBg(t.currentBg)
+			t.Grid.ClearLineToStartWithBgLocked(t.currentBg)
 		case 2:
-			t.Grid.ClearLineWithBg(t.currentBg)
+			t.Grid.ClearLineWithBgLocked(t.currentBg)
 		}
 	case 'L': // IL - Insert lines (with BCE support)
 		n := t.getParam(params, 0, 1)
-		t.Grid.InsertLinesWithBg(n, t.currentBg)
+		t.Grid.InsertLinesWithBgLocked(n, t.currentBg)
 	case 'M': // DL - Delete lines (with BCE support)
 		n := t.getParam(params, 0, 1)
-		t.Grid.DeleteLinesWithBg(n, t.currentBg)
+		t.Grid.DeleteLinesWithBgLocked(n, t.currentBg)
 	case 'P': // DCH - Delete characters
 		n := t.getParam(params, 0, 1)
-		t.Grid.DeleteChars(n)
+		t.Grid.DeleteCharsLocked(n)
 	case '@': // ICH - Insert characters
 		n := t.getParam(params, 0, 1)
-		t.Grid.InsertChars(n)
+		t.Grid.InsertCharsLocked(n)
 	case 'S': // SU - Scroll up (with BCE support)
 		n := t.getParam(params, 0, 1)
-		t.Grid.ScrollUpWithBg(n, t.currentBg)
+		t.Grid.ScrollUpWithBgLocked(n, t.currentBg)
 	case 'T': // SD - Scroll down (with BCE support)
 		n := t.getParam(params, 0, 1)
-		t.Grid.ScrollDownWithBg(n, t.currentBg)
+		t.Grid.ScrollDownWithBgLocked(n, t.currentBg)
 	case 'X': // ECH - Erase character (erase n chars at cursor without moving)
 		n := t.getParam(params, 0, 1)
-		t.Grid.EraseChars(n)
+		t.Grid.EraseCharsLocked(n)
 	case 'd': // VPA - Vertical position absolute
 		n := t.getParam(params, 0, 1)
-		col, _ := t.Grid.GetCursor()
+		col, _ := t.Grid.GetCursorLocked()
 		t.setCursorPos(col+1, n)
 	case 'b': // REP - Repeat preceding character
 		n := t.getParam(params, 0, 1)
-		t.Grid.RepeatChar(n)
-	case 'm': // SGR - Select graphic rendition
-		sgrParams := t.parseSGRParams(t.csiParams)
-		t.executeSGR(sgrParams)
+		t.Grid.RepeatCharLocked(n)
 	case 'h': // SM - Set mode
 		t.setMode(params, true)
 	case 'l': // RM - Reset mode
@@ -706,11 +739,11 @@ func (t *Terminal) executeCSI(final byte) {
 	case 'r': // DECSTBM - Set scrolling region
 		top := t.getParam(params, 0, 1)
 		bottom := t.getParam(params, 1, t.Grid.Rows)
-		t.Grid.SetScrollRegion(top, bottom)
+		t.Grid.SetScrollRegionLocked(top, bottom)
 		if t.originMode {
 			t.setCursorPos(1, 1)
 		} else {
-			t.Grid.SetCursorPos(1, 1)
+			t.Grid.SetCursorPosLocked(1, 1)
 		}
 	case 's': // SCP - Save cursor position
 		t.saveCursor()
@@ -718,13 +751,13 @@ func (t *Terminal) executeCSI(final byte) {
 		// Kitty keyboard protocol uses CSI with a >/</=/? prefix and final 'u';
 		// the unprefixed form is RCP (restore cursor position).
 		switch {
-		case strings.HasPrefix(t.csiParams, ">"):
+		case t.csiHasPrefix('>'):
 			t.kittyPush(uint8(t.getParam(params, 0, 0)))
-		case strings.HasPrefix(t.csiParams, "<"):
+		case t.csiHasPrefix('<'):
 			t.kittyPop(t.getParam(params, 0, 1))
-		case strings.HasPrefix(t.csiParams, "="):
+		case t.csiHasPrefix('='):
 			t.kittySet(uint8(t.getParam(params, 0, 0)), t.getParam(params, 1, 1))
-		case strings.HasPrefix(t.csiParams, "?"):
+		case t.csiHasPrefix('?'):
 			t.kittyQuery()
 		default:
 			t.restoreCursor()
@@ -734,13 +767,13 @@ func (t *Terminal) executeCSI(final byte) {
 	case 'c': // DA - Device attributes
 		t.handleDA(params)
 	case 'g': // TBC - Tab clear (0=at cursor, 3=all)
-		t.Grid.ClearTabStop(t.getParam(params, 0, 0))
+		t.Grid.ClearTabStopLocked(t.getParam(params, 0, 0))
 	case 't': // Window manipulation: report text-area size in chars (18)
 		if t.getParam(params, 0, 0) == 18 && t.responseWriter != nil {
 			t.responseWriter(fmt.Appendf(nil, "\x1b[8;%d;%dt", t.Grid.Rows, t.Grid.Cols))
 		}
 	case 'q':
-		if strings.HasPrefix(t.csiParams, ">") {
+		if t.csiHasPrefix('>') {
 			// XTVERSION (CSI > q): report terminal name/version as DCS > | text ST.
 			if t.responseWriter != nil {
 				t.responseWriter([]byte("\x1bP>|RavenTerminal\x1b\\"))
@@ -750,10 +783,10 @@ func (t *Terminal) executeCSI(final byte) {
 			t.setCursorStyle(params)
 		}
 	case 'p':
-		if strings.HasSuffix(t.csiParams, "!") {
+		if t.csiHasSuffix('!') {
 			// DECSTR - soft terminal reset
 			t.softReset()
-		} else if strings.HasPrefix(t.csiParams, "?") && strings.HasSuffix(t.csiParams, "$") {
+		} else if t.csiHasPrefix('?') && t.csiHasSuffix('$') {
 			// DECRQM - request DEC private mode state
 			t.handleDECRQM(params)
 		}
@@ -771,6 +804,7 @@ func (t *Terminal) executeSGR(params []int) {
 		params = []int{0}
 	}
 
+	prevBg := t.currentBg
 	i := 0
 	for i < len(params) {
 		p := params[i]
@@ -870,14 +904,17 @@ func (t *Terminal) executeSGR(params []int) {
 		}
 		i++
 	}
-	// Sync BCE erase background with current background
-	t.Grid.SetEraseBackground(t.currentBg)
+	// Sync BCE erase background with current background, but only when it
+	// actually changed — most SGR sequences touch attributes or foreground.
+	if t.currentBg != prevBg {
+		t.Grid.SetEraseBackgroundLocked(t.currentBg)
+	}
 }
 
 // setMode handles setting/resetting terminal modes
 func (t *Terminal) setMode(params []int, set bool) {
 	// Check for private mode indicator
-	private := strings.HasPrefix(t.csiParams, "?")
+	private := t.csiHasPrefix('?')
 
 	for _, p := range params {
 		if !private {
@@ -895,7 +932,7 @@ func (t *Terminal) setMode(params []int, set bool) {
 			case 1: // DECCKM - Application cursor keys
 				t.appCursorKeys = set
 			case 7: // DECAWM - Auto-wrap mode
-				t.Grid.SetAutoWrap(set)
+				t.Grid.SetAutoWrapLocked(set)
 			case 25: // DECTCEM - Text cursor enable
 				t.cursorVisible = set
 			case 6: // DECOM - Origin mode
@@ -903,7 +940,7 @@ func (t *Terminal) setMode(params []int, set bool) {
 				if t.originMode {
 					t.setCursorPos(1, 1)
 				} else {
-					t.Grid.SetCursorPos(1, 1)
+					t.Grid.SetCursorPosLocked(1, 1)
 				}
 			case 47, 1047: // Alternate screen buffer
 				if set {
@@ -961,11 +998,24 @@ func (t *Terminal) setMode(params []int, set bool) {
 	}
 }
 
+// relockBatchGrid moves Process's batch grid lock (see LockBatch) from the
+// previous grid to t.Grid after an alternate-screen swap, so the XxxLocked
+// calls below always run under the mutex of the grid they touch. The freshly
+// swapped-in grid is only reachable via t.Grid, which t.mu guards, so taking
+// its lock here is uncontended. No-op outside a batch.
+func (t *Terminal) relockBatchGrid() {
+	if t.batchGrid != nil && t.batchGrid != t.Grid {
+		t.batchGrid.UnlockBatch()
+		t.batchGrid = t.Grid
+		t.batchGrid.LockBatch()
+	}
+}
+
 // enterAlternateScreen switches to alternate screen buffer
 func (t *Terminal) enterAlternateScreen() {
 	if !t.alternateScreen {
 		// Save main screen's scroll region
-		t.savedMainScrollTop, t.savedMainScrollBottom = t.Grid.GetScrollRegion()
+		t.savedMainScrollTop, t.savedMainScrollBottom = t.Grid.GetScrollRegionLocked()
 
 		// Save terminal modes so they can be restored on exit
 		t.savedMainAppCursorKeys = t.appCursorKeys
@@ -979,10 +1029,13 @@ func (t *Terminal) enterAlternateScreen() {
 		// The alternate screen has no scrollback (standard VT behavior).
 		t.Grid = grid.NewAltGrid(t.Grid.Cols, t.Grid.Rows)
 		t.alternateScreen = true
+		t.relockBatchGrid()
+		// The snapshot buffer belongs to the old grid; force a fresh full copy.
+		t.snapPrev = nil
 
 		// Clear the alternate screen (standard behavior)
-		t.Grid.ClearAll()
-		t.Grid.SetCursorPos(1, 1)
+		t.Grid.ClearAllLocked()
+		t.Grid.SetCursorPosLocked(1, 1)
 	}
 }
 
@@ -993,9 +1046,12 @@ func (t *Terminal) exitAlternateScreen() {
 		t.Grid = t.savedMainGrid
 		t.savedMainGrid = nil
 		t.alternateScreen = false
+		t.relockBatchGrid()
+		// The snapshot buffer belongs to the alt grid; force a fresh full copy.
+		t.snapPrev = nil
 
 		// Restore scroll region without resetting cursor position
-		t.Grid.RestoreScrollRegion(t.savedMainScrollTop, t.savedMainScrollBottom)
+		t.Grid.RestoreScrollRegionLocked(t.savedMainScrollTop, t.savedMainScrollBottom)
 
 		// Reset text attributes to defaults (prevent TUI colors leaking)
 		t.currentFg = grid.DefaultFg()
@@ -1003,7 +1059,7 @@ func (t *Terminal) exitAlternateScreen() {
 		t.currentFlags = 0
 
 		// Reset BCE background on the restored grid
-		t.Grid.SetEraseBackground(grid.DefaultBg())
+		t.Grid.SetEraseBackgroundLocked(grid.DefaultBg())
 
 		// Reset charset state to ASCII defaults
 		t.charsetG0 = charsetASCII
@@ -1025,7 +1081,7 @@ func (t *Terminal) exitAlternateScreen() {
 		t.kittyStack, t.altKittyStack = t.altKittyStack, t.kittyStack
 
 		// Clear stale wrap state from the restored grid
-		t.Grid.ResetWrapPending()
+		t.Grid.ResetWrapPendingLocked()
 	}
 }
 
@@ -1174,7 +1230,7 @@ func (t *Terminal) handleOSC(params string) {
 		if uri == "" {
 			t.currentLinkID = 0
 		} else {
-			t.currentLinkID = t.Grid.InternLink(uri)
+			t.currentLinkID = t.Grid.InternLinkLocked(uri)
 		}
 	case "52": // Clipboard access: OSC 52 ; Pc ; Pd
 		t.handleOSC52(value)
@@ -1407,89 +1463,172 @@ func (t *Terminal) EncodeMouseEvent(button int, x, y int, pressed bool) []byte {
 	return encodeMouseBytes(t.mouseSGRMode, button, x, y, pressed)
 }
 
+// atoiBytes parses a decimal integer exactly like strconv.Atoi: an optional
+// leading sign followed by digits only; ok is false on empty input, stray
+// characters, or overflow (callers treat !ok as 0, matching the old
+// "n, _ := strconv.Atoi(...)" behavior).
+func atoiBytes(s []byte) (n int, ok bool) {
+	if len(s) == 0 {
+		return 0, false
+	}
+	i := 0
+	neg := false
+	if s[0] == '+' || s[0] == '-' {
+		neg = s[0] == '-'
+		i = 1
+		if len(s) == 1 {
+			return 0, false
+		}
+	}
+	// Accumulate negatively so MinInt is representable, mirroring Atoi.
+	for ; i < len(s); i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		d := int(c - '0')
+		if n < (math.MinInt+d)/10 {
+			return 0, false // overflow
+		}
+		n = n*10 - d
+	}
+	if !neg {
+		if n < -math.MaxInt {
+			return 0, false // overflow
+		}
+		n = -n
+	}
+	return n, true
+}
+
 // parseSGRParams parses CSI parameters for SGR sequences, properly expanding
 // colon sub-parameters for extended color sequences (38, 48, 58) per ISO 8613-6.
 // Modern apps like Neovim use "38:2:R:G:B" instead of "38;2;R;G;B".
-func (t *Terminal) parseSGRParams(s string) []int {
-	s = strings.TrimPrefix(s, "?")
-	s = strings.TrimPrefix(s, ">")
-	s = strings.TrimPrefix(s, "!")
-	if s == "" {
-		return nil
-	}
-	var params []int
-	parts := strings.SplitSeq(s, ";")
-	for part := range parts {
-		if strings.Contains(part, ":") {
-			subparts := strings.Split(part, ":")
-			first, _ := strconv.Atoi(subparts[0])
-			if first == 38 || first == 48 || first == 58 {
-				// Expand colon sub-params for extended color sequences.
-				// The ITU T.416 RGB form carries a colorspace ID slot
-				// ("38:2::R:G:B"); drop it, and truncate any trailing
-				// sub-params (tolerance etc.) so executeSGR sees exactly
-				// the semicolon stream (38;2;R;G;B / 38;5;n) with no
-				// leftovers that would run as spurious SGR codes.
-				if len(subparts) > 1 && subparts[1] == "2" {
-					if len(subparts) >= 6 {
-						subparts = append(subparts[:2], subparts[3:]...)
-					}
-					if len(subparts) > 5 {
-						subparts = subparts[:5]
-					}
-				} else if len(subparts) > 1 && subparts[1] == "5" && len(subparts) > 3 {
-					subparts = subparts[:3]
-				}
-				for _, sp := range subparts {
-					n, _ := strconv.Atoi(sp)
-					params = append(params, n)
-				}
-			} else if first == 4 && len(subparts) > 1 {
-				// Underline style "4:n" (curly/dotted/dashed/etc) - encode the sub-style
-				style, _ := strconv.Atoi(subparts[1])
-				params = append(params, sgrUnderlineStyleBase+style)
-			} else {
-				// For other colon codes, keep first value only
-				params = append(params, first)
-			}
-		} else {
-			n, _ := strconv.Atoi(part)
-			params = append(params, n)
+// The result reuses t.paramScratch and must be consumed before the next parse.
+func (t *Terminal) parseSGRParams() []int {
+	s := t.csiBuf
+	// Remove private/prefix indicators, one byte each in this order.
+	for _, p := range [...]byte{'?', '>', '!'} {
+		if len(s) > 0 && s[0] == p {
+			s = s[1:]
 		}
 	}
+	if len(s) == 0 {
+		return nil
+	}
+	params := t.paramScratch[:0]
+	start := 0
+	for i := 0; i <= len(s); i++ {
+		if i == len(s) || s[i] == ';' {
+			params = t.appendSGRPart(params, s[start:i])
+			start = i + 1
+		}
+	}
+	t.paramScratch = params
 	return params
 }
 
-// parseParams parses CSI parameters
-func (t *Terminal) parseParams(s string) []int {
-	// Remove private/prefix indicators (?, >, <, =, !).
-	s = strings.TrimPrefix(s, "?")
-	s = strings.TrimPrefix(s, ">")
-	s = strings.TrimPrefix(s, "<")
-	s = strings.TrimPrefix(s, "=")
-	s = strings.TrimPrefix(s, "!")
+// appendSGRPart parses one ';'-separated SGR parameter (possibly carrying
+// ':'-separated sub-parameters) and appends the resulting code(s) to params.
+func (t *Terminal) appendSGRPart(params []int, part []byte) []int {
+	hasColon := false
+	for _, c := range part {
+		if c == ':' {
+			hasColon = true
+			break
+		}
+	}
+	if !hasColon {
+		n, _ := atoiBytes(part)
+		return append(params, n)
+	}
+
+	subs := t.subScratch[:0]
+	var second []byte // raw bytes of subparts[1], for the "2"/"5" checks below
+	idx := 0
+	start := 0
+	for k := 0; k <= len(part); k++ {
+		if k == len(part) || part[k] == ':' {
+			sp := part[start:k]
+			if idx == 1 {
+				second = sp
+			}
+			n, _ := atoiBytes(sp)
+			subs = append(subs, n)
+			idx++
+			start = k + 1
+		}
+	}
+
+	first := subs[0]
+	if first == 38 || first == 48 || first == 58 {
+		// Expand colon sub-params for extended color sequences.
+		// The ITU T.416 RGB form carries a colorspace ID slot
+		// ("38:2::R:G:B"); drop it, and truncate any trailing
+		// sub-params (tolerance etc.) so executeSGR sees exactly
+		// the semicolon stream (38;2;R;G;B / 38;5;n) with no
+		// leftovers that would run as spurious SGR codes.
+		if len(subs) > 1 && len(second) == 1 && second[0] == '2' {
+			if len(subs) >= 6 {
+				subs = append(subs[:2], subs[3:]...)
+			}
+			if len(subs) > 5 {
+				subs = subs[:5]
+			}
+		} else if len(subs) > 1 && len(second) == 1 && second[0] == '5' && len(subs) > 3 {
+			subs = subs[:3]
+		}
+		t.subScratch = subs
+		return append(params, subs...)
+	} else if first == 4 && len(subs) > 1 {
+		// Underline style "4:n" (curly/dotted/dashed/etc) - encode the sub-style
+		t.subScratch = subs
+		return append(params, sgrUnderlineStyleBase+subs[1])
+	}
+	// For other colon codes, keep first value only
+	t.subScratch = subs
+	return append(params, first)
+}
+
+// parseParams parses CSI parameters, reusing t.paramScratch; the result must
+// be consumed before the next parse.
+func (t *Terminal) parseParams() []int {
+	s := t.csiBuf
+	// Remove private/prefix indicators (?, >, <, =, !), one byte each in this
+	// order (chained, matching the old strings.TrimPrefix sequence).
+	for _, p := range [...]byte{'?', '>', '<', '=', '!'} {
+		if len(s) > 0 && s[0] == p {
+			s = s[1:]
+		}
+	}
 	// Strip trailing intermediate bytes (0x20-0x2f), e.g. the space in the
 	// DECSCUSR sequence "CSI Ps SP q", so the parameter parses cleanly.
-	s = strings.TrimRight(s, " !\"#$%&'()*+,-./")
+	for len(s) > 0 && s[len(s)-1] >= 0x20 && s[len(s)-1] <= 0x2f {
+		s = s[:len(s)-1]
+	}
 
-	if s == "" {
+	if len(s) == 0 {
 		return nil
 	}
 
-	parts := strings.Split(s, ";")
-	params := make([]int, len(parts))
-	for i, part := range parts {
-		// Handle sub-parameters (colon-separated) by taking the first one
-		if idx := strings.Index(part, ":"); idx >= 0 {
-			part = part[:idx]
-		}
-		n, err := strconv.Atoi(part)
-		if err != nil {
-			params[i] = 0
-		} else {
-			params[i] = n
+	params := t.paramScratch[:0]
+	start := 0
+	for i := 0; i <= len(s); i++ {
+		if i == len(s) || s[i] == ';' {
+			part := s[start:i]
+			// Handle sub-parameters (colon-separated) by taking the first one
+			for j, c := range part {
+				if c == ':' {
+					part = part[:j]
+					break
+				}
+			}
+			n, _ := atoiBytes(part)
+			params = append(params, n)
+			start = i + 1
 		}
 	}
+	t.paramScratch = params
 	return params
 }
 
@@ -1510,16 +1649,16 @@ func (t *Terminal) softReset() {
 	t.currentUnderlineStyle = 0
 	t.currentUnderlineColor = grid.Color{}
 	t.currentLinkID = 0
-	t.Grid.SetEraseBackground(grid.DefaultBg())
+	t.Grid.SetEraseBackgroundLocked(grid.DefaultBg())
 	t.originMode = false
 	t.insertMode = false
 	t.appCursorKeys = false
 	t.cursorVisible = true
 	t.cursorStyle = CursorStyleBlock
 	t.cursorBlinking = true
-	t.Grid.SetAutoWrap(true)
+	t.Grid.SetAutoWrapLocked(true)
 	// Margins reset to the full screen; DECSTR does not move the cursor.
-	t.Grid.RestoreScrollRegion(1, t.Grid.Rows)
+	t.Grid.RestoreScrollRegionLocked(1, t.Grid.Rows)
 	t.charsetG0 = charsetASCII
 	t.charsetG1 = charsetASCII
 	t.activeCharset = 0
@@ -1546,7 +1685,7 @@ func (t *Terminal) handleDECRQM(params []int) {
 	case 6:
 		state = report(t.originMode)
 	case 7:
-		state = report(t.Grid.GetAutoWrap())
+		state = report(t.Grid.GetAutoWrapLocked())
 	case 25:
 		state = report(t.cursorVisible)
 	case 47, 1047, 1049:
@@ -1567,12 +1706,12 @@ func (t *Terminal) handleDECRQM(params []int) {
 
 // reset resets the terminal state
 func (t *Terminal) reset() {
-	t.Grid.ClearAll()
-	t.Grid.SetCursorPos(1, 1)
+	t.Grid.ClearAllLocked()
+	t.Grid.SetCursorPosLocked(1, 1)
 	t.currentFg = grid.DefaultFg()
 	t.currentBg = grid.DefaultBg()
 	t.currentFlags = 0
-	t.Grid.SetEraseBackground(grid.DefaultBg())
+	t.Grid.SetEraseBackgroundLocked(grid.DefaultBg())
 	t.appCursorKeys = false
 	t.cursorVisible = true
 	t.exitAlternateScreen()
@@ -1688,9 +1827,9 @@ func (t *Terminal) handleDSR(params []int) {
 	case 5: // Status report
 		t.responseWriter([]byte("\x1b[0n"))
 	case 6: // Cursor position report
-		col, row := t.Grid.GetCursor()
+		col, row := t.Grid.GetCursorLocked()
 		if t.originMode {
-			top, _ := t.Grid.GetScrollRegion()
+			top, _ := t.Grid.GetScrollRegionLocked()
 			row = max(row-(top-1), 0)
 		}
 		response := fmt.Sprintf("\x1b[%d;%dR", row+1, col+1)
@@ -1704,11 +1843,11 @@ func (t *Terminal) handleDA(params []int) {
 		return
 	}
 	// Check for secondary DA (ESC[>c)
-	if strings.HasPrefix(t.csiParams, ">") {
+	if t.csiHasPrefix('>') {
 		// Secondary DA: report as xterm version 136
 		// Format: ESC[>Pp;Pv;Pc c where Pp=terminal type, Pv=version, Pc=ROM cartridge
 		t.responseWriter([]byte("\x1b[>0;136;0c"))
-	} else if strings.HasPrefix(t.csiParams, "=") {
+	} else if t.csiHasPrefix('=') {
 		// Tertiary DA (ESC[=c): report unit ID in DECRPTUI format.
 		t.responseWriter([]byte("\x1bP!|00000000\x1b\\"))
 	} else {
@@ -1724,7 +1863,7 @@ func (t *Terminal) handleDA(params []int) {
 
 // saveCursor saves current cursor state to appropriate screen's slot
 func (t *Terminal) saveCursor() {
-	col, row := t.Grid.GetCursor()
+	col, row := t.Grid.GetCursorLocked()
 	state := CursorState{
 		col:   col,
 		row:   row,
@@ -1761,7 +1900,7 @@ func (t *Terminal) restoreCursor() {
 		row = t.Grid.Rows - 1
 	}
 
-	t.Grid.SetCursorPos(col+1, row+1)
+	t.Grid.SetCursorPosLocked(col+1, row+1)
 	t.currentFg = state.fg
 	t.currentBg = state.bg
 	t.currentFlags = state.flags

@@ -207,11 +207,11 @@ func (t *Terminal) placeImage(img *images.Image, ctrl map[string]string) {
 	if rows <= 0 {
 		rows = 1
 	}
-	col, _ := t.Grid.GetCursor()
+	col, _ := t.Grid.GetCursorLocked()
 	t.activeImages().Place(&images.Placement{
 		ImageID:      img.ID,
 		PlacementID:  uint32(ctrlInt(ctrl, "p", 0)),
-		AnchorAbsRow: t.Grid.AbsoluteCursorRow(),
+		AnchorAbsRow: t.Grid.AbsoluteCursorRowLocked(),
 		AnchorCol:    col,
 		Cols:         cols,
 		Rows:         rows,

@@ -85,8 +85,8 @@ func TestCSIOverflowBounded(t *testing.T) {
 	term.Process([]byte("\x1b["))
 	term.Process(bytes.Repeat([]byte{'1', ';'}, maxCSILen))
 	term.Process([]byte("m")) // would be a giant SGR; must be dropped
-	if len(term.csiParams) != 0 {
-		t.Fatalf("csiParams not cleared: %d", len(term.csiParams))
+	if len(term.csiBuf) != 0 {
+		t.Fatalf("csiBuf not cleared: %d", len(term.csiBuf))
 	}
 	term.Process([]byte("X"))
 	if got := lineText(term, 0); got != "X" {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"github.com/javanhut/RavenTerminal/src/parser"
 	"github.com/javanhut/RavenTerminal/src/shell"
@@ -83,10 +84,23 @@ var clipboardOut struct {
 // so the main loop can re-render promptly instead of waiting out its idle timeout.
 var wakeNotifier func()
 
+// wakePending coalesces wake notifications: while true, a wake has been posted
+// but not yet consumed by the main loop, so further chunks skip posting. One
+// shared flag is fine for multiple panes — a wake wakes the whole app loop.
+var wakePending atomic.Bool
+
 // SetWakeNotifier registers a callback invoked whenever a pane produces new output.
 // It must be safe to call from any goroutine (e.g. glfw.PostEmptyEvent).
 func SetWakeNotifier(f func()) {
 	wakeNotifier = f
+}
+
+// ClearWakePending marks the posted wake as consumed by the main loop. Call it
+// once per main-loop iteration before rendering, so a chunk arriving afterwards
+// re-arms the wake. Chunks arriving before the clear are still picked up by the
+// render that follows, so no wake is missed.
+func ClearWakePending() {
+	wakePending.Store(false)
 }
 
 // QueueClipboard stores text to be copied to the system clipboard by the main thread.
@@ -165,7 +179,7 @@ func (p *Pane) readLoop() {
 			defer tap.Close()
 		}
 	}
-	buf := make([]byte, 4096)
+	buf := make([]byte, 65536)
 	for {
 		n, err := p.pty.Read(buf)
 		if err != nil || n == 0 {
@@ -180,8 +194,9 @@ func (p *Pane) readLoop() {
 		}
 		p.processChunk(buf[:n])
 
-		// Wake the main loop so this output renders without waiting for the idle timeout.
-		if wakeNotifier != nil {
+		// Wake the main loop so this output renders without waiting for the idle
+		// timeout. Coalesced: skip posting while a wake is still outstanding.
+		if wakeNotifier != nil && wakePending.CompareAndSwap(false, true) {
 			wakeNotifier()
 		}
 	}

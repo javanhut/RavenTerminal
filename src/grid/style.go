@@ -44,17 +44,20 @@ type styleEntry struct {
 // styleSet interns Styles into compact StyleIDs with reference counting, so a
 // style's storage is freed once no cell references it. Mirrors the existing
 // hyperlink interning. Not safe for concurrent use — callers hold Grid.mu.
+//
+// ids index directly into entries (id 0 slot stays nil — it is the untracked
+// default style), so retain/release/resolve are array derefs, not map lookups.
+// byStyle is only hit on intern.
 type styleSet struct {
 	byStyle map[Style]StyleID
-	byID    map[StyleID]*styleEntry
-	free    []StyleID // recycled ids
+	entries []*styleEntry // indexed by StyleID; nil slot = freed/unused id
+	free    []StyleID     // recycled ids
 	nextID  StyleID
 }
 
 func newStyleSet() *styleSet {
 	return &styleSet{
 		byStyle: make(map[Style]StyleID),
-		byID:    make(map[StyleID]*styleEntry),
 		nextID:  0,
 	}
 }
@@ -67,7 +70,7 @@ func (s *styleSet) intern(st Style) StyleID {
 		return 0
 	}
 	if id, ok := s.byStyle[st]; ok {
-		s.byID[id].refs++
+		s.entries[id].refs++
 		return id
 	}
 	var id StyleID
@@ -80,17 +83,21 @@ func (s *styleSet) intern(st Style) StyleID {
 			s.nextID = 1
 		}
 		id = s.nextID
+		// Fresh ids extend the table; recycled ids reuse their old slot.
+		for len(s.entries) <= int(id) {
+			s.entries = append(s.entries, nil)
+		}
 	}
 	s.byStyle[st] = id
-	s.byID[id] = &styleEntry{style: st, refs: 1}
+	s.entries[id] = &styleEntry{style: st, refs: 1}
 	return id
 }
 
 // styleRef is an interned style plus a direct pointer to its refcount entry.
 // A run of cells sharing one style interns it ONCE and then takes a reference
 // per cell through the pointer, so the per-cell cost is an increment instead of
-// building a Style, comparing it against the default, and hashing it into two
-// maps. entry is nil for the default style, which is never reference-counted.
+// building a Style, comparing it against the default, and hashing it into the
+// intern map. entry is nil for the default style, which is never reference-counted.
 type styleRef struct {
 	style Style
 	id    StyleID
@@ -105,7 +112,7 @@ func (s *styleSet) ref(st Style) styleRef {
 	if id == 0 {
 		return styleRef{style: st}
 	}
-	return styleRef{style: st, id: id, entry: s.byID[id]}
+	return styleRef{style: st, id: id, entry: s.entries[id]}
 }
 
 // take adds one reference on behalf of a cell about to store this style, and
@@ -126,8 +133,23 @@ func (s *styleSet) retain(id StyleID) {
 	if id == 0 {
 		return
 	}
-	if e := s.byID[id]; e != nil {
-		e.refs++
+	if int(id) < len(s.entries) {
+		if e := s.entries[id]; e != nil {
+			e.refs++
+		}
+	}
+}
+
+// retainN adds n references at once — the bulk form of retain for rows/spans
+// that are uniformly filled with one style.
+func (s *styleSet) retainN(id StyleID, n int) {
+	if id == 0 || n <= 0 {
+		return
+	}
+	if int(id) < len(s.entries) {
+		if e := s.entries[id]; e != nil {
+			e.refs += uint32(n)
+		}
 	}
 }
 
@@ -136,14 +158,39 @@ func (s *styleSet) release(id StyleID) {
 	if id == 0 {
 		return
 	}
-	e := s.byID[id]
+	if int(id) >= len(s.entries) {
+		return
+	}
+	e := s.entries[id]
 	if e == nil {
 		return
 	}
 	e.refs--
 	if e.refs == 0 {
 		delete(s.byStyle, e.style)
-		delete(s.byID, id)
+		s.entries[id] = nil
+		s.free = append(s.free, id)
+	}
+}
+
+// releaseN drops n references at once — the bulk form of release. Callers must
+// pass exact counts: like release, over-releasing is a refcount bug, not
+// something this clamps.
+func (s *styleSet) releaseN(id StyleID, n int) {
+	if id == 0 || n <= 0 {
+		return
+	}
+	if int(id) >= len(s.entries) {
+		return
+	}
+	e := s.entries[id]
+	if e == nil {
+		return
+	}
+	e.refs -= uint32(n)
+	if e.refs == 0 {
+		delete(s.byStyle, e.style)
+		s.entries[id] = nil
 		s.free = append(s.free, id)
 	}
 }
@@ -153,14 +200,24 @@ func (s *styleSet) resolve(id StyleID) Style {
 	if id == 0 {
 		return defaultStyle
 	}
-	if e := s.byID[id]; e != nil {
-		return e.style
+	if int(id) < len(s.entries) {
+		if e := s.entries[id]; e != nil {
+			return e.style
+		}
 	}
 	return defaultStyle
 }
 
 // liveCount reports how many distinct styles are currently interned. Test/debug.
-func (s *styleSet) liveCount() int { return len(s.byID) }
+func (s *styleSet) liveCount() int {
+	n := 0
+	for _, e := range s.entries {
+		if e != nil {
+			n++
+		}
+	}
+	return n
+}
 
 // --- Grid <-> storedCell boundary -------------------------------------------
 
@@ -264,6 +321,20 @@ func (g *Grid) putCellStyled(idx int, char rune, id StyleID, width uint8, link u
 	*p = storedCell{Style: id, Char: char, Width: width, Link: link}
 	g.styles.release(old)
 	g.rows[idx/g.Cols].flags |= RowDirty
+}
+
+// putCellStyledRow is putCellStyled with the row pointer and column already
+// resolved, so the per-cell write funnel pays no division to decode a linear
+// index and no second division to find the row for the dirty flag (same
+// direct-row pattern as fillSpan). Reference semantics are unchanged: the
+// caller transfers one reference in via id, the overwritten cell's style is
+// released.
+func (g *Grid) putCellStyledRow(row *Row, col int, char rune, id StyleID, width uint8, link uint16) {
+	p := &row.cells[col]
+	old := p.Style
+	*p = storedCell{Style: id, Char: char, Width: width, Link: link}
+	g.styles.release(old)
+	row.flags |= RowDirty
 }
 
 // getCell reads and inflates the cell at a linear index.

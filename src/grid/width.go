@@ -2,6 +2,7 @@ package grid
 
 import (
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/rivo/uniseg"
 )
@@ -52,7 +53,13 @@ func RuneWidth(r rune) int {
 	// Measure with the grapheme-aware width table (uniseg) so emoji are sized
 	// the same way applications expect (emoji-presentation pictographs = 2),
 	// matching ClusterWidth. This keeps the cursor column in sync with the TUI.
-	return uniseg.StringWidth(string(r))
+	// Encode into a stack buffer and use the byte-slice API: a single rune is
+	// one cluster, so its width equals uniseg.StringWidth(string(r)) without
+	// the rune->string heap allocation.
+	var buf [4]byte
+	n := utf8.EncodeRune(buf[:], r)
+	_, _, width, _ := uniseg.FirstGraphemeCluster(buf[:n], -1)
+	return width
 }
 
 // StringWidth returns the total display width of a string

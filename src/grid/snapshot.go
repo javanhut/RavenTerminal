@@ -51,9 +51,16 @@ func (s *Snapshot) At(col, row int) Cell {
 	return s.Cells[row*s.Cols+col]
 }
 
-// Snapshot copies the visible region into a Snapshot under a single read lock.
+// Snapshot copies the visible region into a Snapshot under a single lock.
 // If prev is non-nil and the same size, its Cells backing array is reused to
 // avoid per-frame allocation. Clears per-row dirty flags as a side effect.
+//
+// When the buffer is reused, the view is at the bottom (scrollOffset == 0,
+// matching the previous snapshot), and no full invalidation was requested
+// (resize/reflow/view-scroll), only rows flagged RowDirty are re-inflated;
+// clean rows keep their contents from the previous snapshot. Every other
+// case falls back to a full copy, because the row-to-display mapping may have
+// changed without dirty flags reflecting it.
 func (g *Grid) Snapshot(prev *Snapshot) *Snapshot {
 	g.mu.Lock() // write lock: we clear RowDirty flags
 	defer g.mu.Unlock()
@@ -66,20 +73,36 @@ func (g *Grid) Snapshot(prev *Snapshot) *Snapshot {
 		s = &Snapshot{Cells: make([]Cell, cols*rows)}
 	}
 
-	// Determine whether any visible content changed since the last snapshot.
+	full := s != prev || g.scrollOffset != 0 || s.ScrollOffset != 0 || g.snapInvalid
+	g.snapInvalid = false
+
+	// Copy the visible region, clearing per-row dirty flags as we go. A set
+	// RowDirty flag also means "visible content changed", which feeds the
+	// Dirty advisory below.
 	dirty := false
-	for _, r := range g.rows {
-		if r.flags&RowDirty != 0 {
+	if full {
+		for row := range rows {
+			base := row * cols
+			for col := range cols {
+				s.Cells[base+col] = g.displayCellLocked(col, row)
+			}
+			if r := g.rows[row]; r.flags&RowDirty != 0 {
+				dirty = true
+				r.flags &^= RowDirty
+			}
+		}
+	} else {
+		for row := range rows {
+			r := g.rows[row]
+			if r.flags&RowDirty == 0 {
+				continue
+			}
 			dirty = true
 			r.flags &^= RowDirty
-		}
-	}
-
-	// Copy the visible region (reuses the existing scrollback-aware mapping).
-	for row := range rows {
-		base := row * cols
-		for col := range cols {
-			s.Cells[base+col] = g.displayCellLocked(col, row)
+			base := row * cols
+			for col := range cols {
+				s.Cells[base+col] = g.displayCellLocked(col, row)
+			}
 		}
 	}
 

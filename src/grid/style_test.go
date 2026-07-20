@@ -52,7 +52,7 @@ func TestWriteRunesStyleRefcounts(t *testing.T) {
 	if lc := g.styles.liveCount(); lc != 1 {
 		t.Fatalf("after styled run liveCount = %d, want 1", lc)
 	}
-	if e := g.styles.byID[g.styles.byStyle[Style{Fg: red}]]; e.refs != 4 {
+	if e := g.styles.entries[g.styles.byStyle[Style{Fg: red}]]; e.refs != 4 {
 		t.Fatalf("refs = %d, want 4 (one per cell, handle released)", e.refs)
 	}
 
