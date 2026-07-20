@@ -130,11 +130,28 @@ func (g *Grid) pushHistory(r *Row) {
 		g.recycleRow(r)
 		return
 	}
-	g.history = append(g.history, r)
-	for len(g.history) > g.maxScroll {
+	for len(g.history) >= g.maxScroll {
 		g.recycleRow(g.history[0])
 		g.history[0] = nil
 		g.history = g.history[1:]
 		g.scrolledOut++ // a row left the top of history (for image anchoring)
 	}
+
+	// Trimming reslices the window forward, so it walks toward the end of its
+	// backing array; once it arrives, append allocates a fresh array and copies
+	// the whole window. Under sustained scroll that repeats every maxScroll
+	// lines, and handing those arrays back to the OS (runtime.madvise) cost more
+	// than the scrolling itself. Slide the window back to the front of a
+	// double-width buffer instead: same one memmove, but the array is reused
+	// forever, so steady-state scrolling allocates nothing.
+	if len(g.history) == cap(g.history) {
+		if cap(g.histBuf) < 2*g.maxScroll {
+			g.histBuf = make([]*Row, 2*g.maxScroll)
+		}
+		g.histBuf = g.histBuf[:cap(g.histBuf)]
+		n := copy(g.histBuf, g.history)
+		clear(g.histBuf[n:]) // don't pin dropped rows via stale tail pointers
+		g.history = g.histBuf[:n]
+	}
+	g.history = append(g.history, r)
 }

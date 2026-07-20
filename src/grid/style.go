@@ -86,6 +86,41 @@ func (s *styleSet) intern(st Style) StyleID {
 	return id
 }
 
+// styleRef is an interned style plus a direct pointer to its refcount entry.
+// A run of cells sharing one style interns it ONCE and then takes a reference
+// per cell through the pointer, so the per-cell cost is an increment instead of
+// building a Style, comparing it against the default, and hashing it into two
+// maps. entry is nil for the default style, which is never reference-counted.
+type styleRef struct {
+	style Style
+	id    StyleID
+	entry *styleEntry
+}
+
+// ref interns st and returns a handle holding one reference of its own. Pair it
+// with done() when the run finishes, so a run that ends up writing no cells
+// (all zero-width) doesn't strand the entry.
+func (s *styleSet) ref(st Style) styleRef {
+	id := s.intern(st)
+	if id == 0 {
+		return styleRef{style: st}
+	}
+	return styleRef{style: st, id: id, entry: s.byID[id]}
+}
+
+// take adds one reference on behalf of a cell about to store this style, and
+// returns the id to store. This is the whole point of styleRef: no map access.
+func (r *styleRef) take() StyleID {
+	if r.entry != nil {
+		r.entry.refs++
+	}
+	return r.id
+}
+
+// done releases the handle's own reference, freeing the style if the run wrote
+// no cells that kept it alive.
+func (s *styleSet) done(r styleRef) { s.release(r.id) }
+
 // retain adds one reference to an existing id (no-op for the default style).
 func (s *styleSet) retain(id StyleID) {
 	if id == 0 {
@@ -215,6 +250,18 @@ func (g *Grid) putCell(idx int, c Cell) {
 		Width:    c.Width,
 		Link:     c.Link,
 	}
+	g.styles.release(old)
+	g.rows[idx/g.Cols].flags |= RowDirty
+}
+
+// putCellStyled writes a cell whose style has already been interned by the
+// caller, who transfers one reference in via id. This is putCell's body minus
+// the per-cell intern; the run-writing path uses it so the style is interned
+// once per run rather than once per cell.
+func (g *Grid) putCellStyled(idx int, char rune, id StyleID, width uint8, link uint16) {
+	p := g.cellAt(idx)
+	old := p.Style
+	*p = storedCell{Style: id, Char: char, Width: width, Link: link}
 	g.styles.release(old)
 	g.rows[idx/g.Cols].flags |= RowDirty
 }

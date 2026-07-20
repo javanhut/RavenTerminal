@@ -11,6 +11,14 @@ import (
 // 1 = normal single-width character
 // 2 = wide character (CJK, emoji, etc.)
 func RuneWidth(r rune) int {
+	// Printable ASCII is always one cell. Checked first because it is the
+	// overwhelming majority of what a terminal prints, and the general path
+	// below costs ~20x more: five unicode.Is table lookups plus a
+	// rune->string conversion feeding uniseg's grapheme segmenter.
+	if r >= 0x20 && r < 0x7f {
+		return 1
+	}
+
 	// Null character has zero width
 	if r == '\x00' {
 		return 0

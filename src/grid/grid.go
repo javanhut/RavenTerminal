@@ -104,7 +104,8 @@ func NewCellWithBg(bg Color) Cell {
 // Grid represents the terminal grid buffer
 type Grid struct {
 	rows         []*Row // active on-screen area, len == Rows
-	history      []*Row // scrollback (oldest first)
+	history      []*Row // scrollback (oldest first), a window into histBuf
+	histBuf      []*Row // backing store for history; see pushHistory
 	maxScroll    int    // history cap in rows (0 = no scrollback, e.g. alt screen)
 	freeRows     []*Row // recycled row allocations, all at current width
 	styles       *styleSet
@@ -121,13 +122,9 @@ type Grid struct {
 	wrapPending  bool
 
 	// Last written character for REP sequence
-	lastChar           rune
-	lastFg             Color
-	lastBg             Color
-	lastFlags          CellFlags
-	lastLink           uint16
-	lastUnderlineStyle uint8
-	lastUnderlineColor Color
+	lastChar  rune
+	lastStyle Style
+	lastLink  uint16
 
 	// OSC 8 hyperlink interning: url <-> compact id stored on cells
 	links      map[string]uint16
@@ -292,7 +289,9 @@ func (g *Grid) LinkURL(id uint16) string {
 func (g *Grid) WriteChar(c rune, fg, bg Color, flags CellFlags, link uint16, ulStyle uint8, ulColor Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.writeCharLocked(c, fg, bg, flags, link, ulStyle, ulColor)
+	sr := g.styles.ref(Style{Fg: fg, Bg: bg, UnderlineColor: ulColor, Flags: flags, UnderlineStyle: ulStyle})
+	g.writeCharLocked(c, &sr, link)
+	g.styles.done(sr)
 }
 
 // WriteRunes writes a run of runes sharing the same attributes, taking g.mu
@@ -306,13 +305,19 @@ func (g *Grid) WriteChar(c rune, fg, bg Color, flags CellFlags, link uint16, ulS
 func (g *Grid) WriteRunes(rs []rune, fg, bg Color, flags CellFlags, link uint16, ulStyle uint8, ulColor Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	// Intern the shared style ONCE for the whole run; each cell then takes a
+	// reference through the handle rather than re-deriving and re-hashing it.
+	sr := g.styles.ref(Style{Fg: fg, Bg: bg, UnderlineColor: ulColor, Flags: flags, UnderlineStyle: ulStyle})
 	for _, c := range rs {
-		g.writeCharLocked(c, fg, bg, flags, link, ulStyle, ulColor)
+		g.writeCharLocked(c, &sr, link)
 	}
+	g.styles.done(sr)
 }
 
-// writeCharLocked is WriteChar's body; the caller must hold g.mu.
-func (g *Grid) writeCharLocked(c rune, fg, bg Color, flags CellFlags, link uint16, ulStyle uint8, ulColor Color) {
+// writeCharLocked is WriteChar's body; the caller must hold g.mu and pass a
+// style handle it owns (see styleSet.ref). Each cell written takes its own
+// reference from sr; the caller releases the handle when its run is done.
+func (g *Grid) writeCharLocked(c rune, sr *styleRef, link uint16) {
 	if g.wrapPending {
 		if g.autoWrap {
 			// The line we're leaving continued because it filled the last
@@ -349,8 +354,8 @@ func (g *Grid) writeCharLocked(c rune, fg, bg Color, flags CellFlags, link uint1
 			idx := g.index(g.CursorCol, g.CursorRow)
 			g.putCell(idx, Cell{
 				Char:  ' ',
-				Fg:    g.lastFg,
-				Bg:    g.lastBg,
+				Fg:    g.lastStyle.Fg,
+				Bg:    g.lastStyle.Bg,
 				Width: CellWidthNormal,
 			})
 			// The line continues onto the next row: mark it soft-wrapped so
@@ -365,31 +370,13 @@ func (g *Grid) writeCharLocked(c rune, fg, bg Color, flags CellFlags, link uint1
 
 	// Write the character to current cell
 	idx := g.index(g.CursorCol, g.CursorRow)
-	g.putCell(idx, Cell{
-		Char:           c,
-		Fg:             fg,
-		Bg:             bg,
-		UnderlineColor: ulColor,
-		Flags:          flags,
-		Width:          uint8(charWidth),
-		UnderlineStyle: ulStyle,
-		Link:           link,
-	})
+	g.putCellStyled(idx, c, sr.take(), uint8(charWidth), link)
 	g.CursorCol++
 
 	// If wide character, write continuation cell
 	if charWidth == 2 && g.CursorCol < g.Cols {
 		contIdx := g.index(g.CursorCol, g.CursorRow)
-		g.putCell(contIdx, Cell{
-			Char:           ' ', // Placeholder for continuation
-			Fg:             fg,
-			Bg:             bg,
-			UnderlineColor: ulColor,
-			Flags:          flags,
-			Width:          CellWidthContinuation,
-			UnderlineStyle: ulStyle,
-			Link:           link,
-		})
+		g.putCellStyled(contIdx, ' ', sr.take(), CellWidthContinuation, link)
 		g.CursorCol++
 	}
 
@@ -403,12 +390,8 @@ func (g *Grid) writeCharLocked(c rune, fg, bg Color, flags CellFlags, link uint1
 
 	// Save for REP sequence
 	g.lastChar = c
-	g.lastFg = fg
-	g.lastBg = bg
-	g.lastFlags = flags
+	g.lastStyle = sr.style
 	g.lastLink = link
-	g.lastUnderlineStyle = ulStyle
-	g.lastUnderlineColor = ulColor
 }
 
 // appendCombining attaches a zero-width codepoint to the most recently written
@@ -1578,9 +1561,11 @@ func (g *Grid) EraseChars(n int) {
 func (g *Grid) RepeatChar(n int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	sr := g.styles.ref(g.lastStyle)
 	for range n {
-		g.writeCharLocked(g.lastChar, g.lastFg, g.lastBg, g.lastFlags, g.lastLink, g.lastUnderlineStyle, g.lastUnderlineColor)
+		g.writeCharLocked(g.lastChar, &sr, g.lastLink)
 	}
+	g.styles.done(sr)
 }
 
 // SetScrollRegion sets the scrolling region (1-based, inclusive)
