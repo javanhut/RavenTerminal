@@ -75,6 +75,11 @@ func (g *Grid) fillRow(r *Row, bg Color) {
 // The style is interned once for the whole span rather than per cell: every
 // cell in an erase shares one style, so re-interning it per column turns a
 // line erase into one hash lookup per column for no benefit.
+//
+// Fast path: if the span is already blank in the target style — the common
+// case, e.g. EL on a fresh or already-erased line — nothing is stored, no
+// style reference is taken or released, and the row is not re-dirtied (a
+// no-op erase must not force a redraw).
 func (g *Grid) fillSpan(row, col0, col1 int, bg Color) {
 	if col0 < 0 {
 		col0 = 0
@@ -85,9 +90,23 @@ func (g *Grid) fillSpan(row, col0, col1 int, bg Color) {
 	if col0 >= col1 {
 		return
 	}
-	id := g.styles.intern(styleOf(NewCellWithBg(bg))) // ref=1 owner
-	g.styles.retainN(id, col1-col0)                   // one ref per cell, in bulk
 	cells := g.rows[row].cells
+	st := styleOf(NewCellWithBg(bg))
+	// Compare against the target blank WITHOUT touching refcounts first:
+	// lookup takes no reference, so an all-match span costs only comparisons.
+	// If the style isn't interned at all, no cell can carry it and the span
+	// necessarily needs writing.
+	if id, ok := g.styles.lookup(st); ok {
+		blank := storedCell{Style: id, Char: ' ', Width: CellWidthNormal}
+		for col0 < col1 && cells[col0] == blank {
+			col0++
+		}
+		if col0 == col1 {
+			return // already erased
+		}
+	}
+	id := g.styles.intern(st) // ref=1 owner
+	g.styles.retainN(id, col1-col0)
 	// Release the overwritten cells' styles, coalescing runs of equal ids so a
 	// uniformly-styled span (the common case) costs one releaseN, not one
 	// release per cell.
@@ -97,9 +116,13 @@ func (g *Grid) fillSpan(row, col0, col1 int, bg Color) {
 			run++
 		}
 		g.styles.releaseN(cells[col].Style, run-col)
-		for ; col < run; col++ {
-			cells[col] = storedCell{Style: id, Char: ' ', Width: CellWidthNormal}
-		}
+		col = run
+	}
+	// Fill via doubling copy: one store, then exponentially larger memmoves.
+	blank := storedCell{Style: id, Char: ' ', Width: CellWidthNormal}
+	cells[col0] = blank
+	for n := 1; n < col1-col0; n *= 2 {
+		copy(cells[col0+n:col1], cells[col0:col0+n])
 	}
 	g.styles.release(id) // drop owner ref; cells hold (col1-col0) refs
 	g.rows[row].flags |= RowDirty

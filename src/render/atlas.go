@@ -217,6 +217,7 @@ func (r *Renderer) growAtlas() bool {
 		r.fontAtlas = 0
 	}
 	r.glyphs = make(map[rune]Glyph)
+	r.asciiCache = [128]asciiGlyphSlot{} // UVs change on repack
 	r.initAtlas(r.atlasSize * 2)
 	for _, c := range chars {
 		r.ensureGlyph(c)

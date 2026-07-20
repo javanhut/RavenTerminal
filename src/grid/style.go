@@ -93,6 +93,18 @@ func (s *styleSet) intern(st Style) StyleID {
 	return id
 }
 
+// lookup returns the id for st WITHOUT taking a reference, for callers that
+// only need to compare existing cells against a candidate style (fillSpan's
+// already-blank fast path). The default style reports id 0, ok=true; ok is
+// false when st is not interned, in which case no cell can be carrying it.
+func (s *styleSet) lookup(st Style) (StyleID, bool) {
+	if st == defaultStyle {
+		return 0, true
+	}
+	id, ok := s.byStyle[st]
+	return id, ok
+}
+
 // styleRef is an interned style plus a direct pointer to its refcount entry.
 // A run of cells sharing one style interns it ONCE and then takes a reference
 // per cell through the pointer, so the per-cell cost is an increment instead of

@@ -121,6 +121,13 @@ type Glyph struct {
 	OffsetY float32
 }
 
+// asciiGlyphSlot is the per-rune resolution cache entry for ASCII runes.
+type asciiGlyphSlot struct {
+	g        Glyph
+	ok       bool
+	resolved bool
+}
+
 // Renderer handles OpenGL rendering with smooth fonts
 type Renderer struct {
 	theme           Theme
@@ -140,6 +147,12 @@ type Renderer struct {
 	// their natural ink bounds and shelf-packed into a growable RED texture.
 	glyphs         map[rune]Glyph
 	glyphMisses    map[rune]bool // runes no font in the chain covers (negative cache)
+	// asciiCache is a flat array in front of the glyphs map for runes < 128
+	// (the overwhelming majority of terminal content); neither fallback table
+	// has ASCII keys, so resolution for them is exactly ensureGlyph. Cleared
+	// wherever the glyph cache is invalidated (font reload, atlas grow,
+	// system-fallback load).
+	asciiCache [128]asciiGlyphSlot
 	fontAtlas      uint32
 	atlasSize      int
 	atlasPix       []byte    // CPU-side mirror of the RED atlas (for grow/repack)
@@ -404,6 +417,7 @@ func (r *Renderer) loadFontData(fontData []byte) error {
 	// Reset the glyph cache and (re)create an empty atlas texture.
 	r.glyphs = make(map[rune]Glyph)
 	r.glyphMisses = make(map[rune]bool)
+	r.asciiCache = [128]asciiGlyphSlot{}
 	if r.fontAtlas != 0 {
 		gl.DeleteTextures(1, &r.fontAtlas)
 		r.fontAtlas = 0
@@ -2193,13 +2207,21 @@ func (r *Renderer) renderPanes(t *tab.Tab, width, height int, proj [16]float32, 
 		// Render the pane's grid
 		showCursor := cursorVisible && isActive
 		cursorStyle := parser.CursorStyleBlock
-		if layout.Pane != nil && layout.Pane.Terminal != nil {
-			cursorStyle = layout.Pane.Terminal.CursorStyle()
+		term := layout.Pane.Terminal
+		if showCursor && term != nil {
+			// CursorStyle takes Terminal.mu; skip the lock when no cursor
+			// will be drawn this frame.
+			cursorStyle = term.CursorStyle()
 		}
-		// One locked snapshot per pane per frame; the grid pointer is passed
-		// only for hover-URL identity matching.
-		snap := layout.Pane.Terminal.Snapshot()
-		r.renderGridAt(snap, layout.Pane.Terminal.GetGrid(), offsetX, offsetY, paneWidth, paneHeight, proj, showCursor, cursorStyle)
+		// One locked snapshot per pane per frame. The grid pointer is used
+		// only for hover-URL identity matching, so GetGrid (another
+		// Terminal.mu acquisition) is only needed while a hover is active.
+		var g *grid.Grid
+		if r.hoverActive {
+			g = term.GetGrid()
+		}
+		snap := term.Snapshot()
+		r.renderGridAt(snap, g, offsetX, offsetY, paneWidth, paneHeight, proj, showCursor, cursorStyle)
 	}
 }
 
@@ -2650,7 +2672,6 @@ func clampUnit(v float32) float32 {
 // grid pointer g is used only for hover-URL identity matching.
 func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offsetY, paneWidth, paneHeight float32, proj [16]float32, cursorVisible bool, cursorStyle parser.CursorStyle) {
 	cols := snap.Cols
-	rows := snap.Rows
 
 	// Hover underline applies only when the hover target is this grid.
 	hoverRow := -1
@@ -2667,109 +2688,7 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 	// glyph warm loop with a rare retry.
 	for attempt := 0; ; attempt++ {
 		startGen := r.atlasGen
-		r.gridRects.reset()
-		r.gridGlyphs.reset()
-		r.colorDraws = r.colorDraws[:0]
-		r.pass2 = r.pass2[:0]
-		for row := range rows {
-			for col := range cols {
-				cell := snap.Cells[row*cols+col]
-				x := offsetX + float32(col)*r.cellWidth
-				y := offsetY + float32(row)*r.cellHeight
-				if x+r.cellWidth > offsetX+paneWidth || y+r.cellHeight > offsetY+paneHeight {
-					continue
-				}
-
-				bgColor := r.colorToRGBA(cell.Bg, true)
-				if cell.Flags&grid.FlagInverse != 0 {
-					bgColor = r.colorToRGBA(cell.Fg, false)
-				}
-				if bgColor != r.theme.Background {
-					r.gridRects.addRect(x, y, r.cellWidth+0.5, r.cellHeight, bgColor)
-				}
-				if snap.Selected(col, row) {
-					r.gridRects.addRect(x, y, r.cellWidth+0.5, r.cellHeight, r.theme.Selection)
-				}
-
-				if cell.Width == grid.CellWidthContinuation {
-					continue
-				}
-
-				hidden := cell.Flags&grid.FlagHidden != 0
-				isBlock := isBlockElement(cell.Char)
-				// Block-element chars and the cursor cell are drawn immediately
-				// in pass 2; everything else is a batched glyph. A glyph
-				// missing from the monochrome font is tried as a color emoji
-				// before the '?' fallback.
-				needGlyph := !hidden && cell.Char != ' ' && cell.Char != 0 && !isBlock
-				hovered := row == hoverRow && col >= r.hoverStartCol && col <= r.hoverEndCol
-				needDecor := !hidden && (isBlock || hovered ||
-					cell.Flags&(grid.FlagUnderline|grid.FlagStrikethrough) != 0)
-				if !needGlyph && !needDecor {
-					continue
-				}
-
-				// Resolve the fg color exactly once for both the glyph and the
-				// pass-2 decorations.
-				fgColor := r.colorToRGBA(cell.Fg, false)
-				if cell.Flags&grid.FlagInverse != 0 {
-					fgColor = r.colorToRGBA(cell.Bg, true)
-				}
-				if cell.Flags&grid.FlagDim != 0 {
-					fgColor[3] = fgColor[3] / 2
-				}
-				if needDecor {
-					r.pass2 = append(r.pass2, pass2Item{
-						col: col, row: row, x: x, y: y, fg: fgColor, hovered: hovered,
-					})
-				}
-
-				if needGlyph {
-					g, ok := r.resolveGlyph(cell.Char)
-					if !ok {
-						if cg, isColor := r.ensureColorGlyph(cell.Char); isColor {
-							span := 1
-							if cell.Width == grid.CellWidthWide {
-								span = 2
-							}
-							r.colorDraws = append(r.colorDraws, colorDrawItem{
-								x: x, yTop: y, span: span, cg: cg, alpha: fgColor[3],
-							})
-						} else {
-							g, ok = r.ensureGlyph('?')
-						}
-					}
-					if ok && g.PixelWidth > 0 {
-						// Available span: wide chars own two cells; icons may
-						// also use a following blank cell (Ghostty-style), which
-						// is how Nerd Font icons are typically spaced in TUIs.
-						span := 1
-						if cell.Width == grid.CellWidthWide {
-							span = 2
-						} else if isIconRune(cell.Char) && col+1 < cols {
-							next := snap.Cells[row*cols+col+1]
-							if next.Char == ' ' || next.Char == 0 {
-								span = 2
-							}
-						}
-						if span == 2 && x+2*r.cellWidth > offsetX+paneWidth {
-							span = 1
-						}
-						gx, gyTop, gw, gh := r.glyphQuad(cell.Char, g, x, y, span)
-						var shear float32
-						if r.fauxItalic && cell.Flags&grid.FlagItalic != 0 {
-							shear = gh * 0.2
-						}
-						r.gridGlyphs.addGlyph(gx, gyTop+gh, gw, gh,
-							g.X, g.Y, g.Width, g.Height, fgColor, shear)
-						if r.fauxBold && cell.Flags&grid.FlagBold != 0 {
-							r.gridGlyphs.addGlyph(gx+1, gyTop+gh, gw, gh,
-								g.X, g.Y, g.Width, g.Height, fgColor, shear)
-						}
-					}
-				}
-			}
-		}
+		r.buildGridBatches(snap, offsetX, offsetY, paneWidth, paneHeight, hoverRow)
 		if r.atlasGen == startGen || attempt > 0 {
 			break
 		}
@@ -2854,6 +2773,161 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 						} else {
 							r.drawChar(cursorX, cursorY+r.cellHeight, cell.Char, r.theme.Background, proj)
 						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// fitCells returns how many leading cells of size sz, laid out from offset,
+// satisfy offset+float32(i)*sz+sz <= limit. This is exactly the clip predicate
+// renderGridAt historically applied per cell, hoisted out of the loop: for
+// sz > 0 the left side is non-decreasing in i (float add/multiply are
+// monotonic), so a binary search over the identical expression yields the
+// same set of visible cells.
+func fitCells(offset, sz float32, n int, limit float32) int {
+	if sz <= 0 || n <= 0 {
+		return 0
+	}
+	lo, hi := 0, n
+	for lo < hi {
+		mid := int(uint(lo+hi) >> 1)
+		if offset+float32(mid)*sz+sz > limit {
+			hi = mid
+		} else {
+			lo = mid + 1
+		}
+	}
+	return lo
+}
+
+// buildGridBatches fills gridRects, gridGlyphs, colorDraws and pass2 from the
+// snapshot — everything pass 1 of renderGridAt records. It performs no GL
+// calls of its own, but a glyph cache miss may rasterize (and grow the
+// atlas), so the caller re-runs it when atlasGen changes mid-pass.
+func (r *Renderer) buildGridBatches(snap *grid.Snapshot, offsetX, offsetY, paneWidth, paneHeight float32, hoverRow int) {
+	cols := snap.Cols
+
+	r.gridRects.reset()
+	r.gridGlyphs.reset()
+	r.colorDraws = r.colorDraws[:0]
+	r.pass2 = r.pass2[:0]
+
+	// Hoist the pane-clip check: cells past these limits produce no output.
+	maxCol := fitCells(offsetX, r.cellWidth, cols, offsetX+paneWidth)
+	maxRow := fitCells(offsetY, r.cellHeight, snap.Rows, offsetY+paneHeight)
+
+	selActive := snap.SelActive
+	selColor := r.theme.Selection
+	bgTheme := r.theme.Background
+	fgTheme := r.theme.Foreground
+	rectW := r.cellWidth + 0.5
+
+	for row := 0; row < maxRow; row++ {
+		rowCells := snap.Cells[row*cols : row*cols+cols]
+		y := offsetY + float32(row)*r.cellHeight
+		rowHovered := row == hoverRow
+		for col := 0; col < maxCol; col++ {
+			cell := rowCells[col]
+			x := offsetX + float32(col)*r.cellWidth
+
+			inverse := cell.Flags&grid.FlagInverse != 0
+			// Fast path: a default background without inverse is exactly the
+			// theme background, which draws no rect — skip the color math.
+			if cell.Bg.Type != grid.ColorDefault || inverse {
+				bgColor := r.colorToRGBA(cell.Bg, true)
+				if inverse {
+					bgColor = r.colorToRGBA(cell.Fg, false)
+				}
+				if bgColor != bgTheme {
+					r.gridRects.addRect(x, y, rectW, r.cellHeight, bgColor)
+				}
+			}
+			if selActive && snap.Selected(col, row) {
+				r.gridRects.addRect(x, y, rectW, r.cellHeight, selColor)
+			}
+
+			if cell.Width == grid.CellWidthContinuation {
+				continue
+			}
+
+			hidden := cell.Flags&grid.FlagHidden != 0
+			isBlock := isBlockElement(cell.Char)
+			// Block-element chars and the cursor cell are drawn immediately
+			// in pass 2; everything else is a batched glyph. A glyph
+			// missing from the monochrome font is tried as a color emoji
+			// before the '?' fallback.
+			needGlyph := !hidden && cell.Char != ' ' && cell.Char != 0 && !isBlock
+			hovered := rowHovered && col >= r.hoverStartCol && col <= r.hoverEndCol
+			needDecor := !hidden && (isBlock || hovered ||
+				cell.Flags&(grid.FlagUnderline|grid.FlagStrikethrough) != 0)
+			if !needGlyph && !needDecor {
+				continue
+			}
+
+			// Resolve the fg color exactly once for both the glyph and the
+			// pass-2 decorations. Fast path: default fg without inverse or
+			// dim is exactly the theme foreground.
+			var fgColor [4]float32
+			if cell.Fg.Type == grid.ColorDefault && cell.Flags&(grid.FlagInverse|grid.FlagDim) == 0 {
+				fgColor = fgTheme
+			} else {
+				fgColor = r.colorToRGBA(cell.Fg, false)
+				if inverse {
+					fgColor = r.colorToRGBA(cell.Bg, true)
+				}
+				if cell.Flags&grid.FlagDim != 0 {
+					fgColor[3] = fgColor[3] / 2
+				}
+			}
+			if needDecor {
+				r.pass2 = append(r.pass2, pass2Item{
+					col: col, row: row, x: x, y: y, fg: fgColor, hovered: hovered,
+				})
+			}
+
+			if needGlyph {
+				g, ok := r.resolveGlyph(cell.Char)
+				if !ok {
+					if cg, isColor := r.ensureColorGlyph(cell.Char); isColor {
+						span := 1
+						if cell.Width == grid.CellWidthWide {
+							span = 2
+						}
+						r.colorDraws = append(r.colorDraws, colorDrawItem{
+							x: x, yTop: y, span: span, cg: cg, alpha: fgColor[3],
+						})
+					} else {
+						g, ok = r.ensureGlyph('?')
+					}
+				}
+				if ok && g.PixelWidth > 0 {
+					// Available span: wide chars own two cells; icons may
+					// also use a following blank cell (Ghostty-style), which
+					// is how Nerd Font icons are typically spaced in TUIs.
+					span := 1
+					if cell.Width == grid.CellWidthWide {
+						span = 2
+					} else if isIconRune(cell.Char) && col+1 < cols {
+						next := rowCells[col+1]
+						if next.Char == ' ' || next.Char == 0 {
+							span = 2
+						}
+					}
+					if span == 2 && x+2*r.cellWidth > offsetX+paneWidth {
+						span = 1
+					}
+					gx, gyTop, gw, gh := r.glyphQuad(cell.Char, g, x, y, span)
+					var shear float32
+					if r.fauxItalic && cell.Flags&grid.FlagItalic != 0 {
+						shear = gh * 0.2
+					}
+					r.gridGlyphs.addGlyph(gx, gyTop+gh, gw, gh,
+						g.X, g.Y, g.Width, g.Height, fgColor, shear)
+					if r.fauxBold && cell.Flags&grid.FlagBold != 0 {
+						r.gridGlyphs.addGlyph(gx+1, gyTop+gh, gw, gh,
+							g.X, g.Y, g.Width, g.Height, fgColor, shear)
 					}
 				}
 			}
@@ -3130,6 +3204,16 @@ func (r *Renderer) drawBlockElement(x, y float32, char rune, clr [4]float32, pro
 // unicode-to-ASCII fallbacks, but WITHOUT the '?' last resort — so callers can
 // try the color-emoji path before giving up on a missing glyph.
 func (r *Renderer) resolveGlyph(char rune) (Glyph, bool) {
+	// ASCII fast path: neither fallback table has keys < 128, so resolution
+	// is exactly ensureGlyph; serve it from the flat cache instead of the map.
+	if char >= 0 && char < 128 {
+		slot := &r.asciiCache[char]
+		if !slot.resolved {
+			slot.g, slot.ok = r.ensureGlyph(char)
+			slot.resolved = true
+		}
+		return slot.g, slot.ok
+	}
 	if glyph, ok := r.ensureGlyph(char); ok {
 		return glyph, true
 	}
@@ -3319,8 +3403,7 @@ func (r *Renderer) drawCharScaled(x, y float32, char rune, clr [4]float32, proj 
 }
 
 // colorToRGBA converts a grid.Color to RGBA
-func (r *Renderer) colorToRGBA(c grid.Color, isBackground bool) [4]float32 {
-	switch c.Type {
+func (r *Renderer) colorToRGBA(c grid.Color, isBackground bool) [4]float32 {	switch c.Type {
 	case grid.ColorDefault:
 		if isBackground {
 			return r.theme.Background
