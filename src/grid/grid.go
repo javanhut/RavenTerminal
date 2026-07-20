@@ -106,6 +106,7 @@ type Grid struct {
 	rows         []*Row // active on-screen area, len == Rows
 	history      []*Row // scrollback (oldest first)
 	maxScroll    int    // history cap in rows (0 = no scrollback, e.g. alt screen)
+	freeRows     []*Row // recycled row allocations, all at current width
 	styles       *styleSet
 	Cols         int
 	Rows         int
@@ -1240,14 +1241,10 @@ func (g *Grid) ClearToEndWithBg(bg Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	// Clear rest of current line
-	for col := g.CursorCol; col < g.Cols; col++ {
-		g.putCell(g.index(col, g.CursorRow), NewCellWithBg(bg))
-	}
+	g.fillSpan(g.CursorRow, g.CursorCol, g.Cols, bg)
 	// Clear lines below
 	for row := g.CursorRow + 1; row < g.Rows; row++ {
-		for col := 0; col < g.Cols; col++ {
-			g.putCell(g.index(col, row), NewCellWithBg(bg))
-		}
+		g.fillSpan(row, 0, g.Cols, bg)
 	}
 }
 
@@ -1257,41 +1254,31 @@ func (g *Grid) ClearToStartWithBg(bg Color) {
 	defer g.mu.Unlock()
 	// Clear lines above
 	for row := 0; row < g.CursorRow; row++ {
-		for col := 0; col < g.Cols; col++ {
-			g.putCell(g.index(col, row), NewCellWithBg(bg))
-		}
+		g.fillSpan(row, 0, g.Cols, bg)
 	}
 	// Clear start of current line
-	for col := 0; col <= g.CursorCol; col++ {
-		g.putCell(g.index(col, g.CursorRow), NewCellWithBg(bg))
-	}
+	g.fillSpan(g.CursorRow, 0, g.CursorCol+1, bg)
 }
 
 // ClearLineWithBg clears the current line with background color (BCE)
 func (g *Grid) ClearLineWithBg(bg Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for col := 0; col < g.Cols; col++ {
-		g.putCell(g.index(col, g.CursorRow), NewCellWithBg(bg))
-	}
+	g.fillSpan(g.CursorRow, 0, g.Cols, bg)
 }
 
 // ClearLineToEndWithBg clears from cursor to end of line with background color (BCE)
 func (g *Grid) ClearLineToEndWithBg(bg Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for col := g.CursorCol; col < g.Cols; col++ {
-		g.putCell(g.index(col, g.CursorRow), NewCellWithBg(bg))
-	}
+	g.fillSpan(g.CursorRow, g.CursorCol, g.Cols, bg)
 }
 
 // ClearLineToStartWithBg clears from start of line to cursor with background color (BCE)
 func (g *Grid) ClearLineToStartWithBg(bg Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for col := 0; col <= g.CursorCol; col++ {
-		g.putCell(g.index(col, g.CursorRow), NewCellWithBg(bg))
-	}
+	g.fillSpan(g.CursorRow, 0, g.CursorCol+1, bg)
 }
 
 // DeleteChars deletes n characters at cursor, shifting left
@@ -1333,9 +1320,7 @@ func (g *Grid) DeleteChars(n int) {
 	for col := g.CursorCol; col < g.Cols-n; col++ {
 		g.moveCell(g.index(col, g.CursorRow), g.index(col+n, g.CursorRow))
 	}
-	for col := g.Cols - n; col < g.Cols; col++ {
-		g.putCell(g.index(col, g.CursorRow), NewCellWithBg(g.eraseBg))
-	}
+	g.fillSpan(g.CursorRow, g.Cols-n, g.Cols, g.eraseBg)
 }
 
 // InsertChars inserts n blank characters at cursor, shifting right
@@ -1373,9 +1358,7 @@ func (g *Grid) InsertChars(n int) {
 		g.moveCell(g.index(col, g.CursorRow), g.index(col-n, g.CursorRow))
 	}
 	// Clear inserted positions
-	for col := g.CursorCol; col < g.CursorCol+n && col < g.Cols; col++ {
-		g.putCell(g.index(col, g.CursorRow), NewCellWithBg(g.eraseBg))
-	}
+	g.fillSpan(g.CursorRow, g.CursorCol, g.CursorCol+n, g.eraseBg)
 }
 
 // DeleteLines deletes n lines at cursor within scroll region, shifting up
@@ -1410,9 +1393,7 @@ func (g *Grid) DeleteLinesWithBg(n int, bg Color) {
 
 	// Clear bottom n lines of the scroll region with background color
 	for row := bottom - n + 1; row <= bottom; row++ {
-		for col := 0; col < g.Cols; col++ {
-			g.putCell(g.index(col, row), NewCellWithBg(bg))
-		}
+		g.fillSpan(row, 0, g.Cols, bg)
 	}
 }
 
@@ -1448,9 +1429,7 @@ func (g *Grid) InsertLinesWithBg(n int, bg Color) {
 
 	// Clear n lines at cursor position with background color
 	for row := g.CursorRow; row < g.CursorRow+n && row <= bottom; row++ {
-		for col := 0; col < g.Cols; col++ {
-			g.putCell(g.index(col, row), NewCellWithBg(bg))
-		}
+		g.fillSpan(row, 0, g.Cols, bg)
 	}
 }
 
@@ -1590,9 +1569,7 @@ func (g *Grid) EraseChars(n int) {
 	}
 
 	// Erase the range
-	for col := startCol; col < endCol && col < g.Cols; col++ {
-		g.putCell(g.index(col, g.CursorRow), NewCellWithBg(g.eraseBg))
-	}
+	g.fillSpan(g.CursorRow, startCol, endCol, g.eraseBg)
 }
 
 // RepeatChar repeats the last written character n times. Reuses the normal
