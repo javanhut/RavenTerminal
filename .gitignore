@@ -1,2 +1,3 @@
 .lazy/
 terminal_output.txt
+*.test

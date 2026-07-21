@@ -402,14 +402,12 @@ func (g *Grid) writeCharLocked(c rune, sr *styleRef, link uint16) {
 	// Check if wide character fits on current line
 	if charWidth == 2 && g.CursorCol >= g.Cols-1 {
 		if g.autoWrap {
-			// Wide char at last column - fill with space and wrap
-			idx := g.index(g.CursorCol, g.CursorRow)
-			g.putCell(idx, Cell{
-				Char:  ' ',
-				Fg:    g.lastStyle.Fg,
-				Bg:    g.lastStyle.Bg,
-				Width: CellWidthNormal,
-			})
+			// Wide char at last column - fill with space and wrap. The pad
+			// takes the incoming character's style (not the previous one, as
+			// g.lastStyle would give) so its background matches the cell it
+			// stands in for; otherwise full-screen redraws leave stale
+			// colors at the right edge.
+			g.putCellStyledRow(g.rows[g.CursorRow], g.CursorCol, ' ', sr.take(), CellWidthNormal, link)
 			// The line continues onto the next row: mark it soft-wrapped so
 			// reflow can rejoin it on resize.
 			g.rows[g.CursorRow].flags |= RowSoftWrapped

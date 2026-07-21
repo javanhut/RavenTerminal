@@ -145,14 +145,14 @@ type Renderer struct {
 
 	// Font data. The atlas is dynamic: glyphs are rasterized on demand at
 	// their natural ink bounds and shelf-packed into a growable RED texture.
-	glyphs         map[rune]Glyph
-	glyphMisses    map[rune]bool // runes no font in the chain covers (negative cache)
+	glyphs      map[rune]Glyph
+	glyphMisses map[rune]bool // runes no font in the chain covers (negative cache)
 	// asciiCache is a flat array in front of the glyphs map for runes < 128
 	// (the overwhelming majority of terminal content); neither fallback table
 	// has ASCII keys, so resolution for them is exactly ensureGlyph. Cleared
 	// wherever the glyph cache is invalidated (font reload, atlas grow,
 	// system-fallback load).
-	asciiCache [128]asciiGlyphSlot
+	asciiCache     [128]asciiGlyphSlot
 	fontAtlas      uint32
 	atlasSize      int
 	atlasPix       []byte    // CPU-side mirror of the RED atlas (for grow/repack)
@@ -3403,7 +3403,8 @@ func (r *Renderer) drawCharScaled(x, y float32, char rune, clr [4]float32, proj 
 }
 
 // colorToRGBA converts a grid.Color to RGBA
-func (r *Renderer) colorToRGBA(c grid.Color, isBackground bool) [4]float32 {	switch c.Type {
+func (r *Renderer) colorToRGBA(c grid.Color, isBackground bool) [4]float32 {
+	switch c.Type {
 	case grid.ColorDefault:
 		if isBackground {
 			return r.theme.Background

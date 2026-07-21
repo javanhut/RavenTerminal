@@ -64,6 +64,25 @@ func TestWideChar(t *testing.T) {
 	}
 }
 
+// TestWideCharPadStyleAtWrap covers a wide char written at the last column:
+// it wraps, leaving a pad space in the final cell. The pad must take the
+// incoming character's style, not the previous cell's (g.lastStyle), or
+// full-screen redraws leave stale background colors at the right edge.
+func TestWideCharPadStyleAtWrap(t *testing.T) {
+	g := NewGrid(5, 2)
+	for _, c := range "abcd" {
+		g.WriteChar(c, DefaultFg(), IndexedColor(1), 0, 0, 0, Color{})
+	}
+	g.WriteChar('世', DefaultFg(), IndexedColor(4), 0, 0, 0, Color{})
+	pad := g.GetCell(4, 0)
+	if pad.Char != ' ' || pad.Bg.Index != 4 {
+		t.Fatalf("pad cell = %+v, want space with bg index 4 (incoming style)", pad)
+	}
+	if got := g.GetCell(0, 1); got.Char != '世' || got.Width != CellWidthWide {
+		t.Fatalf("wrapped wide char = %+v, want 世 wide on next row", got)
+	}
+}
+
 func TestCarriageReturnNewline(t *testing.T) {
 	g := NewGrid(10, 3)
 	writeStr(g, "abc")
