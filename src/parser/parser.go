@@ -1087,7 +1087,12 @@ func (t *Terminal) exitAlternateScreen() {
 
 // processOSC handles OSC sequences (Operating System Command)
 func (t *Terminal) processOSC(b byte) {
-	if b == 0x07 || b == 0x9c { // BEL or ST (8-bit) terminates OSC
+	// Terminators are BEL and ST in its 7-bit form (ESC \, via StateOSCEscape).
+	// The 8-bit ST (0x9c) is NOT one: in a UTF-8 terminal 0x9c only occurs as a
+	// continuation byte (e.g. U+2733 ✳ is e2 9c b3), so treating it as ST ends
+	// the string early and spills the rest of the payload into the grid (the
+	// same UTF-8 policy as the ground state, see processGround).
+	if b == 0x07 {
 		t.finishOSC()
 	} else if b == 0x1b { // ESC - might be start of ST
 		t.state = StateOSCEscape
@@ -1122,7 +1127,9 @@ func (t *Terminal) processOSCEscape(b byte) {
 func (t *Terminal) processDCS(b byte) {
 	if b == 0x1b { // ESC - might be start of ST
 		t.state = StateDCSEscape
-	} else if b == 0x9c || b == 0x07 { // ST (8-bit); BEL is non-standard but common
+	} else if b == 0x07 { // BEL is non-standard but common. 0x9c is NOT a
+		// terminator: in UTF-8 mode it only occurs as a continuation byte (see
+		// processOSC).
 		t.finishDCS()
 	} else if len(t.dcsParams) < maxDCSLen {
 		t.dcsParams = append(t.dcsParams, b)

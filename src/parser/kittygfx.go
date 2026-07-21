@@ -25,7 +25,8 @@ func (t *Terminal) processAPC(b byte) {
 	switch b {
 	case 0x1b: // ESC — possible start of ST
 		t.state = StateAPCEscape
-	case 0x9c, 0x07: // ST (8-bit) or BEL
+	case 0x07: // BEL. 0x9c is NOT a terminator: in UTF-8 mode it only occurs
+		// as a continuation byte (see processOSC).
 		t.handleAPC(t.apcBuf)
 		t.state = StateGround
 	default:

@@ -123,3 +123,41 @@ func TestRepeatWideChar(t *testing.T) {
 		}
 	}
 }
+
+// In a UTF-8 terminal, 0x9c inside a string payload is a UTF-8 continuation
+// byte, never an 8-bit ST. U+2733 (✳) encodes as e2 9c b3; if OSC treats the
+// 9c as ST, the string ends early and the rest of the title spills into the
+// grid — this is what mangled Claude Code's permission-prompt lines, which
+// sit under a cursor parked where the OSC title arrives.
+func TestOSCUtf8With9CByte(t *testing.T) {
+	term := NewTerminal(60, 3)
+	term.Process([]byte("AB\x1b]0;\xe2\x9c\xb3 title text\x07CD"))
+	if got := lineText(term, 0); got != "ABCD" {
+		t.Fatalf("OSC payload leaked into grid: row = %q, want %q", got, "ABCD")
+	}
+	if title := term.GetWindowTitle(); title != "✳ title text" {
+		t.Fatalf("window title = %q, want %q", title, "✳ title text")
+	}
+}
+
+// Same 0x9c-continuation rule for DCS: the payload must survive intact and
+// nothing may reach the grid.
+func TestDCSUtf8With9CByte(t *testing.T) {
+	term := NewTerminal(60, 3)
+	term.Process([]byte("AB\x1bP+q\xe2\x9c\xb3\x1b\\CD"))
+	if got := lineText(term, 0); got != "ABCD" {
+		t.Fatalf("DCS payload leaked into grid: row = %q, want %q", got, "ABCD")
+	}
+}
+
+// Same 0x9c-continuation rule for APC (Kitty graphics channel): a stray 0x9c
+// in the payload must not end the string early.
+func TestAPCUtf8With9CByte(t *testing.T) {
+	term := NewTerminal(60, 3)
+	// Not a valid Kitty command — handleAPC will just discard it — but the
+	// payload must be consumed as one string, not split at the 0x9c.
+	term.Process([]byte("AB\x1b_Gx\xe2\x9c\xb3y\x1b\\CD"))
+	if got := lineText(term, 0); got != "ABCD" {
+		t.Fatalf("APC payload leaked into grid: row = %q, want %q", got, "ABCD")
+	}
+}
