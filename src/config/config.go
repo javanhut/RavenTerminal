@@ -2,7 +2,9 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -104,87 +106,10 @@ type Config struct {
 	AllowClipboardRead bool `toml:"allow_clipboard_read"`
 }
 
-const defaultVCSDetectLegacy = `# Detect VCS (Git + Ivaldi)
-_vcs=""
-if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    _branch=$(git branch --show-current 2>/dev/null || echo "?")
-
-    _ahead=0
-    _behind=0
-    if git rev-parse --abbrev-ref @{upstream} >/dev/null 2>&1; then
-        _counts=$(git rev-list --left-right --count HEAD...@{upstream} 2>/dev/null)
-        _behind=${_counts%% *}
-        _ahead=${_counts##* }
-    fi
-
-    _staged=0
-    _unstaged=0
-    _untracked=0
-    while IFS= read -r _line; do
-        case "${_line:0:2}" in
-            "??") _untracked=$((_untracked + 1)) ;;
-            *) 
-                [ "${_line:0:1}" != " " ] && _staged=$((_staged + 1))
-                [ "${_line:1:1}" != " " ] && _unstaged=$((_unstaged + 1))
-                ;;
-        esac
-    done < <(git status --porcelain 2>/dev/null)
-
-    _state=""
-    [ "$_ahead" -gt 0 ] && _state="$_state ^$_ahead"
-    [ "$_behind" -gt 0 ] && _state="$_state v$_behind"
-    [ "$_staged" -gt 0 ] && _state="$_state +$_staged"
-    [ "$_unstaged" -gt 0 ] && _state="$_state ~$_unstaged"
-    [ "$_untracked" -gt 0 ] && _state="$_state ?$_untracked"
-
-    if [ -n "$_state" ]; then
-        _vcs="Git($_branch$_state)"
-    else
-        _vcs="Git($_branch)"
-    fi
-fi
-
-_ivaldi_tl=""
-_ivaldi_present=""
-if command -v ivaldi >/dev/null 2>&1; then
-    _ivaldi_raw="$(ivaldi whereami 2>/dev/null)"
-    if [ -z "$_ivaldi_raw" ]; then
-        _ivaldi_raw="$(ivaldi wai 2>/dev/null)"
-    fi
-    if [ -n "$_ivaldi_raw" ]; then
-        _ivaldi_present="1"
-    fi
-    _ivaldi_tl=$(printf "%s\n" "$_ivaldi_raw" | awk -F: 'tolower($1) ~ /^[[:space:]]*timeline[[:space:]]*$/ {sub(/^[[:space:]]+/, "", $2); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}')
-fi
-if [ -z "$_ivaldi_tl" ] && [ -f .ivaldi ]; then
-    _ivaldi_present="1"
-    _ivaldi_tl=$(awk -F: 'tolower($1) ~ /^[[:space:]]*timeline[[:space:]]*$/ {sub(/^[[:space:]]+/, "", $2); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit} NF{print; exit}' .ivaldi 2>/dev/null)
-fi
-if [ -z "$_ivaldi_tl" ] && [ -d .ivaldi ]; then
-    _ivaldi_present="1"
-    for _ivaldi_file in .ivaldi/timeline .ivaldi/whereami .ivaldi/wai; do
-        if [ -f "$_ivaldi_file" ]; then
-            _ivaldi_tl=$(awk -F: 'tolower($1) ~ /^[[:space:]]*timeline[[:space:]]*$/ {sub(/^[[:space:]]+/, "", $2); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit} NF{print; exit}' "$_ivaldi_file" 2>/dev/null)
-            [ -n "$_ivaldi_tl" ] && break
-        fi
-    done
-fi
-if [ -n "$_ivaldi_tl" ] || [ -n "$_ivaldi_present" ]; then
-    if [ -n "$_ivaldi_tl" ]; then
-        _ivaldi_display="Ivaldi (tl: $_ivaldi_tl)"
-    else
-        _ivaldi_display="Ivaldi"
-    fi
-    if [ -n "$_vcs" ]; then
-        _vcs="$_vcs | $_ivaldi_display"
-    else
-        _vcs="$_ivaldi_display"
-    fi
-fi
-
-[ -z "$_vcs" ] && _vcs="None"
-echo "$_vcs"
-`
+// sha256 of the pre-fix default VCS-detect script (broken ahead/behind
+// parsing), kept so LoadConfig can migrate old configs to defaultVCSDetect
+// without embedding the full 80-line legacy script.
+const defaultVCSDetectLegacyHash = "8478bf11ed2c355fd863f6a8257eb42b2899cc5e01b928010457a5cf6af10d6c"
 
 const defaultLanguageDetect = `# Detect project language
 [ -f go.mod ] && echo "Go" && return 0
@@ -495,7 +420,7 @@ func Load() (*Config, error) {
 	if _, err := toml.DecodeFile(configPath, cfg); err != nil {
 		return nil, err
 	}
-	if cfg.Scripts.VCSDetect == defaultVCSDetectLegacy {
+	if fmt.Sprintf("%x", sha256.Sum256([]byte(cfg.Scripts.VCSDetect))) == defaultVCSDetectLegacyHash {
 		cfg.Scripts.VCSDetect = defaultVCSDetect
 	}
 
@@ -696,20 +621,14 @@ func getDistroName() string {
 	var distro string
 	switch opSys {
 	case "linux":
-
-		data, err := os.ReadFile("/etc/os-release")
-		if err != nil {
-			distro = "linux"
-		}
-		lines := strings.Split(string(data), "\n")
-		for _, line := range lines {
-			if strings.HasPrefix(line, "ID=") {
-				id, _ := strings.CutPrefix(line, "ID=")
-				id = strings.Trim(id, "\"")
-				distro = id
+		distro = "linux"
+		if data, err := os.ReadFile("/etc/os-release"); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				if id, ok := strings.CutPrefix(line, "ID="); ok {
+					distro = strings.Trim(id, "\"")
+				}
 			}
 		}
-		distro = "linux"
 	case "darwin":
 		distro = "macos"
 	case "windows":

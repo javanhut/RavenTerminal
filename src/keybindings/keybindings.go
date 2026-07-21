@@ -2,6 +2,7 @@ package keybindings
 
 import (
 	"runtime"
+	"unicode/utf8"
 
 	"github.com/go-gl/glfw/v3.3/glfw"
 )
@@ -334,39 +335,9 @@ func TranslateKey(key glfw.Key, mods glfw.ModifierKey, appCursorMode bool) KeyRe
 
 // TranslateChar translates a character input to terminal bytes
 func TranslateChar(char rune, mods glfw.ModifierKey) []byte {
-	alt := mods&glfw.ModAlt != 0
-
-	if alt {
+	if mods&glfw.ModAlt != 0 {
 		// Alt sends ESC prefix
-		return []byte{0x1b, byte(char)}
+		return utf8.AppendRune([]byte{0x1b}, char)
 	}
-
-	// UTF-8 encode the character
-	buf := make([]byte, 4)
-	n := encodeRune(buf, char)
-	return buf[:n]
-}
-
-// encodeRune encodes a rune as UTF-8
-func encodeRune(buf []byte, r rune) int {
-	if r < 0x80 {
-		buf[0] = byte(r)
-		return 1
-	}
-	if r < 0x800 {
-		buf[0] = byte(0xC0 | (r >> 6))
-		buf[1] = byte(0x80 | (r & 0x3F))
-		return 2
-	}
-	if r < 0x10000 {
-		buf[0] = byte(0xE0 | (r >> 12))
-		buf[1] = byte(0x80 | ((r >> 6) & 0x3F))
-		buf[2] = byte(0x80 | (r & 0x3F))
-		return 3
-	}
-	buf[0] = byte(0xF0 | (r >> 18))
-	buf[1] = byte(0x80 | ((r >> 12) & 0x3F))
-	buf[2] = byte(0x80 | ((r >> 6) & 0x3F))
-	buf[3] = byte(0x80 | (r & 0x3F))
-	return 4
+	return utf8.AppendRune(nil, char)
 }
