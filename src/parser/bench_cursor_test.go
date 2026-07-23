@@ -10,7 +10,7 @@ import (
 // terminal-level numbers that motivated them.
 func corpusCursor(lines int) []byte {
 	var b bytes.Buffer
-	for i := 0; i < lines; i++ {
+	for i := range lines {
 		fmt.Fprintf(&b, "\033[s\033[1;1Hline %d\033[u\033[K%d\n", i, i)
 	}
 	return b.Bytes()
@@ -18,7 +18,7 @@ func corpusCursor(lines int) []byte {
 
 func corpusPlain(lines int) []byte {
 	var b bytes.Buffer
-	for i := 0; i < lines; i++ {
+	for range lines {
 		b.WriteString("The quick brown fox jumps over the lazy dog 0123456789\n")
 	}
 	return b.Bytes()
@@ -26,7 +26,7 @@ func corpusPlain(lines int) []byte {
 
 func corpusSGR(lines int) []byte {
 	var b bytes.Buffer
-	for i := 0; i < lines; i++ {
+	for i := range lines {
 		fmt.Fprintf(&b, "\033[31mred\033[32mgreen\033[34mblue\033[0m %d\n", i)
 	}
 	return b.Bytes()
@@ -67,7 +67,7 @@ func BenchmarkCursorParts(b *testing.B) {
 	for _, p := range parts {
 		b.Run(p.name, func(b *testing.B) {
 			var buf bytes.Buffer
-			for i := 0; i < 30000; i++ {
+			for range 30000 {
 				buf.WriteString(p.seq)
 			}
 			benchCorpus(b, buf.Bytes())

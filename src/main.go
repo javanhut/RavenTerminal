@@ -233,6 +233,15 @@ type mouseSelection struct {
 	clickCount    int
 }
 
+// tabDragState tracks a press on a tab-bar chip: pending until the cursor
+// moves past a small threshold, then active while the tab is live-reordered.
+type tabDragState struct {
+	pending bool
+	active  bool
+	index   int     // current slot of the dragged tab
+	startY  float64 // logical cursor Y at press
+}
+
 // mouseReportState tracks a mouse press that was forwarded to the application
 // (mouse tracking modes 1000/1002/1003), so the matching release and drag
 // motion go to the same pane, and motion is throttled to cell changes.

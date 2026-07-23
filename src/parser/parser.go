@@ -7,6 +7,7 @@ import (
 	"github.com/javanhut/RavenTerminal/src/images"
 	"math"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1538,13 +1539,7 @@ func (t *Terminal) parseSGRParams() []int {
 // appendSGRPart parses one ';'-separated SGR parameter (possibly carrying
 // ':'-separated sub-parameters) and appends the resulting code(s) to params.
 func (t *Terminal) appendSGRPart(params []int, part []byte) []int {
-	hasColon := false
-	for _, c := range part {
-		if c == ':' {
-			hasColon = true
-			break
-		}
-	}
+	hasColon := slices.Contains(part, ':')
 	if !hasColon {
 		n, _ := atoiBytes(part)
 		return append(params, n)

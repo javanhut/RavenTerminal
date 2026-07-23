@@ -1225,6 +1225,7 @@ func (a *App) onMouseButton(w *glfw.Window, button glfw.MouseButton, action glfw
 					a.tabManager.NewTab()
 				} else {
 					a.tabManager.SelectTab(idx)
+					a.tabDrag = tabDragState{pending: true, index: idx, startY: y}
 				}
 				return
 			}
@@ -1297,6 +1298,11 @@ func (a *App) onMouseButton(w *glfw.Window, button glfw.MouseButton, action glfw
 			}
 			activeTab.SetActivePane(pane)
 		case glfw.Release:
+			// A tab-bar drag ends here; the reorder already happened live.
+			if a.tabDrag.pending || a.tabDrag.active {
+				a.tabDrag = tabDragState{}
+				return
+			}
 			// Handle AI panel text selection release
 			if a.aiPanel.SelectionActive {
 				cellW, cellH := a.renderer.CellDimensions()
@@ -1451,6 +1457,26 @@ func (a *App) onCursorPos(w *glfw.Window, xpos, ypos float64) {
 	activeTab := a.tabManager.ActiveTab()
 	if activeTab == nil {
 		a.renderer.ClearHoverURL()
+		return
+	}
+
+	// Tab-bar drag: once the cursor moves past a small threshold, live-reorder
+	// the dragged chip as it crosses slot boundaries.
+	if a.tabDrag.pending || a.tabDrag.active {
+		if a.tabDrag.pending {
+			const threshold = 5.0
+			if dy := ypos - a.tabDrag.startY; dy > threshold || dy < -threshold {
+				a.tabDrag.pending = false
+				a.tabDrag.active = true
+			} else {
+				return
+			}
+		}
+		target := a.renderer.TabDropIndex(a.tabManager, ypos)
+		if target != a.tabDrag.index {
+			a.tabManager.MoveTab(a.tabDrag.index, target)
+			a.tabDrag.index = target
+		}
 		return
 	}
 

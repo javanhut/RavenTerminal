@@ -1075,6 +1075,31 @@ func (tm *TabManager) SelectTab(index int) {
 	}
 }
 
+// MoveTab moves the tab at index from to index to, keeping the active tab
+// active and renumbering IDs so they stay positional.
+func (tm *TabManager) MoveTab(from, to int) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	n := len(tm.tabs)
+	if from < 0 || from >= n || to < 0 || to >= n || from == to {
+		return
+	}
+
+	active := tm.tabs[tm.activeIndex]
+	moved := tm.tabs[from]
+	tm.tabs = append(tm.tabs[:from], tm.tabs[from+1:]...)
+	tm.tabs = append(tm.tabs[:to], append([]*Tab{moved}, tm.tabs[to:]...)...)
+
+	for i, t := range tm.tabs {
+		if t == active {
+			tm.activeIndex = i
+			break
+		}
+	}
+	tm.renumberTabs()
+}
+
 // ActiveTab returns the currently active tab
 func (tm *TabManager) ActiveTab() *Tab {
 	tm.mu.RLock()

@@ -45,6 +45,7 @@ type App struct {
 	resizeMode     bool
 	selection      *mouseSelection
 	report         *mouseReportState
+	tabDrag        tabDragState
 	lastCursorX    float64
 	lastCursorY    float64
 	haveCursorPos  bool
@@ -699,6 +700,7 @@ func (a *App) renderFrame(now time.Time) {
 		ActiveTabChanged:   activeTab != a.prevActiveTab,
 		CursorPhaseChanged: drawCursor != a.prevDrawCursor,
 		SelectionDragging:  a.selection.active,
+		TabDragging:        a.tabDrag.active,
 		ToastVisible:       toastVisible,
 		ToastJustExpired:   a.prevToastVisible && !toastVisible,
 		MenuOpen:           menuOpen || a.prevMenuOpen,

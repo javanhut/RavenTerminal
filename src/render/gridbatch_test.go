@@ -23,7 +23,7 @@ func newBenchRenderer() *Renderer {
 	r.theme.Foreground = [4]float32{0.9, 0.9, 0.9, 1}
 	r.theme.Selection = [4]float32{0.3, 0.4, 0.6, 1}
 	fake := Glyph{X: 0.1, Y: 0.1, Width: 0.01, Height: 0.02, PixelWidth: 9, PixelHeight: 14, OffsetX: 0, OffsetY: -11}
-	for c := rune(0); c < 128; c++ {
+	for c := range rune(128) {
 		r.glyphs[c] = fake
 	}
 	for _, c := range []rune{'世', '─', '│', '┌', '🙂'} {
@@ -38,7 +38,7 @@ func makeSnapshot(rng *rand.Rand, cols, rows int, styled bool) *grid.Snapshot {
 	snap := &grid.Snapshot{Cols: cols, Rows: rows, Cells: make([]grid.Cell, cols*rows)}
 	plainRunes := []rune("The quick brown fox jumps over the lazy dog 0123456789")
 	blocks := []rune{'▀', '▄', '█', '▌', '▖'}
-	for row := 0; row < rows; row++ {
+	for row := range rows {
 		for col := 0; col < cols; col++ {
 			cell := grid.NewCell()
 			roll := rng.Intn(100)
@@ -92,8 +92,8 @@ func referenceBuildGridBatches(r *Renderer, snap *grid.Snapshot, offsetX, offset
 	rb.reset()
 	gb.reset()
 	p2 = p2[:0]
-	for row := 0; row < rows; row++ {
-		for col := 0; col < cols; col++ {
+	for row := range rows {
+		for col := range cols {
 			cell := snap.Cells[row*cols+col]
 			x := offsetX + float32(col)*r.cellWidth
 			y := offsetY + float32(row)*r.cellHeight
@@ -250,14 +250,14 @@ func TestBuildGridBatchesMatchesReference(t *testing.T) {
 // exactly the per-cell clip decision for every cell.
 func TestFitCellsMatchesClipPredicate(t *testing.T) {
 	rng := rand.New(rand.NewSource(7))
-	for i := 0; i < 2000; i++ {
+	for range 2000 {
 		offset := float32(rng.Intn(40))
 		sz := float32(rng.Intn(20)+1) + float32(rng.Intn(100))/100
 		n := rng.Intn(300)
 		limit := offset + float32(rng.Intn(int(sz)*n+2))
 		got := fitCells(offset, sz, n, limit)
 		want := 0
-		for c := 0; c < n; c++ {
+		for c := range n {
 			if offset+float32(c)*sz+sz > limit {
 				break
 			}

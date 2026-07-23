@@ -2563,6 +2563,26 @@ func (r *Renderer) HitTestTabBar(tm *tab.TabManager, x, y float64) (index int, n
 	return 0, false, false
 }
 
+// TabDropIndex maps a logical cursor Y to the nearest tab slot, clamped to
+// [0, TabCount-1]. Used while drag-reordering tabs; returns 0 when the bar is
+// hidden or empty.
+func (r *Renderer) TabDropIndex(tm *tab.TabManager, y float64) int {
+	n := tm.TabCount()
+	if !r.tabBarVisible || n == 0 {
+		return 0
+	}
+	fy := float32(y) * r.hidpiScale()
+	g := r.tabBarGeom()
+	slot := int((fy-g.topPad)/(g.boxH+g.gap) + 0.5)
+	if slot < 0 {
+		return 0
+	}
+	if slot > n-1 {
+		return n - 1
+	}
+	return slot
+}
+
 // tabLabel returns a compact directory-based label for a tab (e.g. "~/D/RavenTerminal").
 func tabLabel(t *tab.Tab, home string) string {
 	dir := t.ActiveDir()
@@ -2824,11 +2844,11 @@ func (r *Renderer) buildGridBatches(snap *grid.Snapshot, offsetX, offsetY, paneW
 	fgTheme := r.theme.Foreground
 	rectW := r.cellWidth + 0.5
 
-	for row := 0; row < maxRow; row++ {
+	for row := range maxRow {
 		rowCells := snap.Cells[row*cols : row*cols+cols]
 		y := offsetY + float32(row)*r.cellHeight
 		rowHovered := row == hoverRow
-		for col := 0; col < maxCol; col++ {
+		for col := range maxCol {
 			cell := rowCells[col]
 			x := offsetX + float32(col)*r.cellWidth
 

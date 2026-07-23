@@ -17,6 +17,8 @@ package render
 //     DECTCEM visibility, or blink pausing on focus/typing)
 //   - SelectionDragging:  a mouse selection drag is in progress (edge
 //     auto-scroll repaints)
+//   - TabDragging:        a tab-bar drag-reorder is in progress (the reordered
+//     chips must repaint even when nothing else is dirty)
 //   - ToastVisible:       a toast overlay is showing (it renders with a
 //     time-based fade/expiry)
 //   - ToastJustExpired:   the toast expired since the last frame (one repaint
@@ -38,6 +40,7 @@ type RedrawTriggers struct {
 	ActiveTabChanged   bool
 	CursorPhaseChanged bool
 	SelectionDragging  bool
+	TabDragging        bool
 	ToastVisible       bool
 	ToastJustExpired   bool
 	MenuOpen           bool

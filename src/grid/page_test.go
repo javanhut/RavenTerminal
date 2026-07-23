@@ -12,7 +12,7 @@ func TestPushHistoryWrapsWithoutLosingRows(t *testing.T) {
 	// Enough pushes to force several compactions (each happens roughly every
 	// maxScroll pushes), so a stale-window bug can't hide behind a single lap.
 	const total = 200
-	for i := 0; i < total; i++ {
+	for i := range total {
 		r := g.blankRow(DefaultBg())
 		r.cells[0].Char = rune('a' + i%26) // tag the row so order is checkable
 		g.pushHistory(r)
@@ -26,7 +26,7 @@ func TestPushHistoryWrapsWithoutLosingRows(t *testing.T) {
 		t.Fatalf("history=%d, want %d", len(g.history), cap_)
 	}
 	// The window must be the newest cap_ rows, oldest first.
-	for j := 0; j < cap_; j++ {
+	for j := range cap_ {
 		want := rune('a' + (total-cap_+j)%26)
 		if got := g.history[j].cells[0].Char; got != want {
 			t.Errorf("history[%d]=%q, want %q", j, got, want)

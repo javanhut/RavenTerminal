@@ -623,7 +623,7 @@ func getDistroName() string {
 	case "linux":
 		distro = "linux"
 		if data, err := os.ReadFile("/etc/os-release"); err == nil {
-			for _, line := range strings.Split(string(data), "\n") {
+			for line := range strings.SplitSeq(string(data), "\n") {
 				if id, ok := strings.CutPrefix(line, "ID="); ok {
 					distro = strings.Trim(id, "\"")
 				}
