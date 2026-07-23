@@ -1225,7 +1225,7 @@ func (a *App) onMouseButton(w *glfw.Window, button glfw.MouseButton, action glfw
 					a.tabManager.NewTab()
 				} else {
 					a.tabManager.SelectTab(idx)
-					a.tabDrag = tabDragState{pending: true, index: idx, startY: y}
+					a.tabDrag = tabDragState{pending: true, index: idx, startX: x, startY: y}
 				}
 				return
 			}
@@ -1465,7 +1465,7 @@ func (a *App) onCursorPos(w *glfw.Window, xpos, ypos float64) {
 	if a.tabDrag.pending || a.tabDrag.active {
 		if a.tabDrag.pending {
 			const threshold = 5.0
-			if dy := ypos - a.tabDrag.startY; dy > threshold || dy < -threshold {
+			if dragThresholdPassed(a.tabDrag.startX, a.tabDrag.startY, xpos, ypos, threshold) {
 				a.tabDrag.pending = false
 				a.tabDrag.active = true
 			} else {

@@ -2563,6 +2563,24 @@ func (r *Renderer) HitTestTabBar(tm *tab.TabManager, x, y float64) (index int, n
 	return 0, false, false
 }
 
+// tabDropSlot maps a framebuffer Y coordinate to the nearest tab-chip center.
+// The half-gap between adjacent chips is therefore the swap boundary.
+func tabDropSlot(y float32, count int, g tabBarGeom) int {
+	if count <= 0 {
+		return 0
+	}
+	pitch := g.boxH + g.gap
+	firstCenter := g.topPad + g.boxH*0.5
+	slot := int(math.Floor(float64((y-firstCenter)/pitch) + 0.5))
+	if slot < 0 {
+		return 0
+	}
+	if slot >= count {
+		return count - 1
+	}
+	return slot
+}
+
 // TabDropIndex maps a logical cursor Y to the nearest tab slot, clamped to
 // [0, TabCount-1]. Used while drag-reordering tabs; returns 0 when the bar is
 // hidden or empty.
@@ -2572,15 +2590,7 @@ func (r *Renderer) TabDropIndex(tm *tab.TabManager, y float64) int {
 		return 0
 	}
 	fy := float32(y) * r.hidpiScale()
-	g := r.tabBarGeom()
-	slot := int((fy-g.topPad)/(g.boxH+g.gap) + 0.5)
-	if slot < 0 {
-		return 0
-	}
-	if slot > n-1 {
-		return n - 1
-	}
-	return slot
+	return tabDropSlot(fy, n, r.tabBarGeom())
 }
 
 // tabLabel returns a compact directory-based label for a tab (e.g. "~/D/RavenTerminal").

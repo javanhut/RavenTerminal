@@ -239,7 +239,13 @@ type tabDragState struct {
 	pending bool
 	active  bool
 	index   int     // current slot of the dragged tab
+	startX  float64 // logical cursor X at press
 	startY  float64 // logical cursor Y at press
+}
+
+func dragThresholdPassed(startX, startY, x, y, threshold float64) bool {
+	dx, dy := x-startX, y-startY
+	return dx*dx+dy*dy > threshold*threshold
 }
 
 // mouseReportState tracks a mouse press that was forwarded to the application
