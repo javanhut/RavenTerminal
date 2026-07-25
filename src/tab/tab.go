@@ -10,7 +10,9 @@ import (
 	"github.com/javanhut/RavenTerminal/src/shell"
 )
 
-const MaxTabs = 10
+// MaxTabs bounds the tab strip; chips compress to fit the window height
+// (see render.tabBarGeom), so this is a sanity cap, not a layout limit.
+const MaxTabs = 32
 const MaxPanes = 16
 
 // SplitDirection indicates how a node is split

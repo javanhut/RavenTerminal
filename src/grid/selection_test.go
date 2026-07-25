@@ -151,6 +151,38 @@ func TestSelectLineAtJoinsSoftWrap(t *testing.T) {
 	}
 }
 
+// The rendered highlight (snapshot) must agree with IsSelected/SelectedText
+// after the buffer moves under it, with no explicit sync call in between —
+// snapshot bounds are derived, not cached.
+func TestSnapshotHighlightTracksBufferMovement(t *testing.T) {
+	g := NewGrid(10, 3)
+	writeLines(g, "L1", "L2", "L3", "L4", "L5", "L6")
+	g.SetSelection(0, 0, 1, 0) // "L4", screen row 0
+
+	check := func(when string, wantRow int) {
+		t.Helper()
+		s := g.Snapshot(nil)
+		for row := range 3 {
+			want := wantRow == row
+			if got := s.Selected(0, row); got != want {
+				t.Fatalf("%s: snapshot.Selected(0,%d) = %v, want %v", when, row, got, want)
+			}
+			if got := g.IsSelected(0, row); got != want {
+				t.Fatalf("%s: IsSelected(0,%d) = %v, want %v", when, row, got, want)
+			}
+		}
+	}
+
+	check("initial", 0)
+	g.ScrollViewUp(2) // L4 is now on viewport row 2
+	check("after view scroll", 2)
+	g.ScrollViewDown(2)
+	g.ScrollUp(1) // new output pushes L4 off the screen
+	check("after content scroll", -1)
+	g.ScrollViewUp(1) // scrolled back into view on row 0
+	check("after scrolling back", 0)
+}
+
 func TestSelectionClearedOnResize(t *testing.T) {
 	g := NewGrid(10, 3)
 	writeStr(g, "hello")

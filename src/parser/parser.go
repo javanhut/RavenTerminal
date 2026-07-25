@@ -1811,9 +1811,6 @@ func (t *Terminal) GetGrid() *grid.Grid {
 func (t *Terminal) Snapshot() *grid.Snapshot {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	// Refresh the selection's viewport projection so the highlight tracks view
-	// scrolling and content scrolling in (selection anchors are absolute).
-	t.Grid.SyncSelectionView()
 	s := t.Grid.Snapshot(t.snapPrev)
 	s.CursorVisible = t.cursorVisible
 	t.snapPrev = s

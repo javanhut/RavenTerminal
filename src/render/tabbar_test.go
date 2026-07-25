@@ -34,6 +34,30 @@ func TestTabDropSlotUsesMidpointBetweenTabCenters(t *testing.T) {
 	}
 }
 
+// Chips must compress so a full MaxTabs strip plus the "+" button still fits
+// the bar; otherwise tabs past the fold are unclickable.
+func TestTabBarGeomFitsMaxTabs(t *testing.T) {
+	r := &Renderer{
+		baseFontSize: 16, fontSize: 16,
+		cellWidth: 8, cellHeight: 18,
+		tabBarWidth: 200,
+		barViewH:    768,
+	}
+	const count = 32
+	g := r.tabBarGeom(count)
+	bottom := g.topPad + float32(count)*(g.boxH+g.gap) + g.plusH
+	if bottom > r.barViewH {
+		t.Fatalf("%d chips + button reach %v, past the %v bar", count, bottom, r.barViewH)
+	}
+	if g.cellH > g.boxH {
+		t.Fatalf("text height %v overflows chip height %v", g.cellH, g.boxH)
+	}
+	// Few tabs keep the uncompressed geometry.
+	if small := r.tabBarGeom(3); small.boxH != r.cellHeight+14 {
+		t.Fatalf("3 tabs: boxH = %v, want uncompressed %v", small.boxH, r.cellHeight+14)
+	}
+}
+
 func TestTabDropSlotEmpty(t *testing.T) {
 	if got := tabDropSlot(100, 0, tabBarGeom{}); got != 0 {
 		t.Fatalf("tabDropSlot() = %d, want 0", got)

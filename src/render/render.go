@@ -141,6 +141,7 @@ type Renderer struct {
 	paddingTop      float32
 	paddingBottom   float32
 	tabBarWidth     float32
+	barViewH        float32 // height of the last rendered frame (tab chip fitting)
 	currentFont     string
 
 	// Font data. The atlas is dynamic: glyphs are rasterized on demand at
@@ -2447,7 +2448,12 @@ type tabBarGeom struct {
 	cellH      float32
 }
 
-func (r *Renderer) tabBarGeom() tabBarGeom {
+// tabBarGeom computes the chip geometry for count tabs. Chips are compressed
+// (and their text scaled down with them) so that every tab plus the "+" button
+// always fits the bar height — that is what lets MaxTabs exceed what a
+// fixed-height chip stack could show. barViewH is the height of the last
+// rendered frame; it is zero before the first frame, which skips compression.
+func (r *Renderer) tabBarGeom(count int) tabBarGeom {
 	scale := r.baseFontSize / r.fontSize
 	cellH := r.cellHeight * scale
 	const sidePad = 10.0
@@ -2461,6 +2467,21 @@ func (r *Renderer) tabBarGeom() tabBarGeom {
 		cellH:  cellH,
 	}
 	g.plusH = g.boxH * 0.8
+
+	avail := r.barViewH - 2*g.topPad
+	need := float32(count)*(g.boxH+g.gap) + g.plusH
+	if count > 0 && avail > 0 && need > avail {
+		k := avail / need
+		g.boxH *= k
+		g.gap *= k
+		g.plusH *= k
+		// Keep the label inside its chip: shrink the text with the chip once
+		// the chip is no longer taller than a line of text.
+		if fit := g.boxH - 4; fit < g.cellH {
+			g.scale *= fit / g.cellH
+			g.cellH = fit
+		}
+	}
 	return g
 }
 
@@ -2474,13 +2495,14 @@ func (r *Renderer) renderTabBar(tm *tab.TabManager, width, height int, proj [16]
 	}
 
 	barW := r.tabBarWidth
+	r.barViewH = float32(height)
 
 	// Tab bar background + a hairline right edge.
 	r.drawRect(0, 0, barW, float32(height), r.theme.TabBar, proj)
 	r.drawRect(barW-1, 0, 1, float32(height), withAlpha(r.theme.Foreground, 0.12), proj)
 
-	g := r.tabBarGeom()
 	tabs := tm.GetTabs()
+	g := r.tabBarGeom(len(tabs))
 	activeIdx := tm.ActiveIndex()
 	isMac := runtime.GOOS == "darwin"
 	home := cachedHomeDir
@@ -2548,8 +2570,8 @@ func (r *Renderer) HitTestTabBar(tm *tab.TabManager, x, y float64) (index int, n
 	if fx < 0 || fx > r.tabBarWidth {
 		return 0, false, false
 	}
-	g := r.tabBarGeom()
 	n := tm.TabCount()
+	g := r.tabBarGeom(n)
 	for i := range n {
 		boxY := g.topPad + float32(i)*(g.boxH+g.gap)
 		if fx >= g.boxX && fx <= g.boxX+g.boxW && fy >= boxY && fy <= boxY+g.boxH {
@@ -2590,7 +2612,7 @@ func (r *Renderer) TabDropIndex(tm *tab.TabManager, y float64) int {
 		return 0
 	}
 	fy := float32(y) * r.hidpiScale()
-	return tabDropSlot(fy, n, r.tabBarGeom())
+	return tabDropSlot(fy, n, r.tabBarGeom(n))
 }
 
 // tabLabel returns a compact directory-based label for a tab (e.g. "~/D/RavenTerminal").

@@ -152,15 +152,6 @@ type Grid struct {
 	selEndAbsRow    int // current drag end (may precede the anchor)
 	selEndCol       int
 
-	// Viewport-relative projection of the absolute selection, refreshed by
-	// SyncSelectionView. Exists only because snapshot.go reads these fields
-	// directly; all selection logic in this file uses the absolute anchors.
-	selectionStartCol     int
-	selectionStartRow     int
-	selectionEndCol       int
-	selectionEndRow       int
-	selectionScrollOffset int
-
 	// Auto-wrap mode (DECAWM ?7) - default true
 	autoWrap bool
 
@@ -1016,41 +1007,29 @@ func (g *Grid) normalizedSelectionLocked() (sRow, sCol, eRow, eCol int) {
 	return
 }
 
-// syncSelectionViewLocked projects the absolute selection onto the current
-// viewport, refreshing the legacy viewport-relative fields consumed by
-// snapshot.go. When the selection is entirely off-screen the projection is
-// invalidated by desyncing selectionScrollOffset (snapshot treats that as "no
-// visible selection") without dropping the selection itself.
-func (g *Grid) syncSelectionViewLocked() {
+// selectionViewLocked projects the absolute selection onto the current
+// viewport, normalized and clamped to the visible rows. It is derived state:
+// computing it on demand (rather than caching it) is what keeps the highlight
+// in lockstep with SelectedText, whatever moved underneath it — view
+// scrolling, new output, or scrollback trimming. active is false when there is
+// no selection or it lies entirely off-screen.
+func (g *Grid) selectionViewLocked() (active bool, sCol, sRow, eCol, eRow int) {
 	if !g.selectionActive {
-		return
+		return false, 0, 0, 0, 0
 	}
-	sRow, sCol, eRow, eCol := g.normalizedSelectionLocked()
+	sAbs, sC, eAbs, eC := g.normalizedSelectionLocked()
 	viewTop := g.viewTopAbsLocked()
-	sV := sRow - viewTop
-	eV := eRow - viewTop
-	if eV < 0 || sV >= g.Rows {
-		g.selectionScrollOffset = g.scrollOffset + 1 // off-screen: desync
-		return
+	sR, eR := sAbs-viewTop, eAbs-viewTop
+	if eR < 0 || sR >= g.Rows {
+		return false, 0, 0, 0, 0
 	}
-	if sV < 0 {
-		sV, sCol = 0, 0
+	if sR < 0 {
+		sR, sC = 0, 0
 	}
-	if eV >= g.Rows {
-		eV, eCol = g.Rows-1, g.Cols-1
+	if eR >= g.Rows {
+		eR, eC = g.Rows-1, g.Cols-1
 	}
-	g.selectionStartCol, g.selectionStartRow = sCol, sV
-	g.selectionEndCol, g.selectionEndRow = eCol, eV
-	g.selectionScrollOffset = g.scrollOffset
-}
-
-// SyncSelectionView refreshes the viewport projection of the selection. Called
-// once per frame (before snapshotting) so the highlight tracks both view
-// scrolling and new content scrolling in.
-func (g *Grid) SyncSelectionView() {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.syncSelectionViewLocked()
+	return true, sC, sR, eC, eR
 }
 
 // AbsRowForViewRow translates a viewport row to an absolute buffer row.
@@ -1073,7 +1052,6 @@ func (g *Grid) StartSelection(col, row int) {
 	g.selectionActive = true
 	g.selAnchorAbsRow, g.selAnchorCol = abs, col
 	g.selEndAbsRow, g.selEndCol = abs, col
-	g.syncSelectionViewLocked()
 }
 
 // ExtendSelection moves the selection end to a viewport cell, keeping the
@@ -1088,7 +1066,6 @@ func (g *Grid) ExtendSelection(col, row int) {
 	row = clampInt(row, 0, g.Rows-1)
 	g.selEndAbsRow = g.viewTopAbsLocked() + row
 	g.selEndCol = col
-	g.syncSelectionViewLocked()
 }
 
 // SetSelection sets the selection bounds in display (viewport) coordinates.
@@ -1109,7 +1086,6 @@ func (g *Grid) SetSelection(startCol, startRow, endCol, endRow int) {
 	g.selectionActive = true
 	g.selAnchorAbsRow, g.selAnchorCol = viewTop+startRow, startCol
 	g.selEndAbsRow, g.selEndCol = viewTop+endRow, endCol
-	g.syncSelectionViewLocked()
 }
 
 // isWordRune reports whether a rune belongs to a double-click word:
@@ -1170,7 +1146,6 @@ func (g *Grid) SelectWordAt(col, row int) {
 	g.selectionActive = true
 	g.selAnchorAbsRow, g.selAnchorCol = abs, start
 	g.selEndAbsRow, g.selEndCol = abs, end
-	g.syncSelectionViewLocked()
 }
 
 // SelectLineAt selects the full logical line (soft-wrap-joined) containing a
@@ -1205,7 +1180,6 @@ func (g *Grid) SelectLineAt(col, row int) {
 	g.selectionActive = true
 	g.selAnchorAbsRow, g.selAnchorCol = first, 0
 	g.selEndAbsRow, g.selEndCol = last, g.Cols-1
-	g.syncSelectionViewLocked()
 }
 
 // ClearSelection clears any active selection.

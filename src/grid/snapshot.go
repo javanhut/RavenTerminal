@@ -114,14 +114,8 @@ func (g *Grid) Snapshot(prev *Snapshot) *Snapshot {
 	s.CursorCol, s.CursorRow = g.CursorCol, g.CursorRow
 	s.ScrollOffset = g.scrollOffset
 
-	// Selection (normalized), valid only when the view hasn't scrolled away.
-	selActive := g.selectionActive && g.scrollOffset == g.selectionScrollOffset
-	sSCol, sSRow := g.selectionStartCol, g.selectionStartRow
-	sECol, sERow := g.selectionEndCol, g.selectionEndRow
-	if sERow < sSRow || (sERow == sSRow && sECol < sSCol) {
-		sSCol, sECol = sECol, sSCol
-		sSRow, sERow = sERow, sSRow
-	}
+	// Selection, projected onto the current viewport (false when off-screen).
+	selActive, sSCol, sSRow, sECol, sERow := g.selectionViewLocked()
 	if selActive != s.SelActive || sSCol != s.selSCol || sSRow != s.selSRow ||
 		sECol != s.selECol || sERow != s.selERow {
 		dirty = true
@@ -167,14 +161,8 @@ func (g *Grid) RedrawNeeded() bool {
 		g.scrollOffset != g.lastSnap.scrollOffset {
 		return true
 	}
-	// Selection, normalized exactly as Snapshot records it.
-	selActive := g.selectionActive && g.scrollOffset == g.selectionScrollOffset
-	sSCol, sSRow := g.selectionStartCol, g.selectionStartRow
-	sECol, sERow := g.selectionEndCol, g.selectionEndRow
-	if sERow < sSRow || (sERow == sSRow && sECol < sSCol) {
-		sSCol, sECol = sECol, sSCol
-		sSRow, sERow = sERow, sSRow
-	}
+	// Selection, projected exactly as Snapshot records it.
+	selActive, sSCol, sSRow, sECol, sERow := g.selectionViewLocked()
 	if selActive != g.lastSnap.selActive {
 		return true
 	}
