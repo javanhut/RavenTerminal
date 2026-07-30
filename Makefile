@@ -48,13 +48,33 @@ else ifeq ($(OS),Darwin)
     PKG_MANAGER := brew
 endif
 
+# Backend selection (Linux). On a Wayland session with the dev libs present,
+# build the native Wayland backend so compositors match the window to
+# raven-terminal.desktop (correct taskbar icon + native HiDPI/scaling).
+# Otherwise use X11, which also drives Wayland via XWayland.
+# Override: make build BACKEND=x11   (or BACKEND=wayland)
+BACKEND ?= auto
+GOTAGS :=
+ifeq ($(OS),Linux)
+    ifeq ($(BACKEND),auto)
+        ifeq ($(XDG_SESSION_TYPE),wayland)
+            BACKEND := $(shell pkg-config --exists wayland-client xkbcommon 2>/dev/null && echo wayland || echo x11)
+        else
+            BACKEND := x11
+        endif
+    endif
+    ifeq ($(BACKEND),wayland)
+        GOTAGS := -tags wayland
+    endif
+endif
+
 # Default target
 all: build
 
 # Build the application
 build:
-	@echo -e "$(BLUE)[INFO]$(NC) Building $(APP_NAME)..."
-	@go build -o $(APP_NAME) ./src
+	@echo -e "$(BLUE)[INFO]$(NC) Building $(APP_NAME) (backend: $(BACKEND))..."
+	@go build $(GOTAGS) -o $(APP_NAME) ./src
 	@chmod +x $(APP_NAME)
 	@echo -e "$(GREEN)[OK]$(NC) Build successful: ./$(APP_NAME)"
 

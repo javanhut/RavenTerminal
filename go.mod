@@ -16,3 +16,8 @@ require (
 )
 
 require golang.org/x/text v0.37.0 // indirect
+
+// Patched go-gl/glfw: backports GLFW 3.4's xdg_toplevel_set_app_id on Wayland
+// (reusing the X11 class-name hint) so KDE/GNOME match the running window to
+// raven-terminal.desktop and show the correct icon. Drop when go-gl ships 3.4.
+replace github.com/go-gl/glfw/v3.3/glfw => ./third_party/glfw
