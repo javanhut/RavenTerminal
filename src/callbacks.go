@@ -81,6 +81,44 @@ func (a *App) onKey(w *glfw.Window, key glfw.Key, scancode int, action glfw.Acti
 		return
 	}
 
+	// Find bar owns the keyboard while it is up: it is a modal prompt, so
+	// Enter/Escape/Backspace edit the search rather than reaching the shell.
+	// Printable runes arrive via onChar. Checked before the panels so the bar
+	// can be dismissed from anywhere.
+	if a.find.open {
+		switch key {
+		case glfw.KeyEscape:
+			a.closeFind()
+			return
+		case glfw.KeyEnter, glfw.KeyKPEnter:
+			if mods&glfw.ModShift != 0 {
+				a.findStep(-1)
+			} else {
+				a.findStep(1)
+			}
+			return
+		case glfw.KeyBackspace:
+			if q := []rune(a.find.query); len(q) > 0 {
+				a.find.query = string(q[:len(q)-1])
+				a.runFind()
+			}
+			return
+		case glfw.KeyUp:
+			a.findStep(-1)
+			return
+		case glfw.KeyDown:
+			a.findStep(1)
+			return
+		}
+		// Super+Shift+F again closes the bar, matching the toggle it opened with.
+		if keybindings.TranslateKey(key, mods, false).Action == keybindings.ActionFindInScrollback {
+			a.closeFind()
+			return
+		}
+		// Everything else (app shortcuts, plain modifiers) falls through so
+		// e.g. Cmd+C still copies the highlighted match.
+	}
+
 	// Handle settings menu input when open
 	if a.settingsMenu.IsOpen() {
 		appCursor := activeTab.Terminal.AppCursorKeys()
@@ -886,6 +924,8 @@ handleTerminalInput:
 		}
 	case keybindings.ActionToggleResizeMode:
 		a.resizeMode = !a.resizeMode
+	case keybindings.ActionFindInScrollback:
+		a.openFind()
 	case keybindings.ActionToggleSearchPanel:
 		if !a.searchPanel.Enabled {
 			a.showToast("Enable web search in settings")
@@ -920,6 +960,13 @@ func (a *App) onChar(w *glfw.Window, char rune) {
 	// Ignore Cmd/Super-modified keys: they are app shortcuts (handled in the key
 	// callback), never text input. Prevents e.g. Cmd+T from also typing "t".
 	if a.currentMods&glfw.ModSuper != 0 {
+		return
+	}
+
+	// Find bar: printable runes extend the query and re-run the search.
+	if a.find.open {
+		a.find.query += string(char)
+		a.runFind()
 		return
 	}
 
@@ -1225,7 +1272,13 @@ func (a *App) onMouseButton(w *glfw.Window, button glfw.MouseButton, action glfw
 					a.tabManager.NewTab()
 				} else {
 					a.tabManager.SelectTab(idx)
-					a.tabDrag = tabDragState{pending: true, index: idx, startX: x, startY: y}
+					// Capture the tab by pointer: its slot index changes as the
+					// drag reorders the strip, but its identity does not.
+					var dragged *tab.Tab
+					if tabs := a.tabManager.GetTabs(); idx < len(tabs) {
+						dragged = tabs[idx]
+					}
+					a.tabDrag = tabDragState{pending: true, index: idx, tab: dragged, startX: x, startY: y}
 				}
 				return
 			}
@@ -1299,8 +1352,19 @@ func (a *App) onMouseButton(w *glfw.Window, button glfw.MouseButton, action glfw
 			activeTab.SetActivePane(pane)
 		case glfw.Release:
 			// A tab-bar drag ends here; the reorder already happened live.
+			// Releasing well clear of the strip tears the tab off into its own
+			// window instead, carrying its running shells with it.
 			if a.tabDrag.pending || a.tabDrag.active {
+				dragged := a.tabDrag
 				a.tabDrag = tabDragState{}
+				// Release the chip back into the animation so it eases into
+				// its final slot instead of staying pinned to the cursor.
+				a.renderer.SetTabDrag(nil)
+				if dragged.active && x > a.renderer.TabBarWidthLogical()+tearOffThreshold {
+					if !a.detachTabAt(dragged.index) {
+						a.showToast("Can't tear off the last tab")
+					}
+				}
 				return
 			}
 			// Handle AI panel text selection release
@@ -1468,6 +1532,7 @@ func (a *App) onCursorPos(w *glfw.Window, xpos, ypos float64) {
 			if dragThresholdPassed(a.tabDrag.startX, a.tabDrag.startY, xpos, ypos, threshold) {
 				a.tabDrag.pending = false
 				a.tabDrag.active = true
+				a.renderer.SetTabDrag(a.tabDrag.tab)
 			} else {
 				return
 			}

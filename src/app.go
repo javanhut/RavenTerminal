@@ -31,6 +31,10 @@ type App struct {
 	renderer   *render.Renderer
 	tabManager *tab.TabManager
 	debugMenu  bool
+	// primary marks the window the process started with. Only it reads and
+	// writes the session file — otherwise every open window would race to
+	// overwrite the same layout with its own.
+	primary bool
 
 	// Input and cursor state.
 	currentMods    glfw.ModifierKey
@@ -46,6 +50,7 @@ type App struct {
 	selection      *mouseSelection
 	report         *mouseReportState
 	tabDrag        tabDragState
+	find           findState
 	lastCursorX    float64
 	lastCursorY    float64
 	haveCursorPos  bool
@@ -88,6 +93,7 @@ type App struct {
 	prevSearchOpen bool
 	prevAIOpen     bool
 	prevHelpOpen   bool
+	prevFindOpen   bool
 	prevFocused    bool
 	prevFBWidth    int
 	prevFBHeight   int
@@ -99,33 +105,59 @@ type App struct {
 	lastGrids map[*tab.Pane]*grid.Grid
 }
 
+// newApp builds the process's first window: it owns session restore and
+// session saving, which is why it is flagged primary.
 func newApp() *App {
-	// Create window
+	// Wake the event-driven main loop whenever a pane produces output, so shell output
+	// and key echoes render immediately. Registered before any pane (and its reader
+	// goroutine) is created to avoid a data race on the notifier.
+	tab.SetWakeNotifier(window.PostEmptyEvent)
+
+	a, err := newAppWith(func(cols, rows uint16) (*tab.TabManager, error) {
+		// Reopen the previous session's layout when the user has that enabled.
+		// The config is read directly here because the settings menu (which
+		// normally owns it) is not built until after the tab manager exists.
+		restore := false
+		if cfg, err := config.Load(); err == nil && cfg != nil {
+			restore = cfg.RestoreSession
+		}
+		return restoredTabManager(cols, rows, restore)
+	})
+	if err != nil {
+		log.Fatalf("Failed to create window: %v", err)
+	}
+	a.primary = true
+	return a
+}
+
+// newAppWith builds a window, its renderer, and its tabs. tabsFor receives the
+// grid size the new window can display, so a restored or adopted tab strip is
+// sized correctly from its first frame.
+func newAppWith(tabsFor func(cols, rows uint16) (*tab.TabManager, error)) (*App, error) {
+	// Create window. This also makes the new window's GL context current,
+	// which the renderer below is built against.
 	winConfig := window.DefaultConfig()
 	win, err := window.NewWindow(winConfig)
 	if err != nil {
-		log.Fatalf("Failed to create window: %v", err)
+		return nil, err
 	}
 
 	// Create renderer
 	renderer, err := render.NewRenderer()
 	if err != nil {
-		log.Fatalf("Failed to create renderer: %v", err)
+		win.Destroy()
+		return nil, err
 	}
 
 	// Calculate initial grid size
 	width, height := win.GetFramebufferSize()
 	cols, rows := renderer.CalculateGridSize(width, height)
 
-	// Wake the event-driven main loop whenever a pane produces output, so shell output
-	// and key echoes render immediately. Registered before any pane (and its reader
-	// goroutine) is created to avoid a data race on the notifier.
-	tab.SetWakeNotifier(window.PostEmptyEvent)
-
-	// Create tab manager
-	tabManager, err := tab.NewTabManager(uint16(cols), uint16(rows))
+	tabManager, err := tabsFor(uint16(cols), uint16(rows))
 	if err != nil {
-		log.Fatalf("Failed to create tab manager: %v", err)
+		renderer.Destroy()
+		win.Destroy()
+		return nil, err
 	}
 
 	a := &App{
@@ -173,7 +205,7 @@ func newApp() *App {
 	a.searchCache = newMemoCache[[]searchpanel.Result]()
 	a.previewCache = newMemoCache[cachedPreview]()
 
-	return a
+	return a, nil
 }
 
 // Destroy releases the renderer and window, in the same order the deferred
@@ -181,6 +213,15 @@ func newApp() *App {
 func (a *App) Destroy() {
 	a.renderer.Destroy()
 	a.win.Destroy()
+}
+
+// saveSessionIfEnabled persists the tab layout on exit when the user has
+// restore turned on. Gated on the setting so a user who does not want session
+// restore never has a session file written for them.
+func (a *App) saveSessionIfEnabled() {
+	if a.settingsMenu.Config != nil && a.settingsMenu.Config.RestoreSession {
+		a.saveSession()
+	}
 }
 
 // wireSettingsMenu installs the menu's action hooks. They fire from menu
@@ -302,19 +343,26 @@ func (a *App) registerCallbacks() {
 	a.win.GLFW().SetFocusCallback(a.onFocus)
 }
 
-// Run registers the input callbacks and runs the event-driven main loop until
-// the window closes or every tab has exited.
-func (a *App) Run() {
-	a.registerCallbacks()
+// tick runs one main-loop iteration for this window: state updates, async
+// drains, and a frame (which the redraw triggers may skip). It returns false
+// when the window should close — the user closed it, or every tab exited.
+func (a *App) tick(now time.Time) bool {
+	if a.win.ShouldClose() {
+		return false
+	}
 
-	// Main loop
-	for !a.win.ShouldClose() {
-		// Check for exited tabs
-		a.tabManager.CleanupExited()
-		if a.tabManager.AllExited() {
-			break
-		}
+	// Check for exited tabs
+	a.tabManager.CleanupExited()
+	if a.tabManager.AllExited() {
+		return false
+	}
 
+	// Bind this window's GL context before any renderer call: with several
+	// windows open the context left current by the previous tick belongs to a
+	// different window, and its draws would land there.
+	a.win.MakeContextCurrent()
+
+	{
 		// Show the tab bar only when there's more than one tab. When visibility flips
 		// (a tab is added or removed), the usable width changes, so re-fit the grid.
 		if wantTabBar := a.tabManager.TabCount() > 1; wantTabBar != a.renderer.TabBarVisible() {
@@ -341,13 +389,8 @@ func (a *App) Run() {
 		a.drainModelLoadResponses()
 		a.drainOllamaMenuResponses()
 
-		now := time.Now()
 		a.updateCursorBlink(now)
 		a.autoScrollSelection(now)
-		// Consume any outstanding output wake before rendering: chunks that
-		// arrived earlier are rendered below, and chunks arriving after this
-		// point re-arm the wake so WaitEventsTimeout returns immediately.
-		tab.ClearWakePending()
 		a.renderFrame(now)
 
 		// Drain any OSC 52 clipboard writes queued from PTY reader goroutines
@@ -361,18 +404,90 @@ func (a *App) Run() {
 			reply <- glfw.GetClipboardString()
 		default:
 		}
+	}
+	return true
+}
 
-		// Event-driven wait: returns immediately when a key/mouse event arrives or a
-		// pane posts output (see SetWakeNotifier), so input is processed with near-zero
-		// latency. The timeout only bounds idle re-renders (cursor blink, toasts) and
-		// edge auto-scroll while dragging a selection. This replaces the old fixed
-		// PollEvents + 16ms sleep, which serialized input behind the frame timer and,
-		// stacked on vsync, doubled keystroke-to-pixel latency.
-		waitTimeout := 0.03
-		if a.selection.active {
-			waitTimeout = 0.016 // keep edge auto-scroll smooth during a drag
+// idleTimeout is the longest this window is willing to sleep before it needs
+// another frame. The main loop waits for the shortest across all windows.
+func (a *App) idleTimeout() float64 {
+	if a.selection.active {
+		return 0.016 // keep edge auto-scroll smooth during a drag
+	}
+	return 0.03
+}
+
+// shutdown closes one window, saving the session first if it owns it.
+func (a *App) shutdown() {
+	a.saveSessionIfEnabled()
+	// Destroying GL objects needs this window's own context current.
+	a.win.MakeContextCurrent()
+	a.renderer.Destroy()
+	a.win.Destroy()
+}
+
+// runApps drives every open window from the one GLFW thread until the last
+// one closes. Each pass ticks all windows, then blocks once in
+// WaitEventsTimeout — the wait is shared, so N windows do not mean N waits.
+//
+// Event-driven: the wait returns immediately when a key/mouse event arrives or
+// a pane posts output (see SetWakeNotifier), so input is processed with
+// near-zero latency. The timeout only bounds idle re-renders (cursor blink,
+// toasts) and edge auto-scroll while dragging a selection. This replaces the
+// old fixed PollEvents + 16ms sleep, which serialized input behind the frame
+// timer and, stacked on vsync, doubled keystroke-to-pixel latency.
+func runApps(first *App) {
+	defer window.Terminate()
+
+	apps := []*App{first}
+	first.registerCallbacks()
+
+	for len(apps) > 0 {
+		now := time.Now()
+		// Consume any outstanding output wake before rendering: chunks that
+		// arrived earlier are rendered below, and chunks arriving after this
+		// point re-arm the wake so WaitEventsTimeout returns immediately. It is
+		// process-wide, so it is cleared once per pass rather than per window.
+		tab.ClearWakePending()
+
+		timeout := 1.0
+		live := apps[:0]
+		for _, a := range apps {
+			if !a.tick(now) {
+				a.shutdown()
+				continue
+			}
+			timeout = min(timeout, a.idleTimeout())
+			live = append(live, a)
 		}
-		window.WaitEventsTimeout(waitTimeout)
+		apps = live
+
+		// Windows torn off a tab strip during this pass are created here, on
+		// the loop thread, rather than inside the mouse callback that
+		// requested them — creating a GLFW window while dispatching its events
+		// is not worth the risk.
+		for _, t := range takePendingDetach() {
+			a, err := newDetachedApp(t)
+			if err != nil {
+				// The tab has already left its old strip, so hand it to a
+				// window that still exists rather than dropping the user's
+				// running shell on the floor.
+				log.Printf("tear-off failed, returning tab to an open window: %v", err)
+				if len(apps) > 0 {
+					apps[0].tabManager.AdoptTab(t)
+				} else {
+					t.Close()
+				}
+				continue
+			}
+			a.registerCallbacks()
+			apps = append(apps, a)
+		}
+
+		if len(apps) == 0 {
+			break
+		}
+		window.WaitEventsTimeout(timeout)
 	}
 }
 
@@ -661,6 +776,15 @@ func (a *App) renderFrame(now time.Time) {
 	}
 
 	activeTab := a.tabManager.ActiveTab()
+	// A find is bound to one pane's grid (its matches are that buffer's
+	// absolute rows), so it cannot survive a tab switch. Closing it here
+	// rather than at each of the tab-switch call sites — key bindings, tab-bar
+	// clicks, tab close — keeps the rule in one place. The FindBarOpen trigger
+	// below still sees prevFindOpen, so the bar is erased on this frame.
+	if a.find.open && activeTab != a.prevActiveTab {
+		a.closeFind()
+	}
+
 	drawCursor := a.cursorVisible
 	if activeTab != nil && activeTab.Terminal != nil {
 		drawCursor = drawCursor && activeTab.Terminal.IsCursorVisible()
@@ -707,6 +831,7 @@ func (a *App) renderFrame(now time.Time) {
 		SearchPanelOpen:    a.searchPanel.Open || a.prevSearchOpen,
 		AIPanelOpen:        a.aiPanel.Open || a.prevAIOpen,
 		HelpOpen:           a.showHelp || a.prevHelpOpen,
+		FindBarOpen:        a.find.open || a.prevFindOpen,
 		SizeChanged:        width != a.prevFBWidth || height != a.prevFBHeight,
 		FocusChanged:       a.windowFocused != a.prevFocused,
 		ScaleChanged:       scaleChanged,
@@ -721,6 +846,7 @@ func (a *App) renderFrame(now time.Time) {
 	a.prevSearchOpen = a.searchPanel.Open
 	a.prevAIOpen = a.aiPanel.Open
 	a.prevHelpOpen = a.showHelp
+	a.prevFindOpen = a.find.open
 	a.prevFocused = a.windowFocused
 	a.prevFBWidth, a.prevFBHeight = width, height
 
@@ -730,6 +856,9 @@ func (a *App) renderFrame(now time.Time) {
 			a.renderer.RenderWithMenu(a.tabManager, width, height, drawCursor, a.settingsMenu)
 		} else {
 			a.renderer.RenderWithHelpAndPanels(a.tabManager, width, height, drawCursor, a.showHelp, a.searchPanel, a.aiPanel)
+		}
+		if a.find.open {
+			a.renderer.DrawFindBar(a.find.query, a.findStatus(), width, height)
 		}
 		if toastVisible {
 			a.renderer.DrawToast(a.toast.message, width, height)

@@ -57,10 +57,35 @@ type Window struct {
 	contentScale float32 // HiDPI scale (framebuffer px per logical point)
 }
 
+// glfwReady guards one-time GLFW initialization. Every window after the first
+// (tab tear-out opens more) must NOT re-init: glfw.Init is only idempotent in
+// the sense that it does nothing on repeat, but pairing each Init with the
+// Terminate in Destroy would tear down every other window's context when one
+// closes. Init happens once here; Terminate is an explicit process-exit call.
+var glfwReady bool
+
+// glReady guards one-time OpenGL function-pointer loading. gl.Init binds the
+// entry points for the current context; contexts created afterwards share the
+// same driver entry points, so once is enough.
+var glReady bool
+
+// Terminate shuts GLFW down. Call it once, when the last window has closed and
+// the process is exiting — never from Window.Destroy, which may be closing one
+// of several open windows.
+func Terminate() {
+	if glfwReady {
+		glfw.Terminate()
+		glfwReady = false
+	}
+}
+
 // NewWindow creates a new GLFW window with OpenGL context
 func NewWindow(config Config) (*Window, error) {
-	if err := glfw.Init(); err != nil {
-		return nil, fmt.Errorf("failed to initialize GLFW: %w", err)
+	if !glfwReady {
+		if err := glfw.Init(); err != nil {
+			return nil, fmt.Errorf("failed to initialize GLFW: %w", err)
+		}
+		glfwReady = true
 	}
 
 	// OpenGL context hints
@@ -80,7 +105,6 @@ func NewWindow(config Config) (*Window, error) {
 
 	window, err := glfw.CreateWindow(config.Width, config.Height, config.Title, nil, nil)
 	if err != nil {
-		glfw.Terminate()
 		return nil, fmt.Errorf("failed to create window: %w", err)
 	}
 
@@ -92,13 +116,18 @@ func NewWindow(config Config) (*Window, error) {
 	window.SetSizeLimits(MinWindowWidth, MinWindowHeight, glfw.DontCare, glfw.DontCare)
 
 	// Initialize OpenGL
-	if err := gl.Init(); err != nil {
-		window.Destroy()
-		glfw.Terminate()
-		return nil, fmt.Errorf("failed to initialize OpenGL: %w", err)
+	if !glReady {
+		if err := gl.Init(); err != nil {
+			window.Destroy()
+			return nil, fmt.Errorf("failed to initialize OpenGL: %w", err)
+		}
+		glReady = true
 	}
 
-	// Enable VSync
+	// Enable VSync. This is per-context, so each window throttles its own
+	// presents. Idle windows are gated out of drawing entirely by the redraw
+	// triggers, so multiple windows do not serialize into a divided frame rate
+	// unless they are all animating at once.
 	glfw.SwapInterval(1)
 
 	// Enable blending for text rendering
@@ -241,10 +270,17 @@ func (w *Window) SetIcon(icons []image.Image) {
 	}
 }
 
-// Destroy cleans up window resources
+// Destroy releases this window. It deliberately does not terminate GLFW —
+// other windows may still be open; see Terminate.
 func (w *Window) Destroy() {
 	w.glfw.Destroy()
-	glfw.Terminate()
+}
+
+// MakeContextCurrent binds this window's GL context to the calling thread.
+// With more than one window open, every renderer call must be preceded by this
+// or the draws land in whichever context happened to be current.
+func (w *Window) MakeContextCurrent() {
+	w.glfw.MakeContextCurrent()
 }
 
 // PollEvents processes pending events

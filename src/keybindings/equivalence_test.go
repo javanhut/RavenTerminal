@@ -39,6 +39,7 @@ func TestSuperLayerEquivalentAcrossPlatforms(t *testing.T) {
 		{"Super+0 zoom reset", glfw.Key0, super, ActionZoomReset},
 		{"Super+S settings", glfw.KeyS, super, ActionOpenMenu},
 		{"Super+F search panel", glfw.KeyF, super, ActionToggleSearchPanel},
+		{"Super+Shift+F find in scrollback", glfw.KeyF, superShift, ActionFindInScrollback},
 		{"Super+A ai panel", glfw.KeyA, super, ActionToggleAIPanel},
 		{"Super+R resize mode", glfw.KeyR, super, ActionToggleResizeMode},
 		{"Super+1 select tab", glfw.Key1, super, ActionSelectTab},
@@ -96,5 +97,29 @@ func TestControlCharsUntouched(t *testing.T) {
 		if res.Action != ActionInput || len(res.Data) != 1 || res.Data[0] != 0x03 {
 			t.Errorf("mac=%v Ctrl+C = %v %v, want input 0x03", mac, res.Action, res.Data)
 		}
+	}
+}
+
+// Find and the web-search panel share the F key, so the two must stay
+// distinguishable on both platforms. On Linux the leader IS Ctrl+Shift, which
+// is why find lives on the Super layer rather than following `primary`.
+func TestFindDoesNotCollideWithSearchPanel(t *testing.T) {
+	prev := isMacOS
+	defer func() { isMacOS = prev }()
+
+	for _, mac := range []bool{true, false} {
+		isMacOS = mac
+		if got := TranslateKey(glfw.KeyF, glfw.ModSuper|glfw.ModShift, false).Action; got != ActionFindInScrollback {
+			t.Fatalf("isMacOS=%v: Super+Shift+F = %v, want ActionFindInScrollback", mac, got)
+		}
+	}
+
+	isMacOS = false
+	if got := TranslateKey(glfw.KeyF, glfw.ModControl|glfw.ModShift, false).Action; got != ActionToggleSearchPanel {
+		t.Fatalf("linux Ctrl+Shift+F = %v, want ActionToggleSearchPanel (the leader chord)", got)
+	}
+	isMacOS = true
+	if got := TranslateKey(glfw.KeyF, glfw.ModSuper, false).Action; got != ActionToggleSearchPanel {
+		t.Fatalf("mac Cmd+F = %v, want ActionToggleSearchPanel", got)
 	}
 }

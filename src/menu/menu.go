@@ -288,6 +288,7 @@ func (m *Menu) buildBasicMenu() {
 		{Label: "BASIC SETTINGS", IsHeader: true},
 		{Label: "Shell: " + currentShell},
 		{Label: "Source RC Files", IsToggle: true, Toggled: m.Config.Shell.SourceRC},
+		{Label: "Restore Session", IsToggle: true, Toggled: m.Config.RestoreSession},
 		{Label: "Scripts..."},
 		{Label: "Commands (" + itoa(len(m.Config.Commands)) + ")..."},
 		{Label: "Aliases (" + itoa(len(m.Config.Aliases)) + ")..."},
@@ -826,6 +827,10 @@ func (m *Menu) handleMainSelect() {
 		m.navigateTo(MenuCursorStyle, m.buildCursorStyleMenu)
 	case label == "Cursor Blink":
 		m.Config.Appearance.CursorBlink = !m.Config.Appearance.CursorBlink
+		m.rebuildCurrent()
+		m.StatusMessage = "Updated (save to persist)"
+	case label == "Restore Session":
+		m.Config.RestoreSession = !m.Config.RestoreSession
 		m.rebuildCurrent()
 		m.StatusMessage = "Updated (save to persist)"
 	case strings.HasPrefix(label, "Panel Width:"):

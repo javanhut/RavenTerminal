@@ -52,6 +52,7 @@ const (
 	ActionPaste
 	ActionToggleResizeMode
 	ActionSelectTab
+	ActionFindInScrollback
 )
 
 // KeyResult contains the result of processing a key
@@ -158,6 +159,14 @@ func TranslateKey(key glfw.Key, mods glfw.ModifierKey, appCursorMode bool) KeyRe
 
 	if primary && key == glfw.KeyS {
 		return KeyResult{Action: ActionOpenMenu}
+	}
+	// Find in scrollback: Super+Shift+F on every platform. It has to live on
+	// the Super layer rather than follow `primary`: on Linux primary already
+	// means Ctrl+Shift, so Ctrl+Shift+F is the web-search panel below and
+	// cannot also mean find. Checked first so Cmd+Shift+F on macOS reaches
+	// find instead of falling into the shift-agnostic panel binding.
+	if super && shift && key == glfw.KeyF {
+		return KeyResult{Action: ActionFindInScrollback}
 	}
 	if primary && key == glfw.KeyF {
 		return KeyResult{Action: ActionToggleSearchPanel}

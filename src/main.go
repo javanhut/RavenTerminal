@@ -238,9 +238,10 @@ type mouseSelection struct {
 type tabDragState struct {
 	pending bool
 	active  bool
-	index   int     // current slot of the dragged tab
-	startX  float64 // logical cursor X at press
-	startY  float64 // logical cursor Y at press
+	index   int      // current slot of the dragged tab
+	tab     *tab.Tab // identity of the dragged tab; its slot changes as it moves
+	startX  float64  // logical cursor X at press
+	startY  float64  // logical cursor Y at press
 }
 
 func dragThresholdPassed(startX, startY, x, y, threshold float64) bool {
@@ -290,9 +291,9 @@ func previewCacheKey(useProxy bool, url string) string {
 }
 
 func main() {
-	app := newApp()
-	defer app.Destroy()
-	app.Run()
+	// runApps owns the lifetime of every window, including destroying each one
+	// as it closes and terminating GLFW after the last.
+	runApps(newApp())
 }
 
 // writePaste sends clipboard text to a terminal, normalizing newlines and,

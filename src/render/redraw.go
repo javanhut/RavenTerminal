@@ -25,6 +25,9 @@ package render
 //     to erase it)
 //   - MenuOpen/SearchPanelOpen/AIPanelOpen/HelpOpen: an overlay panel is open
 //     (panels stream/animate content outside the grid dirty tracking)
+//   - FindBarOpen:        the scrollback find bar is up (its query text and
+//     match counter change on keystrokes, outside the grid dirty tracking),
+//     or it closed since the last frame (one repaint to erase it)
 //   - SizeChanged:        the framebuffer size changed (resize)
 //   - FocusChanged:       window focus changed (affects cursor rendering)
 //   - ScaleChanged:       the monitor content scale changed (HiDPI move)
@@ -47,6 +50,7 @@ type RedrawTriggers struct {
 	SearchPanelOpen    bool
 	AIPanelOpen        bool
 	HelpOpen           bool
+	FindBarOpen        bool
 	SizeChanged        bool
 	FocusChanged       bool
 	ScaleChanged       bool

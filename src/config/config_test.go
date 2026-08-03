@@ -12,11 +12,11 @@ import (
 // truncated file that a later load reads as empty (and then overwrites).
 func TestWriteFileAtomic(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bookmarks.json")
-	if err := writeFileAtomic(path, []byte("old")); err != nil {
-		t.Fatalf("writeFileAtomic: %v", err)
+	if err := WriteFileAtomic(path, []byte("old")); err != nil {
+		t.Fatalf("WriteFileAtomic: %v", err)
 	}
-	if err := writeFileAtomic(path, []byte("new")); err != nil {
-		t.Fatalf("writeFileAtomic overwrite: %v", err)
+	if err := WriteFileAtomic(path, []byte("new")); err != nil {
+		t.Fatalf("WriteFileAtomic overwrite: %v", err)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil || string(data) != "new" {

@@ -54,6 +54,63 @@ func TestClipboardMailbox(t *testing.T) {
 	}
 }
 
+func TestTabManagerInsertAfterActive(t *testing.T) {
+	order := func(tm *TabManager) []int {
+		ids := make([]int, len(tm.tabs))
+		for i, tb := range tm.tabs {
+			ids[i] = tb.id
+		}
+		return ids
+	}
+	// Identity survives renumbering: track the inserted tab by pointer.
+	t.Run("inserts after the active tab and shifts the rest", func(t *testing.T) {
+		a, b, c := &Tab{id: 1}, &Tab{id: 2}, &Tab{id: 3}
+		tm := &TabManager{tabs: []*Tab{a, b, c}, activeIndex: 0}
+		fresh := &Tab{}
+		tm.insertAfterActive(fresh)
+
+		if tm.tabs[1] != fresh {
+			t.Fatalf("new tab at slot %d, want slot 1", indexOf(tm.tabs, fresh))
+		}
+		if tm.tabs[0] != a || tm.tabs[2] != b || tm.tabs[3] != c {
+			t.Fatal("existing tabs did not shift down by one")
+		}
+		if tm.activeIndex != 1 {
+			t.Fatalf("activeIndex = %d, want 1", tm.activeIndex)
+		}
+		if got := order(tm); got[0] != 1 || got[1] != 2 || got[2] != 3 || got[3] != 4 {
+			t.Fatalf("IDs not renumbered positionally: %v", got)
+		}
+	})
+
+	t.Run("appends when the last tab is active", func(t *testing.T) {
+		tm := &TabManager{tabs: []*Tab{{id: 1}, {id: 2}}, activeIndex: 1}
+		fresh := &Tab{}
+		tm.insertAfterActive(fresh)
+		if tm.tabs[2] != fresh || tm.activeIndex != 2 {
+			t.Fatalf("new tab at %d, activeIndex %d; want both 2", indexOf(tm.tabs, fresh), tm.activeIndex)
+		}
+	})
+
+	t.Run("first tab lands at slot 0", func(t *testing.T) {
+		tm := &TabManager{}
+		fresh := &Tab{}
+		tm.insertAfterActive(fresh)
+		if len(tm.tabs) != 1 || tm.tabs[0] != fresh || tm.activeIndex != 0 {
+			t.Fatalf("empty-manager insert put tab at %d of %d", tm.activeIndex, len(tm.tabs))
+		}
+	})
+}
+
+func indexOf(tabs []*Tab, want *Tab) int {
+	for i, tb := range tabs {
+		if tb == want {
+			return i
+		}
+	}
+	return -1
+}
+
 func TestTabManagerMoveTab(t *testing.T) {
 	newManager := func(active int) *TabManager {
 		return &TabManager{

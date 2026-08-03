@@ -104,6 +104,9 @@ type Config struct {
 	// OSC 52 queries. Off by default: clipboard read is a data-exfiltration
 	// vector, so kitty and wezterm gate it behind an opt-in too.
 	AllowClipboardRead bool `toml:"allow_clipboard_read"`
+	// RestoreSession reopens the previous run's tabs, splits, and working
+	// directories at startup. Only the layout is restored — shells are fresh.
+	RestoreSession bool `toml:"restore_session"`
 }
 
 // sha256 of the pre-fix default VCS-detect script (broken ahead/behind
@@ -280,6 +283,7 @@ func DefaultConfig() *Config {
 		Theme:              "raven-blue",
 		FontSize:           15.0,
 		AllowClipboardRead: false, // opt-in: OSC 52 read leaks clipboard contents to apps
+		RestoreSession:     false, // opt-in: reopening old tabs surprises users who expect a clean start
 	}
 }
 
@@ -328,14 +332,14 @@ func SaveSearchHistory(history []string) {
 	if err != nil {
 		return
 	}
-	_ = writeFileAtomic(GetSearchHistoryPath(), data)
+	_ = WriteFileAtomic(GetSearchHistoryPath(), data)
 }
 
-// writeFileAtomic writes via a temp file in the same directory plus rename so
+// WriteFileAtomic writes via a temp file in the same directory plus rename so
 // a crash mid-write never leaves a truncated file behind — a truncated
 // bookmarks/history file would load as empty and be overwritten on the next
 // save, silently losing everything.
-func writeFileAtomic(path string, data []byte) error {
+func WriteFileAtomic(path string, data []byte) error {
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0644); err != nil {
 		return err
@@ -377,7 +381,7 @@ func SaveBookmarks(bookmarks []Bookmark) {
 	if err != nil {
 		return
 	}
-	_ = writeFileAtomic(GetBookmarksPath(), data)
+	_ = WriteFileAtomic(GetBookmarksPath(), data)
 }
 
 // AddBookmark prepends b, deduping by URL and trimming to the max size.
@@ -463,7 +467,7 @@ func (c *Config) Save() error {
 	if err := toml.NewEncoder(&buf).Encode(c); err != nil {
 		return err
 	}
-	return writeFileAtomic(configPath, buf.Bytes())
+	return WriteFileAtomic(configPath, buf.Bytes())
 }
 
 // GetAvailableShells returns a list of available shells on the system

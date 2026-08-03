@@ -1014,10 +1014,25 @@ func (tm *TabManager) NewTab() error {
 		return err
 	}
 
-	tm.tabs = append(tm.tabs, tab)
-	tm.activeIndex = len(tm.tabs) - 1
+	tm.insertAfterActive(tab)
 
 	return nil
+}
+
+// insertAfterActive splices tab in directly after the tab it was opened from,
+// shifting the rest down, so a tab spawned from tab 1 lands at slot 2 rather
+// than at the end. The new tab becomes active and IDs are renumbered so they
+// stay positional. Caller holds tm.mu.
+func (tm *TabManager) insertAfterActive(tab *Tab) {
+	at := len(tm.tabs)
+	if at > 0 && tm.activeIndex >= 0 && tm.activeIndex < at {
+		at = tm.activeIndex + 1
+	}
+	tm.tabs = append(tm.tabs, nil)
+	copy(tm.tabs[at+1:], tm.tabs[at:])
+	tm.tabs[at] = tab
+	tm.activeIndex = at
+	tm.renumberTabs()
 }
 
 // renumberTabs reassigns sequential IDs to all tabs
@@ -1099,6 +1114,45 @@ func (tm *TabManager) MoveTab(from, to int) {
 			break
 		}
 	}
+	tm.renumberTabs()
+}
+
+// DetachTab removes the tab at index and returns it WITHOUT closing it — its
+// panes, PTYs, and reader goroutines keep running, so the caller can move a
+// live tab into another window. Returns nil when the index is out of range or
+// the tab is the last one (a window must keep at least one tab; tearing the
+// last one off would just move the window).
+func (tm *TabManager) DetachTab(index int) *Tab {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	if index < 0 || index >= len(tm.tabs) || len(tm.tabs) <= 1 {
+		return nil
+	}
+	t := tm.tabs[index]
+	tm.tabs = append(tm.tabs[:index], tm.tabs[index+1:]...)
+	if tm.activeIndex >= len(tm.tabs) {
+		tm.activeIndex = len(tm.tabs) - 1
+	}
+	tm.renumberTabs()
+	return t
+}
+
+// AdoptTab appends a live tab detached from another window, resizing it to
+// this manager's grid so it renders correctly in its new home.
+func (tm *TabManager) AdoptTab(t *Tab) {
+	if t == nil {
+		return
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	if len(tm.tabs) >= MaxTabs {
+		return
+	}
+	t.Resize(tm.cols, tm.rows)
+	tm.tabs = append(tm.tabs, t)
+	tm.activeIndex = len(tm.tabs) - 1
 	tm.renumberTabs()
 }
 

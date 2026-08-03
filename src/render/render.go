@@ -15,6 +15,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/go-gl/gl/v4.1-core/gl"
 	gtfont "github.com/go-text/typesetting/font"
@@ -265,6 +266,18 @@ type Renderer struct {
 	// bar visibility, font size) that must force a redraw; consumed once per
 	// frame by ConsumeUIDirty.
 	uiDirty bool
+
+	// Tab-chip slide animation. tabSlot holds each tab's *animated* slot
+	// position (a float index into the chip stack) so a reorder slides instead
+	// of snapping. Keyed by tab pointer; stale entries are pruned each frame,
+	// so closed tabs cannot accumulate. tabSlotAt timestamps the last frame so
+	// the ease is wall-clock based rather than per-frame (the main loop's frame
+	// rate varies with load). dragTab is the tab currently under the cursor in
+	// a drag-reorder — it snaps to its slot instead of easing, so the chip
+	// tracks the pointer while the displaced chips visibly slide around it.
+	tabSlot   map[*tab.Tab]float32
+	tabSlotAt time.Time
+	dragTab   *tab.Tab
 }
 
 // pass2Item marks a cell needing immediate decoration draws after the batches
@@ -287,6 +300,17 @@ func (r *Renderer) SetTabBarVisible(visible bool) {
 // TabBarVisible reports whether the tab bar is currently shown.
 func (r *Renderer) TabBarVisible() bool {
 	return r.tabBarVisible
+}
+
+// TabBarWidthLogical returns the tab bar's width in the logical cursor
+// coordinates GLFW callbacks deliver (0 when the bar is hidden). Callers that
+// need to know whether the pointer has left the strip use this rather than
+// reaching for the framebuffer-space width.
+func (r *Renderer) TabBarWidthLogical() float64 {
+	if !r.tabBarVisible {
+		return 0
+	}
+	return float64(r.tabBarWidth / r.hidpiScale())
 }
 
 // layoutTabBarWidth is the horizontal space the tab bar reserves: the bar width when
@@ -1522,6 +1546,9 @@ func buildHelpSections() []helpSection {
 	nextTab := "Ctrl+Tab / Super+Shift+]"
 	prevTab := "Ctrl+Shift+Tab / Super+Shift+["
 	cyclePanes := "Super+Shift+Tab"
+	// Find stays on the Super layer on Linux too: Ctrl+Shift+F is already the
+	// web-search panel there, so there is no Ctrl+Shift chord left for it.
+	findKey := "Super+Shift+F"
 	if isMac {
 		mod = "Cmd"
 		exitKey = "Cmd+Q"
@@ -1531,6 +1558,7 @@ func buildHelpSections() []helpSection {
 		nextTab = "Cmd+Shift+]"
 		prevTab = "Cmd+Shift+["
 		cyclePanes = "Cmd+Shift+Tab"
+		findKey = "Cmd+Shift+F"
 	}
 
 	return []helpSection{
@@ -1544,6 +1572,7 @@ func buildHelpSections() []helpSection {
 				{mod + "+K", "Show/hide help"},
 				{mod + "+S", "Open settings"},
 				{mod + "+F", "Toggle web search"},
+				{findKey, "Find in scrollback"},
 				{mod + "+A", "Toggle AI chat"},
 				{mod + "++", "Zoom in"},
 				{mod + "+-", "Zoom out"},
@@ -1558,6 +1587,8 @@ func buildHelpSections() []helpSection {
 				{mod + "+1..9", "Jump to tab N"},
 				{nextTab, "Next tab"},
 				{prevTab, "Previous tab"},
+				{"Drag chip", "Reorder tabs"},
+				{"Drag chip right", "Tear tab into a new window"},
 			},
 		},
 		{
@@ -2462,9 +2493,12 @@ func (r *Renderer) tabBarGeom(count int) tabBarGeom {
 		boxW:   r.tabBarWidth - 2*sidePad,
 		topPad: 12,
 		boxH:   cellH + 14,
-		gap:    6,
-		scale:  scale,
-		cellH:  cellH,
+		// Gutter between chips. Wide enough that a chip sliding into an
+		// adjacent slot reads as movement rather than a jump; compressed
+		// proportionally with the chips when many tabs are open.
+		gap:   12,
+		scale: scale,
+		cellH: cellH,
 	}
 	g.plusH = g.boxH * 0.8
 
@@ -2483,6 +2517,61 @@ func (r *Renderer) tabBarGeom(count int) tabBarGeom {
 		}
 	}
 	return g
+}
+
+// SetTabDrag marks the tab currently being drag-reordered (nil when no drag is
+// in progress). The dragged chip snaps to its slot so it stays under the
+// cursor; every other chip eases, which is what makes the swap visible.
+func (r *Renderer) SetTabDrag(t *tab.Tab) {
+	r.dragTab = t
+}
+
+// tabSlideTau is the time constant of the chip slide. ~70ms reads as a
+// deliberate swap without feeling sluggish when reordering several tabs
+// quickly.
+const tabSlideTau = 0.07
+
+// animateTabSlots advances each chip's animated slot position toward its real
+// index and returns the positions to draw at, parallel to tabs. Movement is an
+// exponential ease evaluated against wall-clock delta, so it is frame-rate
+// independent. While any chip is still in motion it latches uiDirty, which is
+// what schedules the next frame — the main loop is event-driven and would
+// otherwise stop drawing mid-slide.
+func (r *Renderer) animateTabSlots(tabs []*tab.Tab) []float32 {
+	now := time.Now()
+	dt := now.Sub(r.tabSlotAt).Seconds()
+	r.tabSlotAt = now
+	// A long gap means the bar has not drawn for a while (idle terminal, or
+	// first frame): settle immediately rather than replaying a stale slide.
+	if dt <= 0 || dt > 0.25 {
+		dt = 0
+	}
+	k := float32(1 - math.Exp(-dt/tabSlideTau))
+
+	next := make(map[*tab.Tab]float32, len(tabs))
+	slots := make([]float32, len(tabs))
+	for i, t := range tabs {
+		target := float32(i)
+		cur, seen := r.tabSlot[t]
+		switch {
+		case !seen || t == r.dragTab:
+			// A tab drawn for the first time has no previous position to slide
+			// from, and the dragged chip must track the pointer.
+			cur = target
+		default:
+			cur += (target - cur) * k
+			if d := target - cur; d > -0.01 && d < 0.01 {
+				cur = target
+			} else {
+				r.uiDirty = true // still moving: ask for another frame
+			}
+		}
+		next[t] = cur
+		slots[i] = cur
+	}
+	// Rebuilding the map drops entries for closed tabs.
+	r.tabSlot = next
+	return slots
 }
 
 // renderTabBar renders the left tab bar as a vertical stack of tab "chips": each shows
@@ -2507,9 +2596,10 @@ func (r *Renderer) renderTabBar(tm *tab.TabManager, width, height int, proj [16]
 	isMac := runtime.GOOS == "darwin"
 	home := cachedHomeDir
 	charW := r.cellWidth * g.scale
+	slots := r.animateTabSlots(tabs)
 
 	for i, t := range tabs {
-		boxY := g.topPad + float32(i)*(g.boxH+g.gap)
+		boxY := g.topPad + slots[i]*(g.boxH+g.gap)
 		active := i == activeIdx
 		baseline := boxY + g.boxH*0.5 + g.cellH*0.30
 
@@ -3052,6 +3142,41 @@ func (r *Renderer) DrawToast(message string, width, height int) {
 
 	r.drawRect(x, y, boxW, boxH, bg, proj)
 	r.drawText(x+paddingX, y+boxH-paddingY, message, r.theme.Foreground, proj)
+}
+
+// DrawFindBar renders the scrollback find prompt: a bar pinned to the bottom
+// of the window showing the query and a match counter. It is drawn on the left
+// so it does not collide with the toast, which occupies the bottom-right.
+// status is the right-aligned counter text (e.g. "3/17" or "no matches").
+func (r *Renderer) DrawFindBar(query, status string, width, height int) {
+	proj := orthoMatrix(0, float32(width), float32(height), 0, -1, 1)
+
+	paddingX := r.cellWidth * 0.8
+	paddingY := r.cellHeight * 0.35
+	boxH := r.cellHeight + paddingY*2
+	margin := r.cellWidth * 0.8
+
+	// A block cursor after the query marks the bar as the input focus; without
+	// it an empty prompt looks inert.
+	text := "find: " + query + "█"
+	boxW := float32(len([]rune(text))+len([]rune(status))+2)*r.cellWidth + paddingX*2
+	if maxW := float32(width) - margin*2; boxW > maxW {
+		boxW = maxW
+	}
+
+	x := margin
+	y := float32(height) - boxH - margin
+	bg := r.theme.TabBar
+	bg[3] = 0.95
+	r.drawRect(x, y, boxW, boxH, bg, proj)
+	r.drawRect(x, y, 3, boxH, r.theme.TabActive, proj)
+
+	baseline := y + boxH - paddingY
+	r.drawText(x+paddingX, baseline, text, r.theme.Foreground, proj)
+	if status != "" {
+		statusX := x + boxW - paddingX - float32(len([]rune(status)))*r.cellWidth
+		r.drawText(statusX, baseline, status, withAlpha(r.theme.Foreground, 0.6), proj)
+	}
 }
 
 // drawRect draws a colored rectangle
