@@ -127,6 +127,7 @@ const defaultLanguageDetect = `# Detect project language
 [ -f CMakeLists.txt ] && echo "C/C++" && return 0
 [ -f Makefile ] && echo "C/C++" && return 0
 ls *.crl >/dev/null 2>&1 && echo "Carrion" && return 0
+ls *.oxi >/dev/null 2>&1 && echo "Oxigen" && return 0
 echo "None"
 `
 
