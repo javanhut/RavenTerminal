@@ -2063,6 +2063,9 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 		if len(prompt) > maxChars {
 			prompt = prompt[:maxChars-3] + "..."
 		}
+		caretLine, caretCol := m.InputCursorLineCol()
+		maxInputChars := maxChars - 2
+		textX := contentX + 8
 
 		if inputIsMultiline {
 			textAreaHeight := lineHeight * float32(inputLines)
@@ -2076,34 +2079,24 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 			r.drawRect(contentX, textBoxY, contentWidth, textAreaHeight, [4]float32{0.03, 0.03, 0.05, 1.0}, proj)
 
 			lines := strings.Split(inputText, "\n")
-			if len(lines) == 0 {
-				lines = []string{""}
-			}
-			start := 0
-			if len(lines) > inputLines {
-				start = len(lines) - inputLines
-			}
-			visibleLines := lines[start:]
+			// Scroll the window of lines onto the caret rather than pinning it
+			// to the end, so editing higher up in a script stays visible.
+			start := max(caretLine-inputLines+1, 0)
+			end := min(start+inputLines, len(lines))
 
 			lineY := textBoxY + lineHeight*0.75
-			for i, line := range visibleLines {
-				cursor := ""
-				if i == len(visibleLines)-1 {
-					cursor = "_"
+			for i, line := range lines[start:end] {
+				// Only the caret's line scrolls horizontally; the rest are cut
+				// at the field width.
+				col := 0
+				if start+i == caretLine {
+					col = caretCol
 				}
-				maxInputChars := maxChars - 2
-				availableChars := maxInputChars - len(cursor)
-				displayLine := line
-				if availableChars <= 0 {
-					displayLine = ""
-				} else if len(displayLine) > availableChars {
-					if availableChars > 3 {
-						displayLine = "..." + displayLine[len(displayLine)-(availableChars-3):]
-					} else {
-						displayLine = displayLine[len(displayLine)-availableChars:]
-					}
+				vis, visCol := inputWindow([]rune(line), col, maxInputChars)
+				r.drawText(textX, lineY, string(vis), r.theme.TabActive, proj)
+				if start+i == caretLine {
+					r.drawInputCaret(textX, lineY, visCol, proj)
 				}
-				r.drawText(contentX+8, lineY, displayLine+cursor, r.theme.TabActive, proj)
 				lineY += lineHeight
 			}
 		} else {
@@ -2116,12 +2109,10 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 			inputBoxY := inputAreaY + lineHeight*0.3
 			r.drawRect(contentX, inputBoxY, contentWidth, lineHeight, [4]float32{0.03, 0.03, 0.05, 1.0}, proj)
 
-			// Input text with cursor - truncate from left if too long
-			maxInputChars := maxChars - 2
-			if len(inputText) > maxInputChars {
-				inputText = "..." + inputText[len(inputText)-maxInputChars+3:]
-			}
-			r.drawText(contentX+8, inputBoxY+lineHeight*0.75, inputText+"_", r.theme.TabActive, proj)
+			baselineY := inputBoxY + lineHeight*0.75
+			vis, visCol := inputWindow([]rune(inputText), caretCol, maxInputChars)
+			r.drawText(textX, baselineY, string(vis), r.theme.TabActive, proj)
+			r.drawInputCaret(textX, baselineY, visCol, proj)
 		}
 	}
 
@@ -2143,9 +2134,9 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 	var footerText string
 	if m.InputMode() {
 		if inputIsMultiline {
-			footerText = "Enter: newline | Ctrl+Enter: confirm | Esc: cancel"
+			footerText = "Arrows: move | Home/End | Del | Enter: newline | Ctrl+Enter: save | Esc: cancel"
 		} else {
-			footerText = "Enter: confirm | Esc: cancel"
+			footerText = "Arrows: move | Home/End | Del | Enter: confirm | Esc: cancel"
 		}
 	} else {
 		footerText = "Up/Down | Enter | Del | Esc"
@@ -2173,6 +2164,24 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 		}
 		r.drawRect(scrollBarX, scrollThumbY, scrollBarWidth, scrollThumbHeight, r.theme.TabActive, proj)
 	}
+}
+
+// inputWindow returns the slice of line that fits in a width-cell field with
+// the caret at column col kept on screen, plus the caret's column within that
+// slice. The window is derived from the caret alone (no scroll state to keep
+// in sync): once the caret passes the right edge it rides there, and moving
+// back left pulls the earlier text into view again.
+func inputWindow(line []rune, col, width int) ([]rune, int) {
+	width = max(width, 1)
+	off := max(col-width+1, 0)
+	return line[off:min(off+width, len(line))], col - off
+}
+
+// drawInputCaret draws the settings-input caret as a bar between characters, so
+// it reads as an insertion point rather than a character of the value.
+func (r *Renderer) drawInputCaret(textX, baselineY float32, col int, proj [16]float32) {
+	x := textX + float32(col)*r.cellWidth
+	r.drawRect(x, baselineY-r.cellHeight*0.8, 2, r.cellHeight, r.theme.Cursor, proj)
 }
 
 // renderPanes renders all panes in a tab using the nested layout system

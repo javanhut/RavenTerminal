@@ -133,10 +133,47 @@ func (a *App) onKey(w *glfw.Window, key glfw.Key, scancode int, action glfw.Acti
 		}
 		switch key {
 		case glfw.KeyUp:
+			// While editing, Up/Down walk the text: line-wise in a multi-line
+			// field, start/end-of-text in a single-line one (where there is no
+			// line to move to).
+			if a.settingsMenu.InputMode() {
+				if !a.settingsMenu.MoveInputLine(-1) {
+					a.settingsMenu.MoveInputHome()
+				}
+				return
+			}
 			a.settingsMenu.MoveUp()
 			return
 		case glfw.KeyDown:
+			if a.settingsMenu.InputMode() {
+				if !a.settingsMenu.MoveInputLine(1) {
+					a.settingsMenu.MoveInputEnd()
+				}
+				return
+			}
 			a.settingsMenu.MoveDown()
+			return
+		case glfw.KeyLeft:
+			// Cmd/Ctrl+Left jumps to the start of the line, matching the
+			// platform convention; both are no-ops outside input mode.
+			if mods&(glfw.ModSuper|glfw.ModControl) != 0 {
+				a.settingsMenu.MoveInputHome()
+			} else {
+				a.settingsMenu.MoveInputCursor(-1)
+			}
+			return
+		case glfw.KeyRight:
+			if mods&(glfw.ModSuper|glfw.ModControl) != 0 {
+				a.settingsMenu.MoveInputEnd()
+			} else {
+				a.settingsMenu.MoveInputCursor(1)
+			}
+			return
+		case glfw.KeyHome:
+			a.settingsMenu.MoveInputHome()
+			return
+		case glfw.KeyEnd:
+			a.settingsMenu.MoveInputEnd()
 			return
 		case glfw.KeyEnter, glfw.KeyKPEnter:
 			if action == glfw.Repeat {
@@ -1036,6 +1073,16 @@ func (a *App) onFramebufferSize(w *glfw.Window, width, height int) {
 func (a *App) onScroll(w *glfw.Window, xoff, yoff float64) {
 	if a.settingsMenu.IsOpen() {
 		if a.settingsMenu.InputMode() {
+			// The text view follows the caret, so scrolling a multi-line field
+			// means walking the caret by line.
+			steps := max(int(math.Abs(yoff)), 1)
+			for range steps {
+				if yoff > 0 {
+					a.settingsMenu.MoveInputLine(-1)
+				} else if yoff < 0 {
+					a.settingsMenu.MoveInputLine(1)
+				}
+			}
 			return
 		}
 		if a.debugMenu {

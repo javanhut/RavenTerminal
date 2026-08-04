@@ -104,6 +104,9 @@ type Menu struct {
 	InputState  InputState
 	InputBuffer string
 	InputLabel  string
+	// InputCursor is the caret position in InputBuffer as a rune index
+	// (0 = before the first rune, len = after the last).
+	InputCursor int
 
 	// Pending values for multi-step input
 	PendingName     string
@@ -1102,15 +1105,39 @@ func (m *Menu) startInput(state InputState, label string) {
 	m.InputActive = true
 	m.InputState = state
 	m.InputLabel = label
+	m.InputCursor = len([]rune(m.InputBuffer))
 	// Don't clear InputBuffer here - caller may set it after
 }
 
-// startInputWithValue begins input mode with an initial value
+// startInputWithValue begins input mode with an initial value, caret at the end.
 func (m *Menu) startInputWithValue(state InputState, label string, initialValue string) {
 	m.InputActive = true
 	m.InputState = state
 	m.InputLabel = label
 	m.InputBuffer = initialValue
+	m.InputCursor = len([]rune(initialValue))
+}
+
+// inputRunes returns the buffer as runes, clamping the caret into range first.
+// Every edit and caret move goes through it, so an out-of-range InputCursor
+// (stale value, buffer replaced behind our back) can never index out of bounds.
+func (m *Menu) inputRunes() []rune {
+	rs := []rune(m.InputBuffer)
+	m.InputCursor = min(max(m.InputCursor, 0), len(rs))
+	return rs
+}
+
+// setInput replaces the buffer and places the caret, clamped to the new length.
+func (m *Menu) setInput(rs []rune, cursor int) {
+	m.InputBuffer = string(rs)
+	m.InputCursor = min(max(cursor, 0), len(rs))
+}
+
+// insertInput inserts s at the caret and leaves the caret after it.
+func (m *Menu) insertInput(s string) {
+	rs := m.inputRunes()
+	ins := []rune(s)
+	m.setInput(slices.Concat(rs[:m.InputCursor], ins, rs[m.InputCursor:]), m.InputCursor+len(ins))
 }
 
 // HandleChar handles character input
@@ -1118,10 +1145,10 @@ func (m *Menu) HandleChar(char rune) {
 	if !m.InputActive {
 		return
 	}
-	m.InputBuffer += string(char)
+	m.insertInput(string(char))
 }
 
-// HandlePaste appends clipboard text to the input buffer.
+// HandlePaste inserts clipboard text at the caret.
 func (m *Menu) HandlePaste(text string) {
 	if !m.InputActive || text == "" {
 		return
@@ -1131,17 +1158,118 @@ func (m *Menu) HandlePaste(text string) {
 	if !m.InputIsMultiline() {
 		text = strings.ReplaceAll(text, "\n", " ")
 	}
-	m.InputBuffer += text
+	m.insertInput(text)
 }
 
-// HandleBackspace handles backspace
+// HandleBackspace deletes the rune before the caret.
 func (m *Menu) HandleBackspace() {
-	if !m.InputActive || len(m.InputBuffer) == 0 {
+	if !m.InputActive {
 		return
 	}
-	// Remove last character (handle UTF-8)
-	runes := []rune(m.InputBuffer)
-	m.InputBuffer = string(runes[:len(runes)-1])
+	rs := m.inputRunes()
+	if m.InputCursor == 0 {
+		return
+	}
+	m.setInput(slices.Delete(rs, m.InputCursor-1, m.InputCursor), m.InputCursor-1)
+}
+
+// MoveInputCursor moves the caret by delta runes (clamped to the buffer).
+func (m *Menu) MoveInputCursor(delta int) {
+	if !m.InputActive {
+		return
+	}
+	m.setInput(m.inputRunes(), m.InputCursor+delta)
+}
+
+// inputLineBounds returns the rune range of the line the caret sits on,
+// excluding the terminating newline.
+func (m *Menu) inputLineBounds() (start, end int) {
+	rs := m.inputRunes()
+	start = 0
+	for i := m.InputCursor - 1; i >= 0; i-- {
+		if rs[i] == '\n' {
+			start = i + 1
+			break
+		}
+	}
+	end = len(rs)
+	for i := m.InputCursor; i < len(rs); i++ {
+		if rs[i] == '\n' {
+			end = i
+			break
+		}
+	}
+	return start, end
+}
+
+// MoveInputHome puts the caret at the start of its line.
+func (m *Menu) MoveInputHome() {
+	if !m.InputActive {
+		return
+	}
+	m.InputCursor, _ = m.inputLineBounds()
+}
+
+// MoveInputEnd puts the caret at the end of its line.
+func (m *Menu) MoveInputEnd() {
+	if !m.InputActive {
+		return
+	}
+	_, m.InputCursor = m.inputLineBounds()
+}
+
+// MoveInputLine moves the caret one line up (delta -1) or down (+1), keeping
+// the column where the target line is long enough. It reports false when there
+// is no line that way, so callers can fall back to another binding.
+func (m *Menu) MoveInputLine(delta int) bool {
+	if !m.InputActive {
+		return false
+	}
+	rs := m.inputRunes()
+	start, end := m.inputLineBounds()
+	col := m.InputCursor - start
+	if delta < 0 {
+		if start == 0 {
+			return false
+		}
+		prevStart := 0
+		for i := start - 2; i >= 0; i-- {
+			if rs[i] == '\n' {
+				prevStart = i + 1
+				break
+			}
+		}
+		m.InputCursor = min(prevStart+col, start-1)
+		return true
+	}
+	if end >= len(rs) {
+		return false
+	}
+	nextStart := end + 1
+	nextEnd := len(rs)
+	for i := nextStart; i < len(rs); i++ {
+		if rs[i] == '\n' {
+			nextEnd = i
+			break
+		}
+	}
+	m.InputCursor = min(nextStart+col, nextEnd)
+	return true
+}
+
+// InputCursorLineCol reports the caret's line and column, both zero-based rune
+// counts. The renderer uses it to scroll the visible window onto the caret.
+func (m *Menu) InputCursorLineCol() (line, col int) {
+	rs := m.inputRunes()
+	for _, r := range rs[:m.InputCursor] {
+		if r == '\n' {
+			line++
+			col = 0
+		} else {
+			col++
+		}
+	}
+	return line, col
 }
 
 // HandleEnter handles enter key - returns true if menu should close
@@ -1332,6 +1460,7 @@ func (m *Menu) HandleEscape() {
 		m.InputActive = false
 		m.InputState = InputNone
 		m.InputBuffer = ""
+		m.InputCursor = 0
 		m.debugf("escape input state=%s", m.stateName())
 		// Rebuild current menu
 		switch m.State {
@@ -1352,9 +1481,14 @@ func (m *Menu) HandleEscape() {
 	m.goBack()
 }
 
-// HandleDelete handles delete key for removing items
+// HandleDelete deletes the rune under the caret while editing, and otherwise
+// starts the confirm-delete flow for the selected item.
 func (m *Menu) HandleDelete() {
 	if m.InputActive {
+		rs := m.inputRunes()
+		if m.InputCursor < len(rs) {
+			m.setInput(slices.Delete(rs, m.InputCursor, m.InputCursor+1), m.InputCursor)
+		}
 		return
 	}
 
