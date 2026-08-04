@@ -161,3 +161,22 @@ func TestAPCUtf8With9CByte(t *testing.T) {
 		t.Fatalf("APC payload leaked into grid: row = %q, want %q", got, "ABCD")
 	}
 }
+
+// CSI > Ps m is XTMODKEYS, not SGR: apps emit "CSI > 4 m" (and "CSI > 4 ; 2 m")
+// around keyboard setup/teardown, and reading it as SGR 4 turned underline on
+// permanently — every cell written afterwards came out underlined.
+func TestPrivatePrefixedMIsNotSGR(t *testing.T) {
+	for _, seq := range []string{"\x1b[>4m", "\x1b[>4;2m", "\x1b[?4m"} {
+		term := NewTerminal(10, 2)
+		term.Process([]byte(seq + "x"))
+		if c := term.Snapshot().At(0, 0); c.Flags != 0 {
+			t.Errorf("%q left flags %b on the next cell", seq, c.Flags)
+		}
+	}
+	// Plain SGR 4 still underlines.
+	term := NewTerminal(10, 2)
+	term.Process([]byte("\x1b[4mx"))
+	if c := term.Snapshot().At(0, 0); c.Flags&grid.FlagUnderline == 0 {
+		t.Error("SGR 4 no longer underlines")
+	}
+}

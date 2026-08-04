@@ -646,6 +646,13 @@ func (t *Terminal) csiHasSuffix(c byte) bool {
 // executeCSI executes a CSI sequence
 func (t *Terminal) executeCSI(final byte) {
 	if final == 'm' { // SGR - Select graphic rendition
+		// A private-parameter prefix (0x3c-0x3f) makes this something else:
+		// "CSI > Ps m" is XTMODKEYS (xterm modifyOtherKeys), which apps emit on
+		// keyboard setup/teardown. Running it as SGR reads "CSI > 4 m" as
+		// "underline on" and sticks it on every cell written afterwards.
+		if len(t.csiBuf) > 0 && t.csiBuf[0] >= '<' && t.csiBuf[0] <= '?' {
+			return
+		}
 		// Parsed in a single pass here; the generic parseParams is skipped so
 		// SGR sequences are not parsed twice.
 		t.executeSGR(t.parseSGRParams())
