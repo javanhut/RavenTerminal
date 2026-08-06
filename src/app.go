@@ -100,6 +100,10 @@ type App struct {
 	prevSyncActive bool
 	prevActiveTab  *tab.Tab
 	lastScale      float32 // 0 forces the content scale to apply on frame one
+	// Grid size last pushed to the tabs, so fitGrid can skip the PTY ioctls
+	// when nothing actually changed.
+	fitCols uint16
+	fitRows uint16
 	// ponytail: entries for closed panes are never pruned; bounded by panes
 	// ever opened, a few pointers each.
 	lastGrids map[*tab.Pane]*grid.Grid
@@ -186,6 +190,9 @@ func newAppWith(tabsFor func(cols, rows uint16) (*tab.TabManager, error)) (*App,
 		ollamaTestResponses:   make(chan ollamaModelsResponse, 2),
 		ollamaModelsResponses: make(chan ollamaModelsResponse, 2),
 
+		fitCols: uint16(cols),
+		fitRows: uint16(rows),
+
 		prevDrawCursor: true,
 		prevFocused:    true, // matches windowFocused
 		// -1 forces a first-frame draw
@@ -256,9 +263,7 @@ func (a *App) onConfigReload(cfg *config.Config) error {
 	}
 	a.renderer.SetTextStyleOptions(cfg.Appearance.FauxBold, cfg.Appearance.FauxItalic, cfg.Appearance.Undercurl)
 	applyClipboardReadGate(cfg.AllowClipboardRead)
-	width, height := a.win.GetFramebufferSize()
-	cols, rows := a.renderer.CalculateGridSize(width, height)
-	a.tabManager.ResizeAll(uint16(cols), uint16(rows))
+	a.fitGrid()
 	return nil
 }
 
@@ -324,9 +329,7 @@ func (a *App) applyInitialConfig() {
 		a.aiPanel.LoadedModel = a.settingsMenu.Config.Ollama.Model
 		a.renderer.SetThemeByName(a.currentTheme)
 		if err := a.renderer.SetDefaultFontSize(a.settingsMenu.Config.FontSize); err == nil {
-			width, height := a.win.GetFramebufferSize()
-			cols, rows := a.renderer.CalculateGridSize(width, height)
-			a.tabManager.ResizeAll(uint16(cols), uint16(rows))
+			a.fitGrid()
 		}
 		a.renderer.SetTextStyleOptions(a.settingsMenu.Config.Appearance.FauxBold, a.settingsMenu.Config.Appearance.FauxItalic, a.settingsMenu.Config.Appearance.Undercurl)
 		applyClipboardReadGate(a.settingsMenu.Config.AllowClipboardRead)
@@ -363,14 +366,13 @@ func (a *App) tick(now time.Time) bool {
 	a.win.MakeContextCurrent()
 
 	{
-		// Show the tab bar only when there's more than one tab. When visibility flips
-		// (a tab is added or removed), the usable width changes, so re-fit the grid.
+		// Show the tab bar only when there's more than one tab. When visibility
+		// flips (a tab is added or removed), the usable width changes — the
+		// fitGrid below picks that up along with everything else.
 		if wantTabBar := a.tabManager.TabCount() > 1; wantTabBar != a.renderer.TabBarVisible() {
 			a.renderer.SetTabBarVisible(wantTabBar)
-			width, height := a.win.GetFramebufferSize()
-			cols, rows := a.renderer.CalculateGridSize(width, height)
-			a.tabManager.ResizeAll(uint16(cols), uint16(rows))
 		}
+		a.fitGrid()
 
 		if a.settingsMenu.Config != nil && a.settingsMenu.Config.Theme != a.currentTheme {
 			a.renderer.SetThemeByName(a.settingsMenu.Config.Theme)
@@ -406,6 +408,32 @@ func (a *App) tick(now time.Time) bool {
 		}
 	}
 	return true
+}
+
+// fitGrid re-fits every tab to the window's current framebuffer size. It is the
+// single authority for grid size, and it runs every tick, so the grid converges
+// on the real window size no matter how the size changed.
+//
+// The framebuffer callback alone was not enough. Around fullscreen transitions
+// it fires at the wrong moments: on macOS the transition is animated and
+// asynchronous, so the size read immediately after toggling is still the old
+// one, and glfwSetWindowMonitor pumps the event loop from inside itself. When
+// the callback landed before the OS had applied the new frame, nothing ever
+// corrected the grid — the renderer drew at the new pixel size while the PTY
+// still believed the old cols/rows, which is the "sometimes it breaks" the
+// scattered re-fits could not cover. Polling instead of trusting one event
+// makes every path self-healing.
+//
+// It also subsumes the other re-fit sites — zoom, font size, content scale, tab
+// bar visibility — since all of them land in CalculateGridSize.
+func (a *App) fitGrid() {
+	width, height := a.win.GetFramebufferSize()
+	cols, rows := a.renderer.CalculateGridSize(width, height)
+	if uint16(cols) == a.fitCols && uint16(rows) == a.fitRows {
+		return // unchanged: skip the per-pane TIOCSWINSZ and SIGWINCH
+	}
+	a.fitCols, a.fitRows = uint16(cols), uint16(rows)
+	a.tabManager.ResizeAll(a.fitCols, a.fitRows)
 }
 
 // idleTimeout is the longest this window is willing to sleep before it needs
@@ -769,8 +797,7 @@ func (a *App) renderFrame(now time.Time) {
 		if err := a.renderer.SetContentScale(s); err == nil {
 			if cw, ch := a.renderer.CellDimensions(); cw != cwOld || ch != chOld {
 				scaleChanged = true
-				cols, rows := a.renderer.CalculateGridSize(width, height)
-				a.tabManager.ResizeAll(uint16(cols), uint16(rows))
+				a.fitGrid()
 			}
 		}
 	}

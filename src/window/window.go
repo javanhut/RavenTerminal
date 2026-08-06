@@ -43,13 +43,15 @@ const (
 	MinWindowHeight = 320
 )
 
-// Window wraps a GLFW window with OpenGL context
+// Window wraps a GLFW window with OpenGL context.
+//
+// Note there is no isFullscreen field: fullscreen state is queried from the OS
+// on every use (see ToggleFullscreen) because the user can enter or leave
+// fullscreen without going through us.
 type Window struct {
-	glfw         *glfw.Window
-	width        int
-	height       int
-	config       Config
-	isFullscreen bool
+	glfw *glfw.Window
+	// Windowed geometry to restore on leaving fullscreen. Used only by the
+	// SetMonitor path (see fullscreen_other.go); on macOS AppKit remembers it.
 	savedX       int
 	savedY       int
 	savedWidth   int
@@ -134,12 +136,7 @@ func NewWindow(config Config) (*Window, error) {
 	gl.Enable(gl.BLEND)
 	gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
 
-	w := &Window{
-		glfw:   window,
-		width:  config.Width,
-		height: config.Height,
-		config: config,
-	}
+	w := &Window{glfw: window}
 
 	// HiDPI: track the window's content scale (queried at startup, updated by
 	// GLFW when the window moves to a monitor with a different scale). The
@@ -206,53 +203,22 @@ func (w *Window) SetViewport(width, height int) {
 	gl.Viewport(0, 0, int32(width), int32(height))
 }
 
-// ToggleFullscreen toggles between fullscreen and windowed mode
+// ToggleFullscreen toggles between fullscreen and windowed mode.
+//
+// The current state is asked of the OS every time rather than kept in a bool.
+// The user can enter or leave fullscreen without going through this function —
+// on macOS via the green button, Cmd+Ctrl+F or a Space swipe, on Linux via the
+// window manager — and a flag that says "windowed" for a window that is really
+// fullscreen makes the next toggle save the *fullscreen* rect as the windowed
+// geometry. After that, leaving fullscreen restores a full-screen-sized
+// "window", permanently, which is the resize inconsistency this replaced.
 func (w *Window) ToggleFullscreen() {
-	if w.isFullscreen {
-		// Restore windowed mode
-		w.glfw.SetMonitor(nil, w.savedX, w.savedY, w.savedWidth, w.savedHeight, 0)
-		w.isFullscreen = false
-	} else {
-		// Save current window position and size
-		w.savedX, w.savedY = w.glfw.GetPos()
-		w.savedWidth, w.savedHeight = w.glfw.GetSize()
-
-		// Enter fullscreen on the monitor the window is on
-		monitor := w.currentMonitor()
-		mode := monitor.GetVideoMode()
-		w.glfw.SetMonitor(monitor, 0, 0, mode.Width, mode.Height, mode.RefreshRate)
-		w.isFullscreen = true
-	}
+	toggleFullscreen(w)
 }
 
-// currentMonitor returns the monitor containing the largest portion of the
-// window, falling back to the primary monitor. GLFW only exposes a window's
-// monitor while it is fullscreen, so for windowed mode we compute the overlap
-// between the window rect and each monitor's work area ourselves.
-func (w *Window) currentMonitor() *glfw.Monitor {
-	wx, wy := w.glfw.GetPos()
-	ww, wh := w.glfw.GetSize()
-	best := glfw.GetPrimaryMonitor()
-	bestArea := 0
-	for _, m := range glfw.GetMonitors() {
-		mode := m.GetVideoMode()
-		if mode == nil {
-			continue
-		}
-		mx, my := m.GetPos()
-		overlapW := min(wx+ww, mx+mode.Width) - max(wx, mx)
-		overlapH := min(wy+wh, my+mode.Height) - max(wy, my)
-		if overlapW > 0 && overlapH > 0 && overlapW*overlapH > bestArea {
-			bestArea = overlapW * overlapH
-			best = m
-		}
-	}
-	return best
-}
-
-// IsFullscreen returns whether the window is in fullscreen mode
+// IsFullscreen returns whether the window is currently fullscreen.
 func (w *Window) IsFullscreen() bool {
-	return w.isFullscreen
+	return isFullscreen(w)
 }
 
 // loadIcon attempts to load and set the application icon

@@ -872,15 +872,16 @@ handleTerminalInput:
 	case keybindings.ActionScrollDownLine:
 		activeTab.Terminal.GetGrid().ScrollViewDown(1)
 	case keybindings.ActionToggleFullscreen:
+		if action == glfw.Repeat {
+			// Key repeat would fire this ~30x/second while Shift+Enter is held,
+			// flapping the window between states faster than the OS can finish
+			// a transition. Toggling is a discrete action; only the press counts.
+			return
+		}
 		a.win.ToggleFullscreen()
-		// Re-fit immediately: the framebuffer-size callback isn't reliably
-		// delivered on fullscreen<->windowed (or cross-monitor) transitions,
-		// so without this the grid keeps the old column count and a
-		// full-screen TUI overflows the new viewport. ponytail: same pattern
-		// as the zoom handlers.
-		width, height := a.win.GetFramebufferSize()
-		cols, rows := a.renderer.CalculateGridSize(width, height)
-		a.tabManager.ResizeAll(uint16(cols), uint16(rows))
+		// No re-fit here: the transition may not have been applied yet (macOS
+		// animates it), so the size read now can be the pre-toggle one. fitGrid
+		// runs every tick and converges once the new size is real.
 	case keybindings.ActionCopy:
 		// No selection: leave the clipboard alone.
 		if text := activeTab.Terminal.GetGrid().SelectedText(); text != "" {
@@ -932,24 +933,15 @@ handleTerminalInput:
 		}
 	case keybindings.ActionZoomIn:
 		if err := a.renderer.ZoomIn(); err == nil {
-			// Recalculate grid size after zoom
-			width, height := a.win.GetFramebufferSize()
-			cols, rows := a.renderer.CalculateGridSize(width, height)
-			a.tabManager.ResizeAll(uint16(cols), uint16(rows))
+			a.fitGrid() // cells changed size, so the grid no longer fits
 		}
 	case keybindings.ActionZoomOut:
 		if err := a.renderer.ZoomOut(); err == nil {
-			// Recalculate grid size after zoom
-			width, height := a.win.GetFramebufferSize()
-			cols, rows := a.renderer.CalculateGridSize(width, height)
-			a.tabManager.ResizeAll(uint16(cols), uint16(rows))
+			a.fitGrid()
 		}
 	case keybindings.ActionZoomReset:
 		if err := a.renderer.ZoomReset(); err == nil {
-			// Recalculate grid size after zoom
-			width, height := a.win.GetFramebufferSize()
-			cols, rows := a.renderer.CalculateGridSize(width, height)
-			a.tabManager.ResizeAll(uint16(cols), uint16(rows))
+			a.fitGrid()
 		}
 	case keybindings.ActionOpenMenu:
 		if a.settingsMenu.IsOpen() {
@@ -1064,10 +1056,16 @@ func (a *App) onChar(w *glfw.Window, char rune) {
 	a.lastInput = time.Now() // hold the cursor solid right after typing
 }
 
+// onFramebufferSize keeps the grid responsive during a live drag-resize, when
+// the platform runs a modal event loop and the main loop (and so fitGrid) does
+// not get to tick until the drag ends. It is an optimization, not the source of
+// truth — fitGrid re-checks the real size every tick regardless.
+//
+// It deliberately does not touch the GL viewport: this fires from event
+// dispatch, where the current GL context may belong to a different window, and
+// renderFrame sets the viewport on the right context before every draw anyway.
 func (a *App) onFramebufferSize(w *glfw.Window, width, height int) {
-	a.win.SetViewport(width, height)
-	cols, rows := a.renderer.CalculateGridSize(width, height)
-	a.tabManager.ResizeAll(uint16(cols), uint16(rows))
+	a.fitGrid()
 }
 
 func (a *App) onScroll(w *glfw.Window, xoff, yoff float64) {
