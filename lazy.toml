@@ -49,13 +49,18 @@ chmod +x {{app_name}}
 echo -e "{{green}}[OK]{{nc}} Build successful: ./{{app_name}} ($backend)"
 """]
 
+# RAVEN_BACKEND is passed explicitly because install.sh rebuilds from source
+# rather than using the binary `build` just produced, and its own auto-detection
+# reads XDG_SESSION_TYPE — which is "tty" over ssh and stripped entirely by
+# sudo. Without this, `imlazy install backend=wayland` builds Wayland, then
+# installs an x11 binary over it.
 [commands.install]
 desc = "Install system-wide (clean install - uninstalls first)"
 dep = ["build"]
 run = [
   "echo -e \"{{blue}}[INFO]{{nc}} Performing clean global install...\"",
   "{{scripts_dir}}/uninstall.sh --all --force 2>/dev/null || true",
-  "{{scripts_dir}}/install.sh --global",
+  "RAVEN_BACKEND={{backend}} {{scripts_dir}}/install.sh --global",
 ]
 
 [commands.install-local]
@@ -64,16 +69,16 @@ dep = ["build"]
 run = [
   "echo -e \"{{blue}}[INFO]{{nc}} Performing clean user install...\"",
   "{{scripts_dir}}/uninstall.sh --all --force 2>/dev/null || true",
-  "{{scripts_dir}}/install.sh --user",
+  "RAVEN_BACKEND={{backend}} {{scripts_dir}}/install.sh --user",
 ]
 
 [commands.fresh]
 desc = "Fresh install system-wide: purge everything (config, caches, old binaries, running instances), build from scratch, install, and verify"
-run = ["{{scripts_dir}}/clean-install.sh --global"]
+run = ["RAVEN_BACKEND={{backend}} {{scripts_dir}}/clean-install.sh --global"]
 
 [commands.fresh-local]
 desc = "Fresh install for current user: same full purge, user-level install"
-run = ["{{scripts_dir}}/clean-install.sh --user"]
+run = ["RAVEN_BACKEND={{backend}} {{scripts_dir}}/clean-install.sh --user"]
 
 [commands.purge]
 desc = "Remove every trace of raven-terminal (installs, config, caches, instances)"
