@@ -14,7 +14,9 @@ import (
 	"math"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/go-gl/gl/v4.1-core/gl"
 	gtfont "github.com/go-text/typesetting/font"
@@ -121,6 +123,13 @@ type Glyph struct {
 	OffsetY float32
 }
 
+// asciiGlyphSlot is the per-rune resolution cache entry for ASCII runes.
+type asciiGlyphSlot struct {
+	g        Glyph
+	ok       bool
+	resolved bool
+}
+
 // Renderer handles OpenGL rendering with smooth fonts
 type Renderer struct {
 	theme           Theme
@@ -134,12 +143,19 @@ type Renderer struct {
 	paddingTop      float32
 	paddingBottom   float32
 	tabBarWidth     float32
+	barViewH        float32 // height of the last rendered frame (tab chip fitting)
 	currentFont     string
 
 	// Font data. The atlas is dynamic: glyphs are rasterized on demand at
 	// their natural ink bounds and shelf-packed into a growable RED texture.
-	glyphs         map[rune]Glyph
-	glyphMisses    map[rune]bool // runes no font in the chain covers (negative cache)
+	glyphs      map[rune]Glyph
+	glyphMisses map[rune]bool // runes no font in the chain covers (negative cache)
+	// asciiCache is a flat array in front of the glyphs map for runes < 128
+	// (the overwhelming majority of terminal content); neither fallback table
+	// has ASCII keys, so resolution for them is exactly ensureGlyph. Cleared
+	// wherever the glyph cache is invalidated (font reload, atlas grow,
+	// system-fallback load).
+	asciiCache     [128]asciiGlyphSlot
 	fontAtlas      uint32
 	atlasSize      int
 	atlasPix       []byte    // CPU-side mirror of the RED atlas (for grow/repack)
@@ -251,6 +267,18 @@ type Renderer struct {
 	// bar visibility, font size) that must force a redraw; consumed once per
 	// frame by ConsumeUIDirty.
 	uiDirty bool
+
+	// Tab-chip slide animation. tabSlot holds each tab's *animated* slot
+	// position (a float index into the chip stack) so a reorder slides instead
+	// of snapping. Keyed by tab pointer; stale entries are pruned each frame,
+	// so closed tabs cannot accumulate. tabSlotAt timestamps the last frame so
+	// the ease is wall-clock based rather than per-frame (the main loop's frame
+	// rate varies with load). dragTab is the tab currently under the cursor in
+	// a drag-reorder — it snaps to its slot instead of easing, so the chip
+	// tracks the pointer while the displaced chips visibly slide around it.
+	tabSlot   map[*tab.Tab]float32
+	tabSlotAt time.Time
+	dragTab   *tab.Tab
 }
 
 // pass2Item marks a cell needing immediate decoration draws after the batches
@@ -273,6 +301,17 @@ func (r *Renderer) SetTabBarVisible(visible bool) {
 // TabBarVisible reports whether the tab bar is currently shown.
 func (r *Renderer) TabBarVisible() bool {
 	return r.tabBarVisible
+}
+
+// TabBarWidthLogical returns the tab bar's width in the logical cursor
+// coordinates GLFW callbacks deliver (0 when the bar is hidden). Callers that
+// need to know whether the pointer has left the strip use this rather than
+// reaching for the framebuffer-space width.
+func (r *Renderer) TabBarWidthLogical() float64 {
+	if !r.tabBarVisible {
+		return 0
+	}
+	return float64(r.tabBarWidth / r.hidpiScale())
 }
 
 // layoutTabBarWidth is the horizontal space the tab bar reserves: the bar width when
@@ -404,6 +443,7 @@ func (r *Renderer) loadFontData(fontData []byte) error {
 	// Reset the glyph cache and (re)create an empty atlas texture.
 	r.glyphs = make(map[rune]Glyph)
 	r.glyphMisses = make(map[rune]bool)
+	r.asciiCache = [128]asciiGlyphSlot{}
 	if r.fontAtlas != 0 {
 		gl.DeleteTextures(1, &r.fontAtlas)
 		r.fontAtlas = 0
@@ -1507,6 +1547,9 @@ func buildHelpSections() []helpSection {
 	nextTab := "Ctrl+Tab / Super+Shift+]"
 	prevTab := "Ctrl+Shift+Tab / Super+Shift+["
 	cyclePanes := "Super+Shift+Tab"
+	// Find stays on the Super layer on Linux too: Ctrl+Shift+F is already the
+	// web-search panel there, so there is no Ctrl+Shift chord left for it.
+	findKey := "Super+Shift+F"
 	if isMac {
 		mod = "Cmd"
 		exitKey = "Cmd+Q"
@@ -1516,6 +1559,7 @@ func buildHelpSections() []helpSection {
 		nextTab = "Cmd+Shift+]"
 		prevTab = "Cmd+Shift+["
 		cyclePanes = "Cmd+Shift+Tab"
+		findKey = "Cmd+Shift+F"
 	}
 
 	return []helpSection{
@@ -1529,6 +1573,7 @@ func buildHelpSections() []helpSection {
 				{mod + "+K", "Show/hide help"},
 				{mod + "+S", "Open settings"},
 				{mod + "+F", "Toggle web search"},
+				{findKey, "Find in scrollback"},
 				{mod + "+A", "Toggle AI chat"},
 				{mod + "++", "Zoom in"},
 				{mod + "+-", "Zoom out"},
@@ -1543,6 +1588,8 @@ func buildHelpSections() []helpSection {
 				{mod + "+1..9", "Jump to tab N"},
 				{nextTab, "Next tab"},
 				{prevTab, "Previous tab"},
+				{"Drag chip", "Reorder tabs"},
+				{"Drag chip right", "Tear tab into a new window"},
 			},
 		},
 		{
@@ -2017,6 +2064,9 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 		if len(prompt) > maxChars {
 			prompt = prompt[:maxChars-3] + "..."
 		}
+		caretLine, caretCol := m.InputCursorLineCol()
+		maxInputChars := maxChars - 2
+		textX := contentX + 8
 
 		if inputIsMultiline {
 			textAreaHeight := lineHeight * float32(inputLines)
@@ -2030,34 +2080,24 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 			r.drawRect(contentX, textBoxY, contentWidth, textAreaHeight, [4]float32{0.03, 0.03, 0.05, 1.0}, proj)
 
 			lines := strings.Split(inputText, "\n")
-			if len(lines) == 0 {
-				lines = []string{""}
-			}
-			start := 0
-			if len(lines) > inputLines {
-				start = len(lines) - inputLines
-			}
-			visibleLines := lines[start:]
+			// Scroll the window of lines onto the caret rather than pinning it
+			// to the end, so editing higher up in a script stays visible.
+			start := max(caretLine-inputLines+1, 0)
+			end := min(start+inputLines, len(lines))
 
 			lineY := textBoxY + lineHeight*0.75
-			for i, line := range visibleLines {
-				cursor := ""
-				if i == len(visibleLines)-1 {
-					cursor = "_"
+			for i, line := range lines[start:end] {
+				// Only the caret's line scrolls horizontally; the rest are cut
+				// at the field width.
+				col := 0
+				if start+i == caretLine {
+					col = caretCol
 				}
-				maxInputChars := maxChars - 2
-				availableChars := maxInputChars - len(cursor)
-				displayLine := line
-				if availableChars <= 0 {
-					displayLine = ""
-				} else if len(displayLine) > availableChars {
-					if availableChars > 3 {
-						displayLine = "..." + displayLine[len(displayLine)-(availableChars-3):]
-					} else {
-						displayLine = displayLine[len(displayLine)-availableChars:]
-					}
+				vis, visCol := inputWindow([]rune(line), col, maxInputChars)
+				r.drawText(textX, lineY, string(vis), r.theme.TabActive, proj)
+				if start+i == caretLine {
+					r.drawInputCaret(textX, lineY, visCol, proj)
 				}
-				r.drawText(contentX+8, lineY, displayLine+cursor, r.theme.TabActive, proj)
 				lineY += lineHeight
 			}
 		} else {
@@ -2070,12 +2110,10 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 			inputBoxY := inputAreaY + lineHeight*0.3
 			r.drawRect(contentX, inputBoxY, contentWidth, lineHeight, [4]float32{0.03, 0.03, 0.05, 1.0}, proj)
 
-			// Input text with cursor - truncate from left if too long
-			maxInputChars := maxChars - 2
-			if len(inputText) > maxInputChars {
-				inputText = "..." + inputText[len(inputText)-maxInputChars+3:]
-			}
-			r.drawText(contentX+8, inputBoxY+lineHeight*0.75, inputText+"_", r.theme.TabActive, proj)
+			baselineY := inputBoxY + lineHeight*0.75
+			vis, visCol := inputWindow([]rune(inputText), caretCol, maxInputChars)
+			r.drawText(textX, baselineY, string(vis), r.theme.TabActive, proj)
+			r.drawInputCaret(textX, baselineY, visCol, proj)
 		}
 	}
 
@@ -2097,9 +2135,9 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 	var footerText string
 	if m.InputMode() {
 		if inputIsMultiline {
-			footerText = "Enter: newline | Ctrl+Enter: confirm | Esc: cancel"
+			footerText = "Arrows: move | Home/End | Del | Enter: newline | Ctrl+Enter: save | Esc: cancel"
 		} else {
-			footerText = "Enter: confirm | Esc: cancel"
+			footerText = "Arrows: move | Home/End | Del | Enter: confirm | Esc: cancel"
 		}
 	} else {
 		footerText = "Up/Down | Enter | Del | Esc"
@@ -2127,6 +2165,24 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 		}
 		r.drawRect(scrollBarX, scrollThumbY, scrollBarWidth, scrollThumbHeight, r.theme.TabActive, proj)
 	}
+}
+
+// inputWindow returns the slice of line that fits in a width-cell field with
+// the caret at column col kept on screen, plus the caret's column within that
+// slice. The window is derived from the caret alone (no scroll state to keep
+// in sync): once the caret passes the right edge it rides there, and moving
+// back left pulls the earlier text into view again.
+func inputWindow(line []rune, col, width int) ([]rune, int) {
+	width = max(width, 1)
+	off := max(col-width+1, 0)
+	return line[off:min(off+width, len(line))], col - off
+}
+
+// drawInputCaret draws the settings-input caret as a bar between characters, so
+// it reads as an insertion point rather than a character of the value.
+func (r *Renderer) drawInputCaret(textX, baselineY float32, col int, proj [16]float32) {
+	x := textX + float32(col)*r.cellWidth
+	r.drawRect(x, baselineY-r.cellHeight*0.8, 2, r.cellHeight, r.theme.Cursor, proj)
 }
 
 // renderPanes renders all panes in a tab using the nested layout system
@@ -2193,13 +2249,21 @@ func (r *Renderer) renderPanes(t *tab.Tab, width, height int, proj [16]float32, 
 		// Render the pane's grid
 		showCursor := cursorVisible && isActive
 		cursorStyle := parser.CursorStyleBlock
-		if layout.Pane != nil && layout.Pane.Terminal != nil {
-			cursorStyle = layout.Pane.Terminal.CursorStyle()
+		term := layout.Pane.Terminal
+		if showCursor && term != nil {
+			// CursorStyle takes Terminal.mu; skip the lock when no cursor
+			// will be drawn this frame.
+			cursorStyle = term.CursorStyle()
 		}
-		// One locked snapshot per pane per frame; the grid pointer is passed
-		// only for hover-URL identity matching.
-		snap := layout.Pane.Terminal.Snapshot()
-		r.renderGridAt(snap, layout.Pane.Terminal.GetGrid(), offsetX, offsetY, paneWidth, paneHeight, proj, showCursor, cursorStyle)
+		// One locked snapshot per pane per frame. The grid pointer is used
+		// only for hover-URL identity matching, so GetGrid (another
+		// Terminal.mu acquisition) is only needed while a hover is active.
+		var g *grid.Grid
+		if r.hoverActive {
+			g = term.GetGrid()
+		}
+		snap := term.Snapshot()
+		r.renderGridAt(snap, g, offsetX, offsetY, paneWidth, paneHeight, proj, showCursor, cursorStyle)
 	}
 }
 
@@ -2425,7 +2489,12 @@ type tabBarGeom struct {
 	cellH      float32
 }
 
-func (r *Renderer) tabBarGeom() tabBarGeom {
+// tabBarGeom computes the chip geometry for count tabs. Chips are compressed
+// (and their text scaled down with them) so that every tab plus the "+" button
+// always fits the bar height — that is what lets MaxTabs exceed what a
+// fixed-height chip stack could show. barViewH is the height of the last
+// rendered frame; it is zero before the first frame, which skips compression.
+func (r *Renderer) tabBarGeom(count int) tabBarGeom {
 	scale := r.baseFontSize / r.fontSize
 	cellH := r.cellHeight * scale
 	const sidePad = 10.0
@@ -2434,12 +2503,85 @@ func (r *Renderer) tabBarGeom() tabBarGeom {
 		boxW:   r.tabBarWidth - 2*sidePad,
 		topPad: 12,
 		boxH:   cellH + 14,
-		gap:    6,
-		scale:  scale,
-		cellH:  cellH,
+		// Gutter between chips. Wide enough that a chip sliding into an
+		// adjacent slot reads as movement rather than a jump; compressed
+		// proportionally with the chips when many tabs are open.
+		gap:   12,
+		scale: scale,
+		cellH: cellH,
 	}
 	g.plusH = g.boxH * 0.8
+
+	avail := r.barViewH - 2*g.topPad
+	need := float32(count)*(g.boxH+g.gap) + g.plusH
+	if count > 0 && avail > 0 && need > avail {
+		k := avail / need
+		g.boxH *= k
+		g.gap *= k
+		g.plusH *= k
+		// Keep the label inside its chip: shrink the text with the chip once
+		// the chip is no longer taller than a line of text.
+		if fit := g.boxH - 4; fit < g.cellH {
+			g.scale *= fit / g.cellH
+			g.cellH = fit
+		}
+	}
 	return g
+}
+
+// SetTabDrag marks the tab currently being drag-reordered (nil when no drag is
+// in progress). The dragged chip snaps to its slot so it stays under the
+// cursor; every other chip eases, which is what makes the swap visible.
+func (r *Renderer) SetTabDrag(t *tab.Tab) {
+	r.dragTab = t
+}
+
+// tabSlideTau is the time constant of the chip slide. ~70ms reads as a
+// deliberate swap without feeling sluggish when reordering several tabs
+// quickly.
+const tabSlideTau = 0.07
+
+// animateTabSlots advances each chip's animated slot position toward its real
+// index and returns the positions to draw at, parallel to tabs. Movement is an
+// exponential ease evaluated against wall-clock delta, so it is frame-rate
+// independent. While any chip is still in motion it latches uiDirty, which is
+// what schedules the next frame — the main loop is event-driven and would
+// otherwise stop drawing mid-slide.
+func (r *Renderer) animateTabSlots(tabs []*tab.Tab) []float32 {
+	now := time.Now()
+	dt := now.Sub(r.tabSlotAt).Seconds()
+	r.tabSlotAt = now
+	// A long gap means the bar has not drawn for a while (idle terminal, or
+	// first frame): settle immediately rather than replaying a stale slide.
+	if dt <= 0 || dt > 0.25 {
+		dt = 0
+	}
+	k := float32(1 - math.Exp(-dt/tabSlideTau))
+
+	next := make(map[*tab.Tab]float32, len(tabs))
+	slots := make([]float32, len(tabs))
+	for i, t := range tabs {
+		target := float32(i)
+		cur, seen := r.tabSlot[t]
+		switch {
+		case !seen || t == r.dragTab:
+			// A tab drawn for the first time has no previous position to slide
+			// from, and the dragged chip must track the pointer.
+			cur = target
+		default:
+			cur += (target - cur) * k
+			if d := target - cur; d > -0.01 && d < 0.01 {
+				cur = target
+			} else {
+				r.uiDirty = true // still moving: ask for another frame
+			}
+		}
+		next[t] = cur
+		slots[i] = cur
+	}
+	// Rebuilding the map drops entries for closed tabs.
+	r.tabSlot = next
+	return slots
 }
 
 // renderTabBar renders the left tab bar as a vertical stack of tab "chips": each shows
@@ -2452,20 +2594,22 @@ func (r *Renderer) renderTabBar(tm *tab.TabManager, width, height int, proj [16]
 	}
 
 	barW := r.tabBarWidth
+	r.barViewH = float32(height)
 
 	// Tab bar background + a hairline right edge.
 	r.drawRect(0, 0, barW, float32(height), r.theme.TabBar, proj)
 	r.drawRect(barW-1, 0, 1, float32(height), withAlpha(r.theme.Foreground, 0.12), proj)
 
-	g := r.tabBarGeom()
 	tabs := tm.GetTabs()
+	g := r.tabBarGeom(len(tabs))
 	activeIdx := tm.ActiveIndex()
 	isMac := runtime.GOOS == "darwin"
 	home := cachedHomeDir
 	charW := r.cellWidth * g.scale
+	slots := r.animateTabSlots(tabs)
 
 	for i, t := range tabs {
-		boxY := g.topPad + float32(i)*(g.boxH+g.gap)
+		boxY := g.topPad + slots[i]*(g.boxH+g.gap)
 		active := i == activeIdx
 		baseline := boxY + g.boxH*0.5 + g.cellH*0.30
 
@@ -2526,8 +2670,8 @@ func (r *Renderer) HitTestTabBar(tm *tab.TabManager, x, y float64) (index int, n
 	if fx < 0 || fx > r.tabBarWidth {
 		return 0, false, false
 	}
-	g := r.tabBarGeom()
 	n := tm.TabCount()
+	g := r.tabBarGeom(n)
 	for i := range n {
 		boxY := g.topPad + float32(i)*(g.boxH+g.gap)
 		if fx >= g.boxX && fx <= g.boxX+g.boxW && fy >= boxY && fy <= boxY+g.boxH {
@@ -2539,6 +2683,36 @@ func (r *Renderer) HitTestTabBar(tm *tab.TabManager, x, y float64) (index int, n
 		return 0, true, true
 	}
 	return 0, false, false
+}
+
+// tabDropSlot maps a framebuffer Y coordinate to the nearest tab-chip center.
+// The half-gap between adjacent chips is therefore the swap boundary.
+func tabDropSlot(y float32, count int, g tabBarGeom) int {
+	if count <= 0 {
+		return 0
+	}
+	pitch := g.boxH + g.gap
+	firstCenter := g.topPad + g.boxH*0.5
+	slot := int(math.Floor(float64((y-firstCenter)/pitch) + 0.5))
+	if slot < 0 {
+		return 0
+	}
+	if slot >= count {
+		return count - 1
+	}
+	return slot
+}
+
+// TabDropIndex maps a logical cursor Y to the nearest tab slot, clamped to
+// [0, TabCount-1]. Used while drag-reordering tabs; returns 0 when the bar is
+// hidden or empty.
+func (r *Renderer) TabDropIndex(tm *tab.TabManager, y float64) int {
+	n := tm.TabCount()
+	if !r.tabBarVisible || n == 0 {
+		return 0
+	}
+	fy := float32(y) * r.hidpiScale()
+	return tabDropSlot(fy, n, r.tabBarGeom(n))
 }
 
 // tabLabel returns a compact directory-based label for a tab (e.g. "~/D/RavenTerminal").
@@ -2650,7 +2824,6 @@ func clampUnit(v float32) float32 {
 // grid pointer g is used only for hover-URL identity matching.
 func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offsetY, paneWidth, paneHeight float32, proj [16]float32, cursorVisible bool, cursorStyle parser.CursorStyle) {
 	cols := snap.Cols
-	rows := snap.Rows
 
 	// Hover underline applies only when the hover target is this grid.
 	hoverRow := -1
@@ -2667,109 +2840,7 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 	// glyph warm loop with a rare retry.
 	for attempt := 0; ; attempt++ {
 		startGen := r.atlasGen
-		r.gridRects.reset()
-		r.gridGlyphs.reset()
-		r.colorDraws = r.colorDraws[:0]
-		r.pass2 = r.pass2[:0]
-		for row := range rows {
-			for col := range cols {
-				cell := snap.Cells[row*cols+col]
-				x := offsetX + float32(col)*r.cellWidth
-				y := offsetY + float32(row)*r.cellHeight
-				if x+r.cellWidth > offsetX+paneWidth || y+r.cellHeight > offsetY+paneHeight {
-					continue
-				}
-
-				bgColor := r.colorToRGBA(cell.Bg, true)
-				if cell.Flags&grid.FlagInverse != 0 {
-					bgColor = r.colorToRGBA(cell.Fg, false)
-				}
-				if bgColor != r.theme.Background {
-					r.gridRects.addRect(x, y, r.cellWidth+0.5, r.cellHeight, bgColor)
-				}
-				if snap.Selected(col, row) {
-					r.gridRects.addRect(x, y, r.cellWidth+0.5, r.cellHeight, r.theme.Selection)
-				}
-
-				if cell.Width == grid.CellWidthContinuation {
-					continue
-				}
-
-				hidden := cell.Flags&grid.FlagHidden != 0
-				isBlock := isBlockElement(cell.Char)
-				// Block-element chars and the cursor cell are drawn immediately
-				// in pass 2; everything else is a batched glyph. A glyph
-				// missing from the monochrome font is tried as a color emoji
-				// before the '?' fallback.
-				needGlyph := !hidden && cell.Char != ' ' && cell.Char != 0 && !isBlock
-				hovered := row == hoverRow && col >= r.hoverStartCol && col <= r.hoverEndCol
-				needDecor := !hidden && (isBlock || hovered ||
-					cell.Flags&(grid.FlagUnderline|grid.FlagStrikethrough) != 0)
-				if !needGlyph && !needDecor {
-					continue
-				}
-
-				// Resolve the fg color exactly once for both the glyph and the
-				// pass-2 decorations.
-				fgColor := r.colorToRGBA(cell.Fg, false)
-				if cell.Flags&grid.FlagInverse != 0 {
-					fgColor = r.colorToRGBA(cell.Bg, true)
-				}
-				if cell.Flags&grid.FlagDim != 0 {
-					fgColor[3] = fgColor[3] / 2
-				}
-				if needDecor {
-					r.pass2 = append(r.pass2, pass2Item{
-						col: col, row: row, x: x, y: y, fg: fgColor, hovered: hovered,
-					})
-				}
-
-				if needGlyph {
-					g, ok := r.resolveGlyph(cell.Char)
-					if !ok {
-						if cg, isColor := r.ensureColorGlyph(cell.Char); isColor {
-							span := 1
-							if cell.Width == grid.CellWidthWide {
-								span = 2
-							}
-							r.colorDraws = append(r.colorDraws, colorDrawItem{
-								x: x, yTop: y, span: span, cg: cg, alpha: fgColor[3],
-							})
-						} else {
-							g, ok = r.ensureGlyph('?')
-						}
-					}
-					if ok && g.PixelWidth > 0 {
-						// Available span: wide chars own two cells; icons may
-						// also use a following blank cell (Ghostty-style), which
-						// is how Nerd Font icons are typically spaced in TUIs.
-						span := 1
-						if cell.Width == grid.CellWidthWide {
-							span = 2
-						} else if isIconRune(cell.Char) && col+1 < cols {
-							next := snap.Cells[row*cols+col+1]
-							if next.Char == ' ' || next.Char == 0 {
-								span = 2
-							}
-						}
-						if span == 2 && x+2*r.cellWidth > offsetX+paneWidth {
-							span = 1
-						}
-						gx, gyTop, gw, gh := r.glyphQuad(cell.Char, g, x, y, span)
-						var shear float32
-						if r.fauxItalic && cell.Flags&grid.FlagItalic != 0 {
-							shear = gh * 0.2
-						}
-						r.gridGlyphs.addGlyph(gx, gyTop+gh, gw, gh,
-							g.X, g.Y, g.Width, g.Height, fgColor, shear)
-						if r.fauxBold && cell.Flags&grid.FlagBold != 0 {
-							r.gridGlyphs.addGlyph(gx+1, gyTop+gh, gw, gh,
-								g.X, g.Y, g.Width, g.Height, fgColor, shear)
-						}
-					}
-				}
-			}
-		}
+		r.buildGridBatches(snap, offsetX, offsetY, paneWidth, paneHeight, hoverRow)
 		if r.atlasGen == startGen || attempt > 0 {
 			break
 		}
@@ -2861,6 +2932,161 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 	}
 }
 
+// fitCells returns how many leading cells of size sz, laid out from offset,
+// satisfy offset+float32(i)*sz+sz <= limit. This is exactly the clip predicate
+// renderGridAt historically applied per cell, hoisted out of the loop: for
+// sz > 0 the left side is non-decreasing in i (float add/multiply are
+// monotonic), so a binary search over the identical expression yields the
+// same set of visible cells.
+func fitCells(offset, sz float32, n int, limit float32) int {
+	if sz <= 0 || n <= 0 {
+		return 0
+	}
+	lo, hi := 0, n
+	for lo < hi {
+		mid := int(uint(lo+hi) >> 1)
+		if offset+float32(mid)*sz+sz > limit {
+			hi = mid
+		} else {
+			lo = mid + 1
+		}
+	}
+	return lo
+}
+
+// buildGridBatches fills gridRects, gridGlyphs, colorDraws and pass2 from the
+// snapshot — everything pass 1 of renderGridAt records. It performs no GL
+// calls of its own, but a glyph cache miss may rasterize (and grow the
+// atlas), so the caller re-runs it when atlasGen changes mid-pass.
+func (r *Renderer) buildGridBatches(snap *grid.Snapshot, offsetX, offsetY, paneWidth, paneHeight float32, hoverRow int) {
+	cols := snap.Cols
+
+	r.gridRects.reset()
+	r.gridGlyphs.reset()
+	r.colorDraws = r.colorDraws[:0]
+	r.pass2 = r.pass2[:0]
+
+	// Hoist the pane-clip check: cells past these limits produce no output.
+	maxCol := fitCells(offsetX, r.cellWidth, cols, offsetX+paneWidth)
+	maxRow := fitCells(offsetY, r.cellHeight, snap.Rows, offsetY+paneHeight)
+
+	selActive := snap.SelActive
+	selColor := r.theme.Selection
+	bgTheme := r.theme.Background
+	fgTheme := r.theme.Foreground
+	rectW := r.cellWidth + 0.5
+
+	for row := range maxRow {
+		rowCells := snap.Cells[row*cols : row*cols+cols]
+		y := offsetY + float32(row)*r.cellHeight
+		rowHovered := row == hoverRow
+		for col := range maxCol {
+			cell := rowCells[col]
+			x := offsetX + float32(col)*r.cellWidth
+
+			inverse := cell.Flags&grid.FlagInverse != 0
+			// Fast path: a default background without inverse is exactly the
+			// theme background, which draws no rect — skip the color math.
+			if cell.Bg.Type != grid.ColorDefault || inverse {
+				bgColor := r.colorToRGBA(cell.Bg, true)
+				if inverse {
+					bgColor = r.colorToRGBA(cell.Fg, false)
+				}
+				if bgColor != bgTheme {
+					r.gridRects.addRect(x, y, rectW, r.cellHeight, bgColor)
+				}
+			}
+			if selActive && snap.Selected(col, row) {
+				r.gridRects.addRect(x, y, rectW, r.cellHeight, selColor)
+			}
+
+			if cell.Width == grid.CellWidthContinuation {
+				continue
+			}
+
+			hidden := cell.Flags&grid.FlagHidden != 0
+			isBlock := isBlockElement(cell.Char)
+			// Block-element chars and the cursor cell are drawn immediately
+			// in pass 2; everything else is a batched glyph. A glyph
+			// missing from the monochrome font is tried as a color emoji
+			// before the '?' fallback.
+			needGlyph := !hidden && cell.Char != ' ' && cell.Char != 0 && !isBlock
+			hovered := rowHovered && col >= r.hoverStartCol && col <= r.hoverEndCol
+			needDecor := !hidden && (isBlock || hovered ||
+				cell.Flags&(grid.FlagUnderline|grid.FlagStrikethrough) != 0)
+			if !needGlyph && !needDecor {
+				continue
+			}
+
+			// Resolve the fg color exactly once for both the glyph and the
+			// pass-2 decorations. Fast path: default fg without inverse or
+			// dim is exactly the theme foreground.
+			var fgColor [4]float32
+			if cell.Fg.Type == grid.ColorDefault && cell.Flags&(grid.FlagInverse|grid.FlagDim) == 0 {
+				fgColor = fgTheme
+			} else {
+				fgColor = r.colorToRGBA(cell.Fg, false)
+				if inverse {
+					fgColor = r.colorToRGBA(cell.Bg, true)
+				}
+				if cell.Flags&grid.FlagDim != 0 {
+					fgColor[3] = fgColor[3] / 2
+				}
+			}
+			if needDecor {
+				r.pass2 = append(r.pass2, pass2Item{
+					col: col, row: row, x: x, y: y, fg: fgColor, hovered: hovered,
+				})
+			}
+
+			if needGlyph {
+				g, ok := r.resolveGlyph(cell.Char)
+				if !ok {
+					if cg, isColor := r.ensureColorGlyph(cell.Char); isColor {
+						span := 1
+						if cell.Width == grid.CellWidthWide {
+							span = 2
+						}
+						r.colorDraws = append(r.colorDraws, colorDrawItem{
+							x: x, yTop: y, span: span, cg: cg, alpha: fgColor[3],
+						})
+					} else {
+						g, ok = r.ensureGlyph('?')
+					}
+				}
+				if ok && g.PixelWidth > 0 {
+					// Available span: wide chars own two cells; icons may
+					// also use a following blank cell (Ghostty-style), which
+					// is how Nerd Font icons are typically spaced in TUIs.
+					span := 1
+					if cell.Width == grid.CellWidthWide {
+						span = 2
+					} else if isIconRune(cell.Char) && col+1 < cols {
+						next := rowCells[col+1]
+						if next.Char == ' ' || next.Char == 0 {
+							span = 2
+						}
+					}
+					if span == 2 && x+2*r.cellWidth > offsetX+paneWidth {
+						span = 1
+					}
+					gx, gyTop, gw, gh := r.glyphQuad(cell.Char, g, x, y, span)
+					var shear float32
+					if r.fauxItalic && cell.Flags&grid.FlagItalic != 0 {
+						shear = gh * 0.2
+					}
+					r.gridGlyphs.addGlyph(gx, gyTop+gh, gw, gh,
+						g.X, g.Y, g.Width, g.Height, fgColor, shear)
+					if r.fauxBold && cell.Flags&grid.FlagBold != 0 {
+						r.gridGlyphs.addGlyph(gx+1, gyTop+gh, gw, gh,
+							g.X, g.Y, g.Width, g.Height, fgColor, shear)
+					}
+				}
+			}
+		}
+	}
+}
+
 // SetHoverURL sets the hover underline range for a grid. Latches a redraw
 // only when the hover state actually changes (it is called on every mouse
 // move).
@@ -2926,6 +3152,41 @@ func (r *Renderer) DrawToast(message string, width, height int) {
 
 	r.drawRect(x, y, boxW, boxH, bg, proj)
 	r.drawText(x+paddingX, y+boxH-paddingY, message, r.theme.Foreground, proj)
+}
+
+// DrawFindBar renders the scrollback find prompt: a bar pinned to the bottom
+// of the window showing the query and a match counter. It is drawn on the left
+// so it does not collide with the toast, which occupies the bottom-right.
+// status is the right-aligned counter text (e.g. "3/17" or "no matches").
+func (r *Renderer) DrawFindBar(query, status string, width, height int) {
+	proj := orthoMatrix(0, float32(width), float32(height), 0, -1, 1)
+
+	paddingX := r.cellWidth * 0.8
+	paddingY := r.cellHeight * 0.35
+	boxH := r.cellHeight + paddingY*2
+	margin := r.cellWidth * 0.8
+
+	// A block cursor after the query marks the bar as the input focus; without
+	// it an empty prompt looks inert.
+	text := "find: " + query + "█"
+	boxW := float32(len([]rune(text))+len([]rune(status))+2)*r.cellWidth + paddingX*2
+	if maxW := float32(width) - margin*2; boxW > maxW {
+		boxW = maxW
+	}
+
+	x := margin
+	y := float32(height) - boxH - margin
+	bg := r.theme.TabBar
+	bg[3] = 0.95
+	r.drawRect(x, y, boxW, boxH, bg, proj)
+	r.drawRect(x, y, 3, boxH, r.theme.TabActive, proj)
+
+	baseline := y + boxH - paddingY
+	r.drawText(x+paddingX, baseline, text, r.theme.Foreground, proj)
+	if status != "" {
+		statusX := x + boxW - paddingX - float32(len([]rune(status)))*r.cellWidth
+		r.drawText(statusX, baseline, status, withAlpha(r.theme.Foreground, 0.6), proj)
+	}
 }
 
 // drawRect draws a colored rectangle
@@ -3130,6 +3391,16 @@ func (r *Renderer) drawBlockElement(x, y float32, char rune, clr [4]float32, pro
 // unicode-to-ASCII fallbacks, but WITHOUT the '?' last resort — so callers can
 // try the color-emoji path before giving up on a missing glyph.
 func (r *Renderer) resolveGlyph(char rune) (Glyph, bool) {
+	// ASCII fast path: neither fallback table has keys < 128, so resolution
+	// is exactly ensureGlyph; serve it from the flat cache instead of the map.
+	if char >= 0 && char < 128 {
+		slot := &r.asciiCache[char]
+		if !slot.resolved {
+			slot.g, slot.ok = r.ensureGlyph(char)
+			slot.resolved = true
+		}
+		return slot.g, slot.ok
+	}
 	if glyph, ok := r.ensureGlyph(char); ok {
 		return glyph, true
 	}
@@ -3265,8 +3536,8 @@ func truncateHeadToCells(s string, max int) string {
 	budget := max - 3
 	runes := []rune(s)
 	w := 0
-	for i := len(runes) - 1; i >= 0; i-- {
-		cw := grid.RuneWidth(runes[i])
+	for i, rune := range slices.Backward(runes) {
+		cw := grid.RuneWidth(rune)
 		if w+cw > budget {
 			return "..." + string(runes[i+1:])
 		}

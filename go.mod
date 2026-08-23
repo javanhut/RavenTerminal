@@ -1,6 +1,6 @@
 module github.com/javanhut/RavenTerminal
 
-go 1.25.0
+go 1.27.0
 
 require (
 	github.com/BurntSushi/toml v1.6.0
@@ -11,8 +11,16 @@ require (
 	github.com/rivo/uniseg v0.4.7
 	github.com/srwiley/oksvg v0.0.0-20221011165216-be6e8873101c
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef
-	golang.org/x/image v0.39.0
-	golang.org/x/net v0.55.0
+	golang.org/x/image v0.45.0
+	golang.org/x/net v0.58.0
 )
 
-require golang.org/x/text v0.37.0 // indirect
+require (
+	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
+)
+
+// Patched go-gl/glfw: backports GLFW 3.4's xdg_toplevel_set_app_id on Wayland
+// (reusing the X11 class-name hint) so KDE/GNOME match the running window to
+// raven-terminal.desktop and show the correct icon. Drop when go-gl ships 3.4.
+replace github.com/go-gl/glfw/v3.3/glfw => ./third_party/glfw

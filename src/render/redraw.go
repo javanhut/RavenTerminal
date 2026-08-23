@@ -17,12 +17,17 @@ package render
 //     DECTCEM visibility, or blink pausing on focus/typing)
 //   - SelectionDragging:  a mouse selection drag is in progress (edge
 //     auto-scroll repaints)
+//   - TabDragging:        a tab-bar drag-reorder is in progress (the reordered
+//     chips must repaint even when nothing else is dirty)
 //   - ToastVisible:       a toast overlay is showing (it renders with a
 //     time-based fade/expiry)
 //   - ToastJustExpired:   the toast expired since the last frame (one repaint
 //     to erase it)
 //   - MenuOpen/SearchPanelOpen/AIPanelOpen/HelpOpen: an overlay panel is open
 //     (panels stream/animate content outside the grid dirty tracking)
+//   - FindBarOpen:        the scrollback find bar is up (its query text and
+//     match counter change on keystrokes, outside the grid dirty tracking),
+//     or it closed since the last frame (one repaint to erase it)
 //   - SizeChanged:        the framebuffer size changed (resize)
 //   - FocusChanged:       window focus changed (affects cursor rendering)
 //   - ScaleChanged:       the monitor content scale changed (HiDPI move)
@@ -38,12 +43,14 @@ type RedrawTriggers struct {
 	ActiveTabChanged   bool
 	CursorPhaseChanged bool
 	SelectionDragging  bool
+	TabDragging        bool
 	ToastVisible       bool
 	ToastJustExpired   bool
 	MenuOpen           bool
 	SearchPanelOpen    bool
 	AIPanelOpen        bool
 	HelpOpen           bool
+	FindBarOpen        bool
 	SizeChanged        bool
 	FocusChanged       bool
 	ScaleChanged       bool

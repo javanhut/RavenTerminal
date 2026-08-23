@@ -12,6 +12,9 @@ default = "all"
 [variables]
 app_name = "raven-terminal"
 scripts_dir = "scripts"
+# Display backend for the GLFW build: auto | wayland | x11.
+# Override per-run: imlazy build backend=wayland
+backend = "auto"
 blue = "\\033[0;34m"
 green = "\\033[0;32m"
 yellow = "\\033[1;33m"
@@ -24,22 +27,40 @@ nc = "\\033[0m"
 desc = "Default target"
 dep = ["build"]
 
+# The Makefile picks a GLFW backend via `ifeq` on BACKEND/XDG_SESSION_TYPE and
+# turns it into `-tags wayland`. `imlazy migrate` dropped that, so this rebuilt
+# it as portable shell — same rules, same default. Without it every build is
+# X11-only, which silently fails on a Wayland-only compositor (no XWayland).
 [commands.build]
-desc = "Build the application"
-run = [
-  "echo -e \"{{blue}}[INFO]{{nc}} Building {{app_name}}...\"",
-  "go build -o {{app_name}} ./src",
-  "chmod +x {{app_name}}",
-  "echo -e \"{{green}}[OK]{{nc}} Build successful: ./{{app_name}}\"",
-]
+desc = "Build the application (backend: auto | wayland | x11)"
+run = ["""
+backend="{{backend}}"
+if [ "$backend" = "auto" ]; then
+  if [ "$XDG_SESSION_TYPE" = "wayland" ] && pkg-config --exists wayland-client xkbcommon 2>/dev/null; then
+    backend=wayland
+  else
+    backend=x11
+  fi
+fi
+if [ "$backend" = "wayland" ]; then tags="-tags wayland"; else tags=""; fi
+echo -e "{{blue}}[INFO]{{nc}} Building {{app_name}} (backend: $backend)..."
+go build $tags -o {{app_name}} ./src
+chmod +x {{app_name}}
+echo -e "{{green}}[OK]{{nc}} Build successful: ./{{app_name}} ($backend)"
+"""]
 
+# RAVEN_BACKEND is passed explicitly because install.sh rebuilds from source
+# rather than using the binary `build` just produced, and its own auto-detection
+# reads XDG_SESSION_TYPE — which is "tty" over ssh and stripped entirely by
+# sudo. Without this, `imlazy install backend=wayland` builds Wayland, then
+# installs an x11 binary over it.
 [commands.install]
 desc = "Install system-wide (clean install - uninstalls first)"
 dep = ["build"]
 run = [
   "echo -e \"{{blue}}[INFO]{{nc}} Performing clean global install...\"",
   "{{scripts_dir}}/uninstall.sh --all --force 2>/dev/null || true",
-  "{{scripts_dir}}/install.sh --global",
+  "RAVEN_BACKEND={{backend}} {{scripts_dir}}/install.sh --global",
 ]
 
 [commands.install-local]
@@ -48,16 +69,16 @@ dep = ["build"]
 run = [
   "echo -e \"{{blue}}[INFO]{{nc}} Performing clean user install...\"",
   "{{scripts_dir}}/uninstall.sh --all --force 2>/dev/null || true",
-  "{{scripts_dir}}/install.sh --user",
+  "RAVEN_BACKEND={{backend}} {{scripts_dir}}/install.sh --user",
 ]
 
 [commands.fresh]
 desc = "Fresh install system-wide: purge everything (config, caches, old binaries, running instances), build from scratch, install, and verify"
-run = ["{{scripts_dir}}/clean-install.sh --global"]
+run = ["RAVEN_BACKEND={{backend}} {{scripts_dir}}/clean-install.sh --global"]
 
 [commands.fresh-local]
 desc = "Fresh install for current user: same full purge, user-level install"
-run = ["{{scripts_dir}}/clean-install.sh --user"]
+run = ["RAVEN_BACKEND={{backend}} {{scripts_dir}}/clean-install.sh --user"]
 
 [commands.purge]
 desc = "Remove every trace of raven-terminal (installs, config, caches, instances)"

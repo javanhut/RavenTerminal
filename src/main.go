@@ -233,6 +233,22 @@ type mouseSelection struct {
 	clickCount    int
 }
 
+// tabDragState tracks a press on a tab-bar chip: pending until the cursor
+// moves past a small threshold, then active while the tab is live-reordered.
+type tabDragState struct {
+	pending bool
+	active  bool
+	index   int      // current slot of the dragged tab
+	tab     *tab.Tab // identity of the dragged tab; its slot changes as it moves
+	startX  float64  // logical cursor X at press
+	startY  float64  // logical cursor Y at press
+}
+
+func dragThresholdPassed(startX, startY, x, y, threshold float64) bool {
+	dx, dy := x-startX, y-startY
+	return dx*dx+dy*dy > threshold*threshold
+}
+
 // mouseReportState tracks a mouse press that was forwarded to the application
 // (mouse tracking modes 1000/1002/1003), so the matching release and drag
 // motion go to the same pane, and motion is throttled to cell changes.
@@ -275,9 +291,9 @@ func previewCacheKey(useProxy bool, url string) string {
 }
 
 func main() {
-	app := newApp()
-	defer app.Destroy()
-	app.Run()
+	// runApps owns the lifetime of every window, including destroying each one
+	// as it closes and terminating GLFW after the last.
+	runApps(newApp())
 }
 
 // writePaste sends clipboard text to a terminal, normalizing newlines and,

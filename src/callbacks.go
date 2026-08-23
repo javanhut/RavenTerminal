@@ -81,6 +81,44 @@ func (a *App) onKey(w *glfw.Window, key glfw.Key, scancode int, action glfw.Acti
 		return
 	}
 
+	// Find bar owns the keyboard while it is up: it is a modal prompt, so
+	// Enter/Escape/Backspace edit the search rather than reaching the shell.
+	// Printable runes arrive via onChar. Checked before the panels so the bar
+	// can be dismissed from anywhere.
+	if a.find.open {
+		switch key {
+		case glfw.KeyEscape:
+			a.closeFind()
+			return
+		case glfw.KeyEnter, glfw.KeyKPEnter:
+			if mods&glfw.ModShift != 0 {
+				a.findStep(-1)
+			} else {
+				a.findStep(1)
+			}
+			return
+		case glfw.KeyBackspace:
+			if q := []rune(a.find.query); len(q) > 0 {
+				a.find.query = string(q[:len(q)-1])
+				a.runFind()
+			}
+			return
+		case glfw.KeyUp:
+			a.findStep(-1)
+			return
+		case glfw.KeyDown:
+			a.findStep(1)
+			return
+		}
+		// Super+Shift+F again closes the bar, matching the toggle it opened with.
+		if keybindings.TranslateKey(key, mods, false).Action == keybindings.ActionFindInScrollback {
+			a.closeFind()
+			return
+		}
+		// Everything else (app shortcuts, plain modifiers) falls through so
+		// e.g. Cmd+C still copies the highlighted match.
+	}
+
 	// Handle settings menu input when open
 	if a.settingsMenu.IsOpen() {
 		appCursor := activeTab.Terminal.AppCursorKeys()
@@ -95,10 +133,47 @@ func (a *App) onKey(w *glfw.Window, key glfw.Key, scancode int, action glfw.Acti
 		}
 		switch key {
 		case glfw.KeyUp:
+			// While editing, Up/Down walk the text: line-wise in a multi-line
+			// field, start/end-of-text in a single-line one (where there is no
+			// line to move to).
+			if a.settingsMenu.InputMode() {
+				if !a.settingsMenu.MoveInputLine(-1) {
+					a.settingsMenu.MoveInputHome()
+				}
+				return
+			}
 			a.settingsMenu.MoveUp()
 			return
 		case glfw.KeyDown:
+			if a.settingsMenu.InputMode() {
+				if !a.settingsMenu.MoveInputLine(1) {
+					a.settingsMenu.MoveInputEnd()
+				}
+				return
+			}
 			a.settingsMenu.MoveDown()
+			return
+		case glfw.KeyLeft:
+			// Cmd/Ctrl+Left jumps to the start of the line, matching the
+			// platform convention; both are no-ops outside input mode.
+			if mods&(glfw.ModSuper|glfw.ModControl) != 0 {
+				a.settingsMenu.MoveInputHome()
+			} else {
+				a.settingsMenu.MoveInputCursor(-1)
+			}
+			return
+		case glfw.KeyRight:
+			if mods&(glfw.ModSuper|glfw.ModControl) != 0 {
+				a.settingsMenu.MoveInputEnd()
+			} else {
+				a.settingsMenu.MoveInputCursor(1)
+			}
+			return
+		case glfw.KeyHome:
+			a.settingsMenu.MoveInputHome()
+			return
+		case glfw.KeyEnd:
+			a.settingsMenu.MoveInputEnd()
 			return
 		case glfw.KeyEnter, glfw.KeyKPEnter:
 			if action == glfw.Repeat {
@@ -797,15 +872,16 @@ handleTerminalInput:
 	case keybindings.ActionScrollDownLine:
 		activeTab.Terminal.GetGrid().ScrollViewDown(1)
 	case keybindings.ActionToggleFullscreen:
+		if action == glfw.Repeat {
+			// Key repeat would fire this ~30x/second while Shift+Enter is held,
+			// flapping the window between states faster than the OS can finish
+			// a transition. Toggling is a discrete action; only the press counts.
+			return
+		}
 		a.win.ToggleFullscreen()
-		// Re-fit immediately: the framebuffer-size callback isn't reliably
-		// delivered on fullscreen<->windowed (or cross-monitor) transitions,
-		// so without this the grid keeps the old column count and a
-		// full-screen TUI overflows the new viewport. ponytail: same pattern
-		// as the zoom handlers.
-		width, height := a.win.GetFramebufferSize()
-		cols, rows := a.renderer.CalculateGridSize(width, height)
-		a.tabManager.ResizeAll(uint16(cols), uint16(rows))
+		// No re-fit here: the transition may not have been applied yet (macOS
+		// animates it), so the size read now can be the pre-toggle one. fitGrid
+		// runs every tick and converges once the new size is real.
 	case keybindings.ActionCopy:
 		// No selection: leave the clipboard alone.
 		if text := activeTab.Terminal.GetGrid().SelectedText(); text != "" {
@@ -857,24 +933,15 @@ handleTerminalInput:
 		}
 	case keybindings.ActionZoomIn:
 		if err := a.renderer.ZoomIn(); err == nil {
-			// Recalculate grid size after zoom
-			width, height := a.win.GetFramebufferSize()
-			cols, rows := a.renderer.CalculateGridSize(width, height)
-			a.tabManager.ResizeAll(uint16(cols), uint16(rows))
+			a.fitGrid() // cells changed size, so the grid no longer fits
 		}
 	case keybindings.ActionZoomOut:
 		if err := a.renderer.ZoomOut(); err == nil {
-			// Recalculate grid size after zoom
-			width, height := a.win.GetFramebufferSize()
-			cols, rows := a.renderer.CalculateGridSize(width, height)
-			a.tabManager.ResizeAll(uint16(cols), uint16(rows))
+			a.fitGrid()
 		}
 	case keybindings.ActionZoomReset:
 		if err := a.renderer.ZoomReset(); err == nil {
-			// Recalculate grid size after zoom
-			width, height := a.win.GetFramebufferSize()
-			cols, rows := a.renderer.CalculateGridSize(width, height)
-			a.tabManager.ResizeAll(uint16(cols), uint16(rows))
+			a.fitGrid()
 		}
 	case keybindings.ActionOpenMenu:
 		if a.settingsMenu.IsOpen() {
@@ -886,6 +953,8 @@ handleTerminalInput:
 		}
 	case keybindings.ActionToggleResizeMode:
 		a.resizeMode = !a.resizeMode
+	case keybindings.ActionFindInScrollback:
+		a.openFind()
 	case keybindings.ActionToggleSearchPanel:
 		if !a.searchPanel.Enabled {
 			a.showToast("Enable web search in settings")
@@ -920,6 +989,13 @@ func (a *App) onChar(w *glfw.Window, char rune) {
 	// Ignore Cmd/Super-modified keys: they are app shortcuts (handled in the key
 	// callback), never text input. Prevents e.g. Cmd+T from also typing "t".
 	if a.currentMods&glfw.ModSuper != 0 {
+		return
+	}
+
+	// Find bar: printable runes extend the query and re-run the search.
+	if a.find.open {
+		a.find.query += string(char)
+		a.runFind()
 		return
 	}
 
@@ -980,15 +1056,31 @@ func (a *App) onChar(w *glfw.Window, char rune) {
 	a.lastInput = time.Now() // hold the cursor solid right after typing
 }
 
+// onFramebufferSize keeps the grid responsive during a live drag-resize, when
+// the platform runs a modal event loop and the main loop (and so fitGrid) does
+// not get to tick until the drag ends. It is an optimization, not the source of
+// truth — fitGrid re-checks the real size every tick regardless.
+//
+// It deliberately does not touch the GL viewport: this fires from event
+// dispatch, where the current GL context may belong to a different window, and
+// renderFrame sets the viewport on the right context before every draw anyway.
 func (a *App) onFramebufferSize(w *glfw.Window, width, height int) {
-	a.win.SetViewport(width, height)
-	cols, rows := a.renderer.CalculateGridSize(width, height)
-	a.tabManager.ResizeAll(uint16(cols), uint16(rows))
+	a.fitGrid()
 }
 
 func (a *App) onScroll(w *glfw.Window, xoff, yoff float64) {
 	if a.settingsMenu.IsOpen() {
 		if a.settingsMenu.InputMode() {
+			// The text view follows the caret, so scrolling a multi-line field
+			// means walking the caret by line.
+			steps := max(int(math.Abs(yoff)), 1)
+			for range steps {
+				if yoff > 0 {
+					a.settingsMenu.MoveInputLine(-1)
+				} else if yoff < 0 {
+					a.settingsMenu.MoveInputLine(1)
+				}
+			}
 			return
 		}
 		if a.debugMenu {
@@ -1225,6 +1317,13 @@ func (a *App) onMouseButton(w *glfw.Window, button glfw.MouseButton, action glfw
 					a.tabManager.NewTab()
 				} else {
 					a.tabManager.SelectTab(idx)
+					// Capture the tab by pointer: its slot index changes as the
+					// drag reorders the strip, but its identity does not.
+					var dragged *tab.Tab
+					if tabs := a.tabManager.GetTabs(); idx < len(tabs) {
+						dragged = tabs[idx]
+					}
+					a.tabDrag = tabDragState{pending: true, index: idx, tab: dragged, startX: x, startY: y}
 				}
 				return
 			}
@@ -1297,6 +1396,22 @@ func (a *App) onMouseButton(w *glfw.Window, button glfw.MouseButton, action glfw
 			}
 			activeTab.SetActivePane(pane)
 		case glfw.Release:
+			// A tab-bar drag ends here; the reorder already happened live.
+			// Releasing well clear of the strip tears the tab off into its own
+			// window instead, carrying its running shells with it.
+			if a.tabDrag.pending || a.tabDrag.active {
+				dragged := a.tabDrag
+				a.tabDrag = tabDragState{}
+				// Release the chip back into the animation so it eases into
+				// its final slot instead of staying pinned to the cursor.
+				a.renderer.SetTabDrag(nil)
+				if dragged.active && x > a.renderer.TabBarWidthLogical()+tearOffThreshold {
+					if !a.detachTabAt(dragged.index) {
+						a.showToast("Can't tear off the last tab")
+					}
+				}
+				return
+			}
 			// Handle AI panel text selection release
 			if a.aiPanel.SelectionActive {
 				cellW, cellH := a.renderer.CellDimensions()
@@ -1451,6 +1566,27 @@ func (a *App) onCursorPos(w *glfw.Window, xpos, ypos float64) {
 	activeTab := a.tabManager.ActiveTab()
 	if activeTab == nil {
 		a.renderer.ClearHoverURL()
+		return
+	}
+
+	// Tab-bar drag: once the cursor moves past a small threshold, live-reorder
+	// the dragged chip as it crosses slot boundaries.
+	if a.tabDrag.pending || a.tabDrag.active {
+		if a.tabDrag.pending {
+			const threshold = 5.0
+			if dragThresholdPassed(a.tabDrag.startX, a.tabDrag.startY, xpos, ypos, threshold) {
+				a.tabDrag.pending = false
+				a.tabDrag.active = true
+				a.renderer.SetTabDrag(a.tabDrag.tab)
+			} else {
+				return
+			}
+		}
+		target := a.renderer.TabDropIndex(a.tabManager, ypos)
+		if target != a.tabDrag.index {
+			a.tabManager.MoveTab(a.tabDrag.index, target)
+			a.tabDrag.index = target
+		}
 		return
 	}
 

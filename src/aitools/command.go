@@ -313,8 +313,7 @@ func (r *Registry) execReadOnly(ctx context.Context, argv []string) (string, err
 		text = text[:maxCommandOutput] + "\n... (output truncated)"
 	}
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if _, ok := errors.AsType[*exec.ExitError](err); ok {
 			// A non-zero exit is information, not a tool failure: `which rg`
 			// exiting 1 means "not installed", grep exiting 1 means "no
 			// matches". Report it as content so the model can reason on it.

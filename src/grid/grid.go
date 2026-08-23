@@ -104,8 +104,10 @@ func NewCellWithBg(bg Color) Cell {
 // Grid represents the terminal grid buffer
 type Grid struct {
 	rows         []*Row // active on-screen area, len == Rows
-	history      []*Row // scrollback (oldest first)
+	history      []*Row // scrollback (oldest first), a window into histBuf
+	histBuf      []*Row // backing store for history; see pushHistory
 	maxScroll    int    // history cap in rows (0 = no scrollback, e.g. alt screen)
+	freeRows     []*Row // recycled row allocations, all at current width
 	styles       *styleSet
 	Cols         int
 	Rows         int
@@ -120,13 +122,9 @@ type Grid struct {
 	wrapPending  bool
 
 	// Last written character for REP sequence
-	lastChar           rune
-	lastFg             Color
-	lastBg             Color
-	lastFlags          CellFlags
-	lastLink           uint16
-	lastUnderlineStyle uint8
-	lastUnderlineColor Color
+	lastChar  rune
+	lastStyle Style
+	lastLink  uint16
 
 	// OSC 8 hyperlink interning: url <-> compact id stored on cells
 	links      map[string]uint16
@@ -154,15 +152,6 @@ type Grid struct {
 	selEndAbsRow    int // current drag end (may precede the anchor)
 	selEndCol       int
 
-	// Viewport-relative projection of the absolute selection, refreshed by
-	// SyncSelectionView. Exists only because snapshot.go reads these fields
-	// directly; all selection logic in this file uses the absolute anchors.
-	selectionStartCol     int
-	selectionStartRow     int
-	selectionEndCol       int
-	selectionEndRow       int
-	selectionScrollOffset int
-
 	// Auto-wrap mode (DECAWM ?7) - default true
 	autoWrap bool
 
@@ -180,6 +169,11 @@ type Grid struct {
 	// lastSnap records the visible state captured by the most recent Snapshot,
 	// so RedrawNeeded can cheaply peek for changes without clearing anything.
 	lastSnap snapState
+
+	// snapInvalid forces the next Snapshot to fully re-copy the visible region
+	// instead of only dirty rows. Set by paths that change the row-to-display
+	// mapping without marking every affected row dirty (view scrolling, reflow).
+	snapInvalid bool
 }
 
 // snapState is the non-content visible state recorded at Snapshot time
@@ -260,6 +254,15 @@ func (g *Grid) InternLink(url string) uint16 {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	return g.InternLinkLocked(url)
+}
+
+// InternLinkLocked is InternLink without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) InternLinkLocked(url string) uint16 {
+	if url == "" {
+		return 0
+	}
 	if g.links == nil {
 		g.links = make(map[string]uint16)
 		g.linkURLs = make(map[uint16]string)
@@ -287,11 +290,39 @@ func (g *Grid) LinkURL(id uint16) string {
 	return g.linkURLs[id]
 }
 
+// LockBatch acquires g.mu (write) for a multi-operation batch, letting the
+// caller run the exported XxxLocked variants without paying a lock/unlock per
+// operation. The parser uses this to hold the grid lock across a whole PTY
+// chunk instead of once per grid op. Pair every LockBatch with exactly one
+// UnlockBatch; while the batch is held, ONLY XxxLocked methods may be called
+// on this grid (the locking public methods would self-deadlock).
+//
+// LOCK ORDER: Grid.mu is a leaf lock — grid code never calls out of the
+// package. Terminal.mu is always acquired before Grid.mu (see
+// parser.Terminal.Process / Snapshot); never take Terminal.mu while holding
+// Grid.mu.
+func (g *Grid) LockBatch() {
+	g.mu.Lock()
+}
+
+// UnlockBatch releases the lock acquired by LockBatch.
+func (g *Grid) UnlockBatch() {
+	g.mu.Unlock()
+}
+
 // WriteChar writes a character at the cursor position and advances
 func (g *Grid) WriteChar(c rune, fg, bg Color, flags CellFlags, link uint16, ulStyle uint8, ulColor Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.writeCharLocked(c, fg, bg, flags, link, ulStyle, ulColor)
+	g.WriteCharLocked(c, fg, bg, flags, link, ulStyle, ulColor)
+}
+
+// WriteCharLocked is WriteChar without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) WriteCharLocked(c rune, fg, bg Color, flags CellFlags, link uint16, ulStyle uint8, ulColor Color) {
+	sr := g.styles.ref(Style{Fg: fg, Bg: bg, UnderlineColor: ulColor, Flags: flags, UnderlineStyle: ulStyle})
+	g.writeCharLocked(c, &sr, link)
+	g.styles.done(sr)
 }
 
 // WriteRunes writes a run of runes sharing the same attributes, taking g.mu
@@ -305,13 +336,25 @@ func (g *Grid) WriteChar(c rune, fg, bg Color, flags CellFlags, link uint16, ulS
 func (g *Grid) WriteRunes(rs []rune, fg, bg Color, flags CellFlags, link uint16, ulStyle uint8, ulColor Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for _, c := range rs {
-		g.writeCharLocked(c, fg, bg, flags, link, ulStyle, ulColor)
-	}
+	g.WriteRunesLocked(rs, fg, bg, flags, link, ulStyle, ulColor)
 }
 
-// writeCharLocked is WriteChar's body; the caller must hold g.mu.
-func (g *Grid) writeCharLocked(c rune, fg, bg Color, flags CellFlags, link uint16, ulStyle uint8, ulColor Color) {
+// WriteRunesLocked is WriteRunes without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) WriteRunesLocked(rs []rune, fg, bg Color, flags CellFlags, link uint16, ulStyle uint8, ulColor Color) {
+	// Intern the shared style ONCE for the whole run; each cell then takes a
+	// reference through the handle rather than re-deriving and re-hashing it.
+	sr := g.styles.ref(Style{Fg: fg, Bg: bg, UnderlineColor: ulColor, Flags: flags, UnderlineStyle: ulStyle})
+	for _, c := range rs {
+		g.writeCharLocked(c, &sr, link)
+	}
+	g.styles.done(sr)
+}
+
+// writeCharLocked is WriteChar's body; the caller must hold g.mu and pass a
+// style handle it owns (see styleSet.ref). Each cell written takes its own
+// reference from sr; the caller releases the handle when its run is done.
+func (g *Grid) writeCharLocked(c rune, sr *styleRef, link uint16) {
 	if g.wrapPending {
 		if g.autoWrap {
 			// The line we're leaving continued because it filled the last
@@ -332,26 +375,30 @@ func (g *Grid) writeCharLocked(c rune, fg, bg Color, flags CellFlags, link uint1
 		}
 	}
 
-	// Get character width
-	charWidth := RuneWidth(c)
-	if charWidth == 0 {
-		// Zero-width codepoint (combining mark / ZWJ continuation): attach it to
-		// the most recently written cell instead of dropping it.
-		g.appendCombining(c)
-		return
+	// Get character width. Printable ASCII (0x20-0x7e, the overwhelming
+	// majority of terminal output) is always one cell; short-circuit it here
+	// because RuneWidth can't inline (its fallback calls uniseg). Everything
+	// else — controls, DEL, non-ASCII — goes through RuneWidth as before.
+	charWidth := 1
+	if c < 0x20 || c >= 0x7f {
+		charWidth = RuneWidth(c)
+		if charWidth == 0 {
+			// Zero-width codepoint (combining mark / ZWJ continuation): attach
+			// it to the most recently written cell instead of dropping it.
+			g.appendCombining(c)
+			return
+		}
 	}
 
 	// Check if wide character fits on current line
 	if charWidth == 2 && g.CursorCol >= g.Cols-1 {
 		if g.autoWrap {
-			// Wide char at last column - fill with space and wrap
-			idx := g.index(g.CursorCol, g.CursorRow)
-			g.putCell(idx, Cell{
-				Char:  ' ',
-				Fg:    g.lastFg,
-				Bg:    g.lastBg,
-				Width: CellWidthNormal,
-			})
+			// Wide char at last column - fill with space and wrap. The pad
+			// takes the incoming character's style (not the previous one, as
+			// g.lastStyle would give) so its background matches the cell it
+			// stands in for; otherwise full-screen redraws leave stale
+			// colors at the right edge.
+			g.putCellStyledRow(g.rows[g.CursorRow], g.CursorCol, ' ', sr.take(), CellWidthNormal, link)
 			// The line continues onto the next row: mark it soft-wrapped so
 			// reflow can rejoin it on resize.
 			g.rows[g.CursorRow].flags |= RowSoftWrapped
@@ -362,33 +409,16 @@ func (g *Grid) writeCharLocked(c rune, fg, bg Color, flags CellFlags, link uint1
 		}
 	}
 
-	// Write the character to current cell
-	idx := g.index(g.CursorCol, g.CursorRow)
-	g.putCell(idx, Cell{
-		Char:           c,
-		Fg:             fg,
-		Bg:             bg,
-		UnderlineColor: ulColor,
-		Flags:          flags,
-		Width:          uint8(charWidth),
-		UnderlineStyle: ulStyle,
-		Link:           link,
-	})
+	// Write the character to current cell. The cursor row/col are already known,
+	// so index the row's cell slice directly (as fillSpan does) instead of
+	// decoding a linear index with per-cell div/mod in cellAt/putCellStyled.
+	row := g.rows[g.CursorRow]
+	g.putCellStyledRow(row, g.CursorCol, c, sr.take(), uint8(charWidth), link)
 	g.CursorCol++
 
 	// If wide character, write continuation cell
 	if charWidth == 2 && g.CursorCol < g.Cols {
-		contIdx := g.index(g.CursorCol, g.CursorRow)
-		g.putCell(contIdx, Cell{
-			Char:           ' ', // Placeholder for continuation
-			Fg:             fg,
-			Bg:             bg,
-			UnderlineColor: ulColor,
-			Flags:          flags,
-			Width:          CellWidthContinuation,
-			UnderlineStyle: ulStyle,
-			Link:           link,
-		})
+		g.putCellStyledRow(row, g.CursorCol, ' ', sr.take(), CellWidthContinuation, link)
 		g.CursorCol++
 	}
 
@@ -402,12 +432,66 @@ func (g *Grid) writeCharLocked(c rune, fg, bg Color, flags CellFlags, link uint1
 
 	// Save for REP sequence
 	g.lastChar = c
-	g.lastFg = fg
-	g.lastBg = bg
-	g.lastFlags = flags
+	g.lastStyle = sr.style
 	g.lastLink = link
-	g.lastUnderlineStyle = ulStyle
-	g.lastUnderlineColor = ulColor
+}
+
+// WriteBytesLocked is WriteRunesLocked for a run of printable ASCII bytes
+// (0x20-0x7e), skipping the caller's byte->[]rune conversion pass: each byte
+// stores directly as rune(b). Callers must guarantee every byte is printable
+// ASCII (width is then always 1); the parser's fast path does. The caller must
+// hold g.mu (see LockBatch).
+func (g *Grid) WriteBytesLocked(bs []byte, fg, bg Color, flags CellFlags, link uint16, ulStyle uint8, ulColor Color) {
+	// Intern the shared style ONCE for the whole run, as in WriteRunesLocked.
+	sr := g.styles.ref(Style{Fg: fg, Bg: bg, UnderlineColor: ulColor, Flags: flags, UnderlineStyle: ulStyle})
+	for _, b := range bs {
+		g.writeByteLocked(b, &sr, link)
+	}
+	g.styles.done(sr)
+}
+
+// writeByteLocked is writeCharLocked specialized for a printable ASCII byte
+// (0x20-0x7e): width is always 1, so the width lookup, combining-mark, and
+// wide-char branches are provably unreachable and dropped. The wrap,
+// wrap-pending, dirty, and REP bookkeeping match writeCharLocked exactly.
+// The caller must hold g.mu and pass a style handle it owns (see styleSet.ref).
+func (g *Grid) writeByteLocked(b byte, sr *styleRef, link uint16) {
+	if g.wrapPending {
+		if g.autoWrap {
+			// The line we're leaving continued because it filled the last
+			// column: mark it soft-wrapped so reflow can rejoin it.
+			g.rows[g.CursorRow].flags |= RowSoftWrapped
+			g.cursorNewline()
+		}
+		g.wrapPending = false
+	}
+
+	// Handle auto-wrap if at end of line
+	if g.CursorCol >= g.Cols {
+		if g.autoWrap {
+			g.cursorNewline()
+		} else {
+			// No auto-wrap: stay at last column, overwrite
+			g.CursorCol = g.Cols - 1
+		}
+	}
+
+	row := g.rows[g.CursorRow]
+	g.putCellStyledRow(row, g.CursorCol, rune(b), sr.take(), CellWidthNormal, link)
+	g.CursorCol++
+
+	// If we advanced past the last column, set wrap pending (DECAWM behavior)
+	if g.CursorCol >= g.Cols {
+		if g.autoWrap {
+			g.wrapPending = true
+		}
+		g.CursorCol = g.Cols - 1
+	}
+
+	// Save for REP sequence
+	g.lastChar = rune(b)
+	g.lastStyle = sr.style
+	g.lastLink = link
 }
 
 // appendCombining attaches a zero-width codepoint to the most recently written
@@ -484,9 +568,12 @@ func (g *Grid) scrollUpRegionWithBg(bg Color) {
 	bottom := g.scrollBottom - 1
 
 	leaving := g.rows[top]
-	// Rotate region rows up.
+	// Rotate region rows up. The moved rows land at new display positions, so
+	// they must be re-copied by the next snapshot even though their cell
+	// contents are untouched.
 	for row := top; row < bottom; row++ {
 		g.rows[row] = g.rows[row+1]
+		g.rows[row].flags |= RowDirty
 	}
 	if top == 0 {
 		// Region anchored at the screen top: the leaving line enters scrollback
@@ -505,6 +592,12 @@ func (g *Grid) scrollUpRegionWithBg(bg Color) {
 func (g *Grid) Newline() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.NewlineLocked()
+}
+
+// NewlineLocked is Newline without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) NewlineLocked() {
 	g.cursorIndex()
 }
 
@@ -512,6 +605,12 @@ func (g *Grid) Newline() {
 func (g *Grid) CarriageReturn() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.CarriageReturnLocked()
+}
+
+// CarriageReturnLocked is CarriageReturn without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) CarriageReturnLocked() {
 	g.wrapPending = false
 	g.CursorCol = 0
 }
@@ -520,6 +619,12 @@ func (g *Grid) CarriageReturn() {
 func (g *Grid) Backspace() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.BackspaceLocked()
+}
+
+// BackspaceLocked is Backspace without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) BackspaceLocked() {
 	g.wrapPending = false
 	if g.CursorCol > 0 {
 		g.CursorCol--
@@ -537,6 +642,12 @@ func (g *Grid) Backspace() {
 func (g *Grid) Tab() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.TabLocked()
+}
+
+// TabLocked is Tab without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) TabLocked() {
 	g.ensureTabStops()
 	g.wrapPending = false
 	next := -1
@@ -563,6 +674,12 @@ func (g *Grid) Tab() {
 func (g *Grid) MoveCursor(dCol, dRow int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.MoveCursorLocked(dCol, dRow)
+}
+
+// MoveCursorLocked is MoveCursor without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) MoveCursorLocked(dCol, dRow int) {
 	g.wrapPending = false
 
 	// Handle horizontal movement with wide cell awareness
@@ -613,6 +730,12 @@ func (g *Grid) MoveCursor(dCol, dRow int) {
 func (g *Grid) SetCursorPos(col, row int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.SetCursorPosLocked(col, row)
+}
+
+// SetCursorPosLocked is SetCursorPos without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) SetCursorPosLocked(col, row int) {
 	g.wrapPending = false
 	g.CursorCol = col - 1
 	g.CursorRow = row - 1
@@ -653,6 +776,8 @@ func (g *Grid) scrollUpInternalWithBg(bg Color) {
 	g.pushHistory(g.rows[0])
 	for row := 0; row < g.Rows-1; row++ {
 		g.rows[row] = g.rows[row+1]
+		// Moved to a new display row: force re-copy at the next snapshot.
+		g.rows[row].flags |= RowDirty
 	}
 	g.rows[g.Rows-1] = g.blankRow(bg)
 }
@@ -670,6 +795,12 @@ func (g *Grid) ScrollUp(n int) {
 func (g *Grid) ScrollUpWithBg(n int, bg Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.ScrollUpWithBgLocked(n, bg)
+}
+
+// ScrollUpWithBgLocked is ScrollUpWithBg without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) ScrollUpWithBgLocked(n int, bg Color) {
 	for range n {
 		g.scrollUpRegionWithBg(bg)
 	}
@@ -687,6 +818,8 @@ func (g *Grid) scrollDownInternalWithBg(bg Color) {
 	leaving := g.rows[g.Rows-1]
 	for row := g.Rows - 1; row >= 1; row-- {
 		g.rows[row] = g.rows[row-1]
+		// Moved to a new display row: force re-copy at the next snapshot.
+		g.rows[row].flags |= RowDirty
 	}
 	g.clearRow(leaving, bg)
 	g.rows[0] = leaving
@@ -711,6 +844,8 @@ func (g *Grid) scrollDownRegionWithBg(bg Color) {
 	leaving := g.rows[bottom]
 	for row := bottom; row > top; row-- {
 		g.rows[row] = g.rows[row-1]
+		// Moved to a new display row: force re-copy at the next snapshot.
+		g.rows[row].flags |= RowDirty
 	}
 	g.clearRow(leaving, bg)
 	g.rows[top] = leaving
@@ -729,6 +864,12 @@ func (g *Grid) ScrollDown(n int) {
 func (g *Grid) ScrollDownWithBg(n int, bg Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.ScrollDownWithBgLocked(n, bg)
+}
+
+// ScrollDownWithBgLocked is ScrollDownWithBg without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) ScrollDownWithBgLocked(n int, bg Color) {
 	for range n {
 		g.scrollDownRegionWithBg(bg)
 	}
@@ -742,6 +883,7 @@ func (g *Grid) ScrollViewUp(n int) {
 	if g.scrollOffset > len(g.history) {
 		g.scrollOffset = len(g.history)
 	}
+	g.snapInvalid = true
 }
 
 // ScrollViewDown scrolls the view down in scrollback
@@ -752,6 +894,7 @@ func (g *Grid) ScrollViewDown(n int) {
 	if g.scrollOffset < 0 {
 		g.scrollOffset = 0
 	}
+	g.snapInvalid = true
 }
 
 // ResetScrollOffset resets the scroll view to the bottom
@@ -759,6 +902,7 @@ func (g *Grid) ResetScrollOffset() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.scrollOffset = 0
+	g.snapInvalid = true
 }
 
 // GetScrollOffset returns the current scroll offset
@@ -863,41 +1007,29 @@ func (g *Grid) normalizedSelectionLocked() (sRow, sCol, eRow, eCol int) {
 	return
 }
 
-// syncSelectionViewLocked projects the absolute selection onto the current
-// viewport, refreshing the legacy viewport-relative fields consumed by
-// snapshot.go. When the selection is entirely off-screen the projection is
-// invalidated by desyncing selectionScrollOffset (snapshot treats that as "no
-// visible selection") without dropping the selection itself.
-func (g *Grid) syncSelectionViewLocked() {
+// selectionViewLocked projects the absolute selection onto the current
+// viewport, normalized and clamped to the visible rows. It is derived state:
+// computing it on demand (rather than caching it) is what keeps the highlight
+// in lockstep with SelectedText, whatever moved underneath it — view
+// scrolling, new output, or scrollback trimming. active is false when there is
+// no selection or it lies entirely off-screen.
+func (g *Grid) selectionViewLocked() (active bool, sCol, sRow, eCol, eRow int) {
 	if !g.selectionActive {
-		return
+		return false, 0, 0, 0, 0
 	}
-	sRow, sCol, eRow, eCol := g.normalizedSelectionLocked()
+	sAbs, sC, eAbs, eC := g.normalizedSelectionLocked()
 	viewTop := g.viewTopAbsLocked()
-	sV := sRow - viewTop
-	eV := eRow - viewTop
-	if eV < 0 || sV >= g.Rows {
-		g.selectionScrollOffset = g.scrollOffset + 1 // off-screen: desync
-		return
+	sR, eR := sAbs-viewTop, eAbs-viewTop
+	if eR < 0 || sR >= g.Rows {
+		return false, 0, 0, 0, 0
 	}
-	if sV < 0 {
-		sV, sCol = 0, 0
+	if sR < 0 {
+		sR, sC = 0, 0
 	}
-	if eV >= g.Rows {
-		eV, eCol = g.Rows-1, g.Cols-1
+	if eR >= g.Rows {
+		eR, eC = g.Rows-1, g.Cols-1
 	}
-	g.selectionStartCol, g.selectionStartRow = sCol, sV
-	g.selectionEndCol, g.selectionEndRow = eCol, eV
-	g.selectionScrollOffset = g.scrollOffset
-}
-
-// SyncSelectionView refreshes the viewport projection of the selection. Called
-// once per frame (before snapshotting) so the highlight tracks both view
-// scrolling and new content scrolling in.
-func (g *Grid) SyncSelectionView() {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.syncSelectionViewLocked()
+	return true, sC, sR, eC, eR
 }
 
 // AbsRowForViewRow translates a viewport row to an absolute buffer row.
@@ -920,7 +1052,6 @@ func (g *Grid) StartSelection(col, row int) {
 	g.selectionActive = true
 	g.selAnchorAbsRow, g.selAnchorCol = abs, col
 	g.selEndAbsRow, g.selEndCol = abs, col
-	g.syncSelectionViewLocked()
 }
 
 // ExtendSelection moves the selection end to a viewport cell, keeping the
@@ -935,7 +1066,6 @@ func (g *Grid) ExtendSelection(col, row int) {
 	row = clampInt(row, 0, g.Rows-1)
 	g.selEndAbsRow = g.viewTopAbsLocked() + row
 	g.selEndCol = col
-	g.syncSelectionViewLocked()
 }
 
 // SetSelection sets the selection bounds in display (viewport) coordinates.
@@ -956,7 +1086,6 @@ func (g *Grid) SetSelection(startCol, startRow, endCol, endRow int) {
 	g.selectionActive = true
 	g.selAnchorAbsRow, g.selAnchorCol = viewTop+startRow, startCol
 	g.selEndAbsRow, g.selEndCol = viewTop+endRow, endCol
-	g.syncSelectionViewLocked()
 }
 
 // isWordRune reports whether a rune belongs to a double-click word:
@@ -1017,7 +1146,6 @@ func (g *Grid) SelectWordAt(col, row int) {
 	g.selectionActive = true
 	g.selAnchorAbsRow, g.selAnchorCol = abs, start
 	g.selEndAbsRow, g.selEndCol = abs, end
-	g.syncSelectionViewLocked()
 }
 
 // SelectLineAt selects the full logical line (soft-wrap-joined) containing a
@@ -1052,7 +1180,6 @@ func (g *Grid) SelectLineAt(col, row int) {
 	g.selectionActive = true
 	g.selAnchorAbsRow, g.selAnchorCol = first, 0
 	g.selEndAbsRow, g.selEndCol = last, g.Cols-1
-	g.syncSelectionViewLocked()
 }
 
 // ClearSelection clears any active selection.
@@ -1165,7 +1292,15 @@ func clampInt(value, min, max int) int {
 
 // ClearAll clears the entire grid
 func (g *Grid) ClearAll() {
-	g.ClearAllWithBg(g.eraseBg)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.ClearAllWithBgLocked(g.eraseBg)
+}
+
+// ClearAllLocked is ClearAll without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) ClearAllLocked() {
+	g.ClearAllWithBgLocked(g.eraseBg)
 }
 
 // ClearToEnd clears from cursor to end of screen
@@ -1198,6 +1333,12 @@ func (g *Grid) ClearLineToStart() {
 func (g *Grid) ClearScrollback() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.ClearScrollbackLocked()
+}
+
+// ClearScrollbackLocked is ClearScrollback without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) ClearScrollbackLocked() {
 	for i, r := range g.history {
 		g.releaseRow(r)
 		g.history[i] = nil
@@ -1206,12 +1347,19 @@ func (g *Grid) ClearScrollback() {
 	g.scrolledOut += len(g.history)
 	g.history = nil
 	g.scrollOffset = 0
+	g.snapInvalid = true
 }
 
 // ClearAllWithBg clears the entire grid with a specific background color (BCE)
 func (g *Grid) ClearAllWithBg(bg Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.ClearAllWithBgLocked(bg)
+}
+
+// ClearAllWithBgLocked is ClearAllWithBg without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) ClearAllWithBgLocked(bg Color) {
 
 	// Save non-empty rows to scrollback before clearing. A saved row's *Row is
 	// moved into history (refs travel with it) and replaced by a fresh blank;
@@ -1239,15 +1387,17 @@ func (g *Grid) ClearAllWithBg(bg Color) {
 func (g *Grid) ClearToEndWithBg(bg Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.ClearToEndWithBgLocked(bg)
+}
+
+// ClearToEndWithBgLocked is ClearToEndWithBg without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) ClearToEndWithBgLocked(bg Color) {
 	// Clear rest of current line
-	for col := g.CursorCol; col < g.Cols; col++ {
-		g.putCell(g.index(col, g.CursorRow), NewCellWithBg(bg))
-	}
+	g.fillSpan(g.CursorRow, g.CursorCol, g.Cols, bg)
 	// Clear lines below
 	for row := g.CursorRow + 1; row < g.Rows; row++ {
-		for col := 0; col < g.Cols; col++ {
-			g.putCell(g.index(col, row), NewCellWithBg(bg))
-		}
+		g.fillSpan(row, 0, g.Cols, bg)
 	}
 }
 
@@ -1255,49 +1405,69 @@ func (g *Grid) ClearToEndWithBg(bg Color) {
 func (g *Grid) ClearToStartWithBg(bg Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.ClearToStartWithBgLocked(bg)
+}
+
+// ClearToStartWithBgLocked is ClearToStartWithBg without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) ClearToStartWithBgLocked(bg Color) {
 	// Clear lines above
 	for row := 0; row < g.CursorRow; row++ {
-		for col := 0; col < g.Cols; col++ {
-			g.putCell(g.index(col, row), NewCellWithBg(bg))
-		}
+		g.fillSpan(row, 0, g.Cols, bg)
 	}
 	// Clear start of current line
-	for col := 0; col <= g.CursorCol; col++ {
-		g.putCell(g.index(col, g.CursorRow), NewCellWithBg(bg))
-	}
+	g.fillSpan(g.CursorRow, 0, g.CursorCol+1, bg)
 }
 
 // ClearLineWithBg clears the current line with background color (BCE)
 func (g *Grid) ClearLineWithBg(bg Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for col := 0; col < g.Cols; col++ {
-		g.putCell(g.index(col, g.CursorRow), NewCellWithBg(bg))
-	}
+	g.ClearLineWithBgLocked(bg)
+}
+
+// ClearLineWithBgLocked is ClearLineWithBg without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) ClearLineWithBgLocked(bg Color) {
+	g.fillSpan(g.CursorRow, 0, g.Cols, bg)
 }
 
 // ClearLineToEndWithBg clears from cursor to end of line with background color (BCE)
 func (g *Grid) ClearLineToEndWithBg(bg Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for col := g.CursorCol; col < g.Cols; col++ {
-		g.putCell(g.index(col, g.CursorRow), NewCellWithBg(bg))
-	}
+	g.ClearLineToEndWithBgLocked(bg)
+}
+
+// ClearLineToEndWithBgLocked is ClearLineToEndWithBg without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) ClearLineToEndWithBgLocked(bg Color) {
+	g.fillSpan(g.CursorRow, g.CursorCol, g.Cols, bg)
 }
 
 // ClearLineToStartWithBg clears from start of line to cursor with background color (BCE)
 func (g *Grid) ClearLineToStartWithBg(bg Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for col := 0; col <= g.CursorCol; col++ {
-		g.putCell(g.index(col, g.CursorRow), NewCellWithBg(bg))
-	}
+	g.ClearLineToStartWithBgLocked(bg)
+}
+
+// ClearLineToStartWithBgLocked is ClearLineToStartWithBg without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) ClearLineToStartWithBgLocked(bg Color) {
+	g.fillSpan(g.CursorRow, 0, g.CursorCol+1, bg)
 }
 
 // DeleteChars deletes n characters at cursor, shifting left
 func (g *Grid) DeleteChars(n int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.DeleteCharsLocked(n)
+}
+
+// DeleteCharsLocked is DeleteChars without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) DeleteCharsLocked(n int) {
 
 	// Clamp to the space right of the cursor; an oversized count would index
 	// negative columns in the shift/clear loops below.
@@ -1333,15 +1503,19 @@ func (g *Grid) DeleteChars(n int) {
 	for col := g.CursorCol; col < g.Cols-n; col++ {
 		g.moveCell(g.index(col, g.CursorRow), g.index(col+n, g.CursorRow))
 	}
-	for col := g.Cols - n; col < g.Cols; col++ {
-		g.putCell(g.index(col, g.CursorRow), NewCellWithBg(g.eraseBg))
-	}
+	g.fillSpan(g.CursorRow, g.Cols-n, g.Cols, g.eraseBg)
 }
 
 // InsertChars inserts n blank characters at cursor, shifting right
 func (g *Grid) InsertChars(n int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.InsertCharsLocked(n)
+}
+
+// InsertCharsLocked is InsertChars without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) InsertCharsLocked(n int) {
 
 	if n > g.Cols-g.CursorCol {
 		n = g.Cols - g.CursorCol
@@ -1373,9 +1547,7 @@ func (g *Grid) InsertChars(n int) {
 		g.moveCell(g.index(col, g.CursorRow), g.index(col-n, g.CursorRow))
 	}
 	// Clear inserted positions
-	for col := g.CursorCol; col < g.CursorCol+n && col < g.Cols; col++ {
-		g.putCell(g.index(col, g.CursorRow), NewCellWithBg(g.eraseBg))
-	}
+	g.fillSpan(g.CursorRow, g.CursorCol, g.CursorCol+n, g.eraseBg)
 }
 
 // DeleteLines deletes n lines at cursor within scroll region, shifting up
@@ -1387,6 +1559,12 @@ func (g *Grid) DeleteLines(n int) {
 func (g *Grid) DeleteLinesWithBg(n int, bg Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.DeleteLinesWithBgLocked(n, bg)
+}
+
+// DeleteLinesWithBgLocked is DeleteLinesWithBg without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) DeleteLinesWithBgLocked(n int, bg Color) {
 
 	top := g.scrollTop - 1 // Convert to 0-based
 	bottom := g.scrollBottom - 1
@@ -1410,9 +1588,7 @@ func (g *Grid) DeleteLinesWithBg(n int, bg Color) {
 
 	// Clear bottom n lines of the scroll region with background color
 	for row := bottom - n + 1; row <= bottom; row++ {
-		for col := 0; col < g.Cols; col++ {
-			g.putCell(g.index(col, row), NewCellWithBg(bg))
-		}
+		g.fillSpan(row, 0, g.Cols, bg)
 	}
 }
 
@@ -1425,6 +1601,12 @@ func (g *Grid) InsertLines(n int) {
 func (g *Grid) InsertLinesWithBg(n int, bg Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.InsertLinesWithBgLocked(n, bg)
+}
+
+// InsertLinesWithBgLocked is InsertLinesWithBg without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) InsertLinesWithBgLocked(n int, bg Color) {
 
 	top := g.scrollTop - 1 // Convert to 0-based
 	bottom := g.scrollBottom - 1
@@ -1448,9 +1630,7 @@ func (g *Grid) InsertLinesWithBg(n int, bg Color) {
 
 	// Clear n lines at cursor position with background color
 	for row := g.CursorRow; row < g.CursorRow+n && row <= bottom; row++ {
-		for col := 0; col < g.Cols; col++ {
-			g.putCell(g.index(col, row), NewCellWithBg(bg))
-		}
+		g.fillSpan(row, 0, g.Cols, bg)
 	}
 }
 
@@ -1487,12 +1667,20 @@ func (g *Grid) Resize(cols, rows int) {
 	keepRows := min(rows, g.Rows)
 	for row := range rows {
 		nr := g.blankRowN(cols, g.eraseBg)
-		if row < keepRows {
+		if row < keepRows && keepCols > 0 {
 			src := g.rows[row]
-			for col := range keepCols {
-				g.styles.retain(src.cells[col].Style)
-				g.styles.release(nr.cells[col].Style)
-				nr.cells[col] = src.cells[col]
+			// nr is uniformly filled by blankRowN, so the refs on the
+			// overwritten prefix drop in one call; the copied-in source
+			// styles are retained per run of equal ids.
+			g.styles.releaseN(nr.cells[0].Style, keepCols)
+			for col := 0; col < keepCols; {
+				run := col + 1
+				for run < keepCols && src.cells[run].Style == src.cells[col].Style {
+					run++
+				}
+				g.styles.retainN(src.cells[col].Style, run-col)
+				copy(nr.cells[col:run], src.cells[col:run])
+				col = run
 			}
 		}
 		newRows[row] = nr
@@ -1546,6 +1734,12 @@ func (g *Grid) Resize(cols, rows int) {
 func (g *Grid) GetCursor() (col, row int) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
+	return g.GetCursorLocked()
+}
+
+// GetCursorLocked is GetCursor without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) GetCursorLocked() (col, row int) {
 	return g.CursorCol, g.CursorRow
 }
 
@@ -1555,6 +1749,12 @@ func (g *Grid) GetCursor() (col, row int) {
 func (g *Grid) AbsoluteCursorRow() int {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
+	return g.AbsoluteCursorRowLocked()
+}
+
+// AbsoluteCursorRowLocked is AbsoluteCursorRow without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) AbsoluteCursorRowLocked() int {
 	return g.scrolledOut + len(g.history) + g.CursorRow
 }
 
@@ -1569,6 +1769,12 @@ func (g *Grid) LinesScrolledOut() int {
 func (g *Grid) EraseChars(n int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.EraseCharsLocked(n)
+}
+
+// EraseCharsLocked is EraseChars without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) EraseCharsLocked(n int) {
 
 	startCol := g.CursorCol
 	endCol := min(g.CursorCol+n, g.Cols)
@@ -1590,9 +1796,7 @@ func (g *Grid) EraseChars(n int) {
 	}
 
 	// Erase the range
-	for col := startCol; col < endCol && col < g.Cols; col++ {
-		g.putCell(g.index(col, g.CursorRow), NewCellWithBg(g.eraseBg))
-	}
+	g.fillSpan(g.CursorRow, startCol, endCol, g.eraseBg)
 }
 
 // RepeatChar repeats the last written character n times. Reuses the normal
@@ -1601,15 +1805,29 @@ func (g *Grid) EraseChars(n int) {
 func (g *Grid) RepeatChar(n int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.RepeatCharLocked(n)
+}
+
+// RepeatCharLocked is RepeatChar without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) RepeatCharLocked(n int) {
+	sr := g.styles.ref(g.lastStyle)
 	for range n {
-		g.writeCharLocked(g.lastChar, g.lastFg, g.lastBg, g.lastFlags, g.lastLink, g.lastUnderlineStyle, g.lastUnderlineColor)
+		g.writeCharLocked(g.lastChar, &sr, g.lastLink)
 	}
+	g.styles.done(sr)
 }
 
 // SetScrollRegion sets the scrolling region (1-based, inclusive)
 func (g *Grid) SetScrollRegion(top, bottom int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.SetScrollRegionLocked(top, bottom)
+}
+
+// SetScrollRegionLocked is SetScrollRegion without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) SetScrollRegionLocked(top, bottom int) {
 	if top < 1 {
 		top = 1
 	}
@@ -1632,6 +1850,12 @@ func (g *Grid) SetScrollRegion(top, bottom int) {
 func (g *Grid) RestoreScrollRegion(top, bottom int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.RestoreScrollRegionLocked(top, bottom)
+}
+
+// RestoreScrollRegionLocked is RestoreScrollRegion without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) RestoreScrollRegionLocked(top, bottom int) {
 	if top < 1 {
 		top = 1
 	}
@@ -1649,6 +1873,12 @@ func (g *Grid) RestoreScrollRegion(top, bottom int) {
 func (g *Grid) ResetWrapPending() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.ResetWrapPendingLocked()
+}
+
+// ResetWrapPendingLocked is ResetWrapPending without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) ResetWrapPendingLocked() {
 	g.wrapPending = false
 }
 
@@ -1656,6 +1886,12 @@ func (g *Grid) ResetWrapPending() {
 func (g *Grid) GetScrollRegion() (top, bottom int) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
+	return g.GetScrollRegionLocked()
+}
+
+// GetScrollRegionLocked is GetScrollRegion without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) GetScrollRegionLocked() (top, bottom int) {
 	return g.scrollTop, g.scrollBottom
 }
 
@@ -1663,6 +1899,12 @@ func (g *Grid) GetScrollRegion() (top, bottom int) {
 func (g *Grid) SetAutoWrap(enabled bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.SetAutoWrapLocked(enabled)
+}
+
+// SetAutoWrapLocked is SetAutoWrap without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) SetAutoWrapLocked(enabled bool) {
 	g.autoWrap = enabled
 }
 
@@ -1670,6 +1912,12 @@ func (g *Grid) SetAutoWrap(enabled bool) {
 func (g *Grid) GetAutoWrap() bool {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
+	return g.GetAutoWrapLocked()
+}
+
+// GetAutoWrapLocked is GetAutoWrap without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) GetAutoWrapLocked() bool {
 	return g.autoWrap
 }
 
@@ -1677,6 +1925,12 @@ func (g *Grid) GetAutoWrap() bool {
 func (g *Grid) SetEraseBackground(bg Color) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.SetEraseBackgroundLocked(bg)
+}
+
+// SetEraseBackgroundLocked is SetEraseBackground without locking; the caller must hold g.mu
+// (see LockBatch).
+func (g *Grid) SetEraseBackgroundLocked(bg Color) {
 	g.eraseBg = bg
 }
 

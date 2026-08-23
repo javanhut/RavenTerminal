@@ -4,12 +4,15 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"github.com/javanhut/RavenTerminal/src/parser"
 	"github.com/javanhut/RavenTerminal/src/shell"
 )
 
-const MaxTabs = 10
+// MaxTabs bounds the tab strip; chips compress to fit the window height
+// (see render.tabBarGeom), so this is a sanity cap, not a layout limit.
+const MaxTabs = 32
 const MaxPanes = 16
 
 // SplitDirection indicates how a node is split
@@ -83,10 +86,23 @@ var clipboardOut struct {
 // so the main loop can re-render promptly instead of waiting out its idle timeout.
 var wakeNotifier func()
 
+// wakePending coalesces wake notifications: while true, a wake has been posted
+// but not yet consumed by the main loop, so further chunks skip posting. One
+// shared flag is fine for multiple panes — a wake wakes the whole app loop.
+var wakePending atomic.Bool
+
 // SetWakeNotifier registers a callback invoked whenever a pane produces new output.
 // It must be safe to call from any goroutine (e.g. glfw.PostEmptyEvent).
 func SetWakeNotifier(f func()) {
 	wakeNotifier = f
+}
+
+// ClearWakePending marks the posted wake as consumed by the main loop. Call it
+// once per main-loop iteration before rendering, so a chunk arriving afterwards
+// re-arms the wake. Chunks arriving before the clear are still picked up by the
+// render that follows, so no wake is missed.
+func ClearWakePending() {
+	wakePending.Store(false)
 }
 
 // QueueClipboard stores text to be copied to the system clipboard by the main thread.
@@ -165,7 +181,7 @@ func (p *Pane) readLoop() {
 			defer tap.Close()
 		}
 	}
-	buf := make([]byte, 4096)
+	buf := make([]byte, 65536)
 	for {
 		n, err := p.pty.Read(buf)
 		if err != nil || n == 0 {
@@ -180,8 +196,9 @@ func (p *Pane) readLoop() {
 		}
 		p.processChunk(buf[:n])
 
-		// Wake the main loop so this output renders without waiting for the idle timeout.
-		if wakeNotifier != nil {
+		// Wake the main loop so this output renders without waiting for the idle
+		// timeout. Coalesced: skip posting while a wake is still outstanding.
+		if wakeNotifier != nil && wakePending.CompareAndSwap(false, true) {
 			wakeNotifier()
 		}
 	}
@@ -997,10 +1014,25 @@ func (tm *TabManager) NewTab() error {
 		return err
 	}
 
-	tm.tabs = append(tm.tabs, tab)
-	tm.activeIndex = len(tm.tabs) - 1
+	tm.insertAfterActive(tab)
 
 	return nil
+}
+
+// insertAfterActive splices tab in directly after the tab it was opened from,
+// shifting the rest down, so a tab spawned from tab 1 lands at slot 2 rather
+// than at the end. The new tab becomes active and IDs are renumbered so they
+// stay positional. Caller holds tm.mu.
+func (tm *TabManager) insertAfterActive(tab *Tab) {
+	at := len(tm.tabs)
+	if at > 0 && tm.activeIndex >= 0 && tm.activeIndex < at {
+		at = tm.activeIndex + 1
+	}
+	tm.tabs = append(tm.tabs, nil)
+	copy(tm.tabs[at+1:], tm.tabs[at:])
+	tm.tabs[at] = tab
+	tm.activeIndex = at
+	tm.renumberTabs()
 }
 
 // renumberTabs reassigns sequential IDs to all tabs
@@ -1058,6 +1090,70 @@ func (tm *TabManager) SelectTab(index int) {
 	if index >= 0 && index < len(tm.tabs) {
 		tm.activeIndex = index
 	}
+}
+
+// MoveTab moves the tab at index from to index to, keeping the active tab
+// active and renumbering IDs so they stay positional.
+func (tm *TabManager) MoveTab(from, to int) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	n := len(tm.tabs)
+	if from < 0 || from >= n || to < 0 || to >= n || from == to {
+		return
+	}
+
+	active := tm.tabs[tm.activeIndex]
+	moved := tm.tabs[from]
+	tm.tabs = append(tm.tabs[:from], tm.tabs[from+1:]...)
+	tm.tabs = append(tm.tabs[:to], append([]*Tab{moved}, tm.tabs[to:]...)...)
+
+	for i, t := range tm.tabs {
+		if t == active {
+			tm.activeIndex = i
+			break
+		}
+	}
+	tm.renumberTabs()
+}
+
+// DetachTab removes the tab at index and returns it WITHOUT closing it — its
+// panes, PTYs, and reader goroutines keep running, so the caller can move a
+// live tab into another window. Returns nil when the index is out of range or
+// the tab is the last one (a window must keep at least one tab; tearing the
+// last one off would just move the window).
+func (tm *TabManager) DetachTab(index int) *Tab {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	if index < 0 || index >= len(tm.tabs) || len(tm.tabs) <= 1 {
+		return nil
+	}
+	t := tm.tabs[index]
+	tm.tabs = append(tm.tabs[:index], tm.tabs[index+1:]...)
+	if tm.activeIndex >= len(tm.tabs) {
+		tm.activeIndex = len(tm.tabs) - 1
+	}
+	tm.renumberTabs()
+	return t
+}
+
+// AdoptTab appends a live tab detached from another window, resizing it to
+// this manager's grid so it renders correctly in its new home.
+func (tm *TabManager) AdoptTab(t *Tab) {
+	if t == nil {
+		return
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	if len(tm.tabs) >= MaxTabs {
+		return
+	}
+	t.Resize(tm.cols, tm.rows)
+	tm.tabs = append(tm.tabs, t)
+	tm.activeIndex = len(tm.tabs) - 1
+	tm.renumberTabs()
 }
 
 // ActiveTab returns the currently active tab

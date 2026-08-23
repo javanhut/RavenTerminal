@@ -123,3 +123,83 @@ func TestSubSubmenuEscapeReturnsToCategory(t *testing.T) {
 		t.Errorf("escape from theme select led to %v, want MenuAppearance", m.State)
 	}
 }
+
+// Editing a value mid-string: caret moves, inserts, and deletes land where the
+// caret is, not at the end of the buffer.
+func TestInputCaretEditing(t *testing.T) {
+	m := NewMenu()
+	m.startInputWithValue(InputCommandValue, "Command to run:", "git status")
+	if m.InputCursor != 10 {
+		t.Fatalf("caret starts at %d, want end (10)", m.InputCursor)
+	}
+
+	m.MoveInputHome()
+	m.HandleChar('!')
+	if m.InputBuffer != "!git status" {
+		t.Errorf("insert at home = %q", m.InputBuffer)
+	}
+
+	m.MoveInputCursor(3) // after "!git"
+	m.HandlePaste(" -C /tmp")
+	if m.InputBuffer != "!git -C /tmp status" {
+		t.Errorf("paste at caret = %q", m.InputBuffer)
+	}
+
+	m.HandleBackspace()
+	if m.InputBuffer != "!git -C /tm status" {
+		t.Errorf("backspace at caret = %q", m.InputBuffer)
+	}
+	m.HandleDelete() // forward-delete the space
+	if m.InputBuffer != "!git -C /tmstatus" {
+		t.Errorf("delete at caret = %q", m.InputBuffer)
+	}
+
+	// Caret cannot run off either end.
+	m.MoveInputCursor(-999)
+	m.HandleBackspace()
+	m.MoveInputCursor(999)
+	m.HandleDelete()
+	if m.InputBuffer != "!git -C /tmstatus" {
+		t.Errorf("edits past the ends changed the buffer: %q", m.InputBuffer)
+	}
+}
+
+// Up/Down walk lines in a multi-line field and report false at the edges so the
+// caller can fall back to home/end.
+func TestInputLineNavigation(t *testing.T) {
+	m := NewMenu()
+	m.startInputWithValue(InputScriptInit, "Init script:", "one\ntwo\nthree")
+
+	if m.MoveInputLine(1) {
+		t.Error("moved down from the last line")
+	}
+	if !m.MoveInputLine(-1) {
+		t.Fatal("could not move up")
+	}
+	if line, col := m.InputCursorLineCol(); line != 1 || col != 3 {
+		t.Errorf("up from end of line 3 = line %d col %d, want 1/3", line, col)
+	}
+	if !m.MoveInputLine(-1) {
+		t.Fatal("could not move up again")
+	}
+	if line, col := m.InputCursorLineCol(); line != 0 || col != 3 {
+		t.Errorf("up again = line %d col %d, want 0/3", line, col)
+	}
+	if m.MoveInputLine(-1) {
+		t.Error("moved up from the first line")
+	}
+
+	// Column clamps to a shorter target line.
+	m.startInputWithValue(InputScriptInit, "Init script:", "a\nlonger line")
+	m.MoveInputLine(-1)
+	if line, col := m.InputCursorLineCol(); line != 0 || col != 1 {
+		t.Errorf("clamped column = line %d col %d, want 0/1", line, col)
+	}
+
+	// Editing lands on the caret's line, not the end of the buffer.
+	m.MoveInputHome()
+	m.HandleChar('x')
+	if m.InputBuffer != "xa\nlonger line" {
+		t.Errorf("insert on first line = %q", m.InputBuffer)
+	}
+}

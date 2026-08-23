@@ -16,13 +16,19 @@ implemented in-tree — there is no external terminal backend. Runs on Linux
 
 **Window management**
 - Tabs with a left-side tab bar and per-tab shell processes
+- New tabs open next to the tab they were opened from, not at the end of the strip
+- Drag a tab chip to reorder, or drag it clear of the strip to tear it into its own window — the running shells move with it
+- Multiple windows, each with its own tabs, splits, and panels
 - Split panes: vertical or horizontal, nestable, up to 16 panes per tab, with a resize mode
+- Optional session restore: reopen the previous run's tabs, splits, and working directories
 - Fullscreen toggle and font zoom
 - Leader-key shortcuts: Cmd on macOS, Super or Ctrl+Shift on Linux — plain Ctrl stays free for shell control characters
 
 **Terminal**
 - Scrollback buffer with mouse-wheel and keyboard scrolling
+- Find in scrollback (Cmd/Super+Shift+F) with smart-case matching across soft-wrapped lines
 - Mouse: drag to select-and-copy, right-click to paste, Ctrl+right-click to open URLs
+- Clickable OSC 8 hyperlinks, underlined on hover
 - Kitty keyboard protocol
 - Inline images via Kitty graphics and Sixel, anchored to scrollback so they scroll with content
 

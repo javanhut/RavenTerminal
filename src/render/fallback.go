@@ -111,6 +111,7 @@ func (r *Renderer) loadSystemFallbacks() {
 	}
 	// New faces may cover runes previously recorded as missing.
 	r.glyphMisses = make(map[rune]bool)
+	r.asciiCache = [128]asciiGlyphSlot{}
 }
 
 // systemFallbackPaths returns candidate system fonts in priority order; files

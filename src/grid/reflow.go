@@ -191,6 +191,8 @@ func (g *Grid) reflow(newCols, newRows int) {
 	g.scrollOffset = 0
 	g.tabStops = nil
 	g.wrapPending = false
+	// Rows were rebuilt from scratch; the next snapshot must re-copy fully.
+	g.snapInvalid = true
 }
 
 // putRowCell writes an inflated Cell into a freshly-allocated row, interning its

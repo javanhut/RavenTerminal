@@ -2,6 +2,7 @@ package grid
 
 import (
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/rivo/uniseg"
 )
@@ -11,6 +12,14 @@ import (
 // 1 = normal single-width character
 // 2 = wide character (CJK, emoji, etc.)
 func RuneWidth(r rune) int {
+	// Printable ASCII is always one cell. Checked first because it is the
+	// overwhelming majority of what a terminal prints, and the general path
+	// below costs ~20x more: five unicode.Is table lookups plus a
+	// rune->string conversion feeding uniseg's grapheme segmenter.
+	if r >= 0x20 && r < 0x7f {
+		return 1
+	}
+
 	// Null character has zero width
 	if r == '\x00' {
 		return 0
@@ -44,7 +53,13 @@ func RuneWidth(r rune) int {
 	// Measure with the grapheme-aware width table (uniseg) so emoji are sized
 	// the same way applications expect (emoji-presentation pictographs = 2),
 	// matching ClusterWidth. This keeps the cursor column in sync with the TUI.
-	return uniseg.StringWidth(string(r))
+	// Encode into a stack buffer and use the byte-slice API: a single rune is
+	// one cluster, so its width equals uniseg.StringWidth(string(r)) without
+	// the rune->string heap allocation.
+	var buf [4]byte
+	n := utf8.EncodeRune(buf[:], r)
+	_, _, width, _ := uniseg.FirstGraphemeCluster(buf[:n], -1)
+	return width
 }
 
 // StringWidth returns the total display width of a string

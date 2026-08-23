@@ -40,6 +40,38 @@ func TestStyleDefaultIsZero(t *testing.T) {
 	}
 }
 
+// WriteRunes interns its shared style once and hands each cell a reference
+// through the handle, so its refcounting is a different path from WriteChar's.
+// Balance it three ways: a run must hold exactly one ref per cell, overwriting
+// must free the old style, and a run that writes no cells must not strand it.
+func TestWriteRunesStyleRefcounts(t *testing.T) {
+	g := NewAltGrid(8, 1) // alt: no scrollback, so liveCount reflects the screen
+	red := IndexedColor(1)
+
+	g.WriteRunes([]rune("abcd"), red, DefaultBg(), 0, 0, 0, Color{})
+	if lc := g.styles.liveCount(); lc != 1 {
+		t.Fatalf("after styled run liveCount = %d, want 1", lc)
+	}
+	if e := g.styles.entries[g.styles.byStyle[Style{Fg: red}]]; e.refs != 4 {
+		t.Fatalf("refs = %d, want 4 (one per cell, handle released)", e.refs)
+	}
+
+	// Overwrite the same four cells with a different style: the old one must go.
+	g.SetCursorPos(0, 0)
+	g.WriteRunes([]rune("abcd"), IndexedColor(2), DefaultBg(), 0, 0, 0, Color{})
+	if lc := g.styles.liveCount(); lc != 1 {
+		t.Fatalf("after overwrite liveCount = %d, want 1 (old style freed)", lc)
+	}
+
+	// A run of only zero-width runes writes no cells; the handle's own
+	// reference must still be released rather than stranding the entry.
+	before := g.styles.liveCount()
+	g.WriteRunes([]rune{'́', '̂'}, IndexedColor(9), DefaultBg(), 0, 0, 0, Color{})
+	if lc := g.styles.liveCount(); lc != before {
+		t.Fatalf("zero-width run leaked a style: liveCount %d -> %d", before, lc)
+	}
+}
+
 func TestStyleRecycle(t *testing.T) {
 	s := newStyleSet()
 	id := s.intern(Style{Fg: IndexedColor(1)})

@@ -25,7 +25,8 @@ func (t *Terminal) processAPC(b byte) {
 	switch b {
 	case 0x1b: // ESC — possible start of ST
 		t.state = StateAPCEscape
-	case 0x9c, 0x07: // ST (8-bit) or BEL
+	case 0x07: // BEL. 0x9c is NOT a terminator: in UTF-8 mode it only occurs
+		// as a continuation byte (see processOSC).
 		t.handleAPC(t.apcBuf)
 		t.state = StateGround
 	default:
@@ -207,11 +208,11 @@ func (t *Terminal) placeImage(img *images.Image, ctrl map[string]string) {
 	if rows <= 0 {
 		rows = 1
 	}
-	col, _ := t.Grid.GetCursor()
+	col, _ := t.Grid.GetCursorLocked()
 	t.activeImages().Place(&images.Placement{
 		ImageID:      img.ID,
 		PlacementID:  uint32(ctrlInt(ctrl, "p", 0)),
-		AnchorAbsRow: t.Grid.AbsoluteCursorRow(),
+		AnchorAbsRow: t.Grid.AbsoluteCursorRowLocked(),
 		AnchorCol:    col,
 		Cols:         cols,
 		Rows:         rows,

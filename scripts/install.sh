@@ -289,6 +289,16 @@ check_dependencies() {
         echo "  Ubuntu/Debian: sudo apt install build-essential libgl1-mesa-dev xorg-dev"
         echo "  Fedora: sudo dnf install mesa-libGL-devel libX11-devel libXcursor-devel libXrandr-devel libXinerama-devel libXi-devel"
     fi
+
+    # For the native Wayland backend (auto-selected on Wayland sessions) we also
+    # need the Wayland client + xkbcommon dev libraries.
+    if [ "${XDG_SESSION_TYPE:-}" = "wayland" ] && ! pkg-config --exists wayland-client xkbcommon 2>/dev/null; then
+        print_warning "Wayland session detected but wayland-client/xkbcommon dev libs missing."
+        print_warning "Will fall back to the X11 backend (runs via XWayland)."
+        echo "  Arch: sudo pacman -S wayland libxkbcommon"
+        echo "  Ubuntu/Debian: sudo apt install libwayland-dev libxkbcommon-dev"
+        echo "  Fedora: sudo dnf install wayland-devel libxkbcommon-devel"
+    fi
 }
 
 build_application() {
@@ -304,11 +314,31 @@ build_application() {
     
     print_info "Building Raven Terminal..."
     cd "$REPO_DIR"
-    
+
+    # Backend selection: on a Wayland session with the dev libs present, build
+    # the native Wayland backend so compositors match the window to
+    # raven-terminal.desktop (correct taskbar icon + native scaling). Else X11,
+    # which also drives Wayland via XWayland. Override: RAVEN_BACKEND=x11|wayland
+    local build_tags=""
+    local backend="${RAVEN_BACKEND:-auto}"
+    if [ "$OS_TYPE" != "Darwin" ]; then
+        if [ "$backend" = "auto" ]; then
+            if [ "${XDG_SESSION_TYPE:-}" = "wayland" ] && pkg-config --exists wayland-client xkbcommon 2>/dev/null; then
+                backend="wayland"
+            else
+                backend="x11"
+            fi
+        fi
+        if [ "$backend" = "wayland" ]; then
+            build_tags="-tags wayland"
+        fi
+        print_info "Build backend: $backend"
+    fi
+
     if [ "$VERBOSE" = true ]; then
-        go build -v -o "$APP_NAME" ./src
+        go build -v $build_tags -o "$APP_NAME" ./src
     else
-        go build -o "$APP_NAME" ./src 2>&1
+        go build $build_tags -o "$APP_NAME" ./src 2>&1
     fi
     
     if [ -f "$REPO_DIR/$APP_NAME" ]; then
@@ -317,6 +347,17 @@ build_application() {
     else
         print_error "Build failed"
         exit 1
+    fi
+}
+
+refresh_kde_cache() {
+    # KDE Plasma builds its application menu from the per-user sycoca cache;
+    # rebuild it so the entry appears without a re-login. Runs as the invoking
+    # user (never sudo) even for global installs, since the cache is per-user.
+    if command -v kbuildsycoca6 &> /dev/null; then
+        kbuildsycoca6 --noincremental &> /dev/null || true
+    elif command -v kbuildsycoca5 &> /dev/null; then
+        kbuildsycoca5 --noincremental &> /dev/null || true
     fi
 }
 
@@ -580,7 +621,9 @@ install_user() {
     if command -v update-desktop-database &> /dev/null; then
         update-desktop-database "$USER_APP_DIR" 2>/dev/null || true
     fi
-    
+
+    refresh_kde_cache
+
     # Check if ~/.local/bin is in PATH
     if [[ ":$PATH:" != *":$USER_BIN_DIR:"* ]]; then
         print_warning "$USER_BIN_DIR is not in your PATH"
@@ -636,6 +679,9 @@ install_global() {
     local tmp_desktop=$(mktemp)
     create_desktop_file "$GLOBAL_BIN_DIR/raven-terminal-launcher" "$tmp_desktop" "$icon_name"
     sudo mv "$tmp_desktop" "$GLOBAL_APP_DIR/$APP_NAME.desktop"
+    # mktemp creates 0600; sudo mv keeps it, leaving the entry unreadable to the
+    # user session (invisible in every DE menu). Make it world-readable.
+    sudo chmod 644 "$GLOBAL_APP_DIR/$APP_NAME.desktop"
     print_success "Desktop entry created at $GLOBAL_APP_DIR/$APP_NAME.desktop"
     
     # Update icon cache
@@ -652,6 +698,8 @@ install_global() {
     if command -v update-desktop-database &> /dev/null; then
         sudo update-desktop-database "$GLOBAL_APP_DIR" 2>/dev/null || true
     fi
+
+    refresh_kde_cache
 }
 
 
