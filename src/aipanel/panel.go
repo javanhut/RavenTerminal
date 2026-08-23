@@ -2,6 +2,7 @@ package aipanel
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -367,9 +368,9 @@ func (p *Panel) SpinnerFrame() string {
 
 // GetLastAssistantMessage returns the last assistant message content
 func (p *Panel) GetLastAssistantMessage() string {
-	for i := len(p.Messages) - 1; i >= 0; i-- {
-		if p.Messages[i].Role == "assistant" {
-			return p.Messages[i].Content
+	for _, v := range slices.Backward(p.Messages) {
+		if v.Role == "assistant" {
+			return v.Content
 		}
 	}
 	return ""

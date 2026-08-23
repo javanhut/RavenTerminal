@@ -14,6 +14,7 @@ import (
 	"math"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -3535,8 +3536,8 @@ func truncateHeadToCells(s string, max int) string {
 	budget := max - 3
 	runes := []rune(s)
 	w := 0
-	for i := len(runes) - 1; i >= 0; i-- {
-		cw := grid.RuneWidth(runes[i])
+	for i, rune := range slices.Backward(runes) {
+		cw := grid.RuneWidth(rune)
 		if w+cw > budget {
 			return "..." + string(runes[i+1:])
 		}

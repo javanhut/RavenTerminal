@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/user"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -470,8 +471,8 @@ func replaceEnv(env []string, key, value string) []string {
 
 func removeEnv(env []string, key string) []string {
 	prefix := key + "="
-	for i := len(env) - 1; i >= 0; i-- {
-		if strings.HasPrefix(env[i], prefix) {
+	for i, e := range slices.Backward(env) {
+		if strings.HasPrefix(e, prefix) {
 			env = append(env[:i], env[i+1:]...)
 		}
 	}
