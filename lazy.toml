@@ -12,6 +12,9 @@ default = "all"
 [variables]
 app_name = "raven-terminal"
 scripts_dir = "scripts"
+# Display backend for the GLFW build: auto | wayland | x11.
+# Override per-run: imlazy build backend=wayland
+backend = "auto"
 blue = "\\033[0;34m"
 green = "\\033[0;32m"
 yellow = "\\033[1;33m"
@@ -24,14 +27,27 @@ nc = "\\033[0m"
 desc = "Default target"
 dep = ["build"]
 
+# The Makefile picks a GLFW backend via `ifeq` on BACKEND/XDG_SESSION_TYPE and
+# turns it into `-tags wayland`. `imlazy migrate` dropped that, so this rebuilt
+# it as portable shell — same rules, same default. Without it every build is
+# X11-only, which silently fails on a Wayland-only compositor (no XWayland).
 [commands.build]
-desc = "Build the application"
-run = [
-  "echo -e \"{{blue}}[INFO]{{nc}} Building {{app_name}}...\"",
-  "go build -o {{app_name}} ./src",
-  "chmod +x {{app_name}}",
-  "echo -e \"{{green}}[OK]{{nc}} Build successful: ./{{app_name}}\"",
-]
+desc = "Build the application (backend: auto | wayland | x11)"
+run = ["""
+backend="{{backend}}"
+if [ "$backend" = "auto" ]; then
+  if [ "$XDG_SESSION_TYPE" = "wayland" ] && pkg-config --exists wayland-client xkbcommon 2>/dev/null; then
+    backend=wayland
+  else
+    backend=x11
+  fi
+fi
+if [ "$backend" = "wayland" ]; then tags="-tags wayland"; else tags=""; fi
+echo -e "{{blue}}[INFO]{{nc}} Building {{app_name}} (backend: $backend)..."
+go build $tags -o {{app_name}} ./src
+chmod +x {{app_name}}
+echo -e "{{green}}[OK]{{nc}} Build successful: ./{{app_name}} ($backend)"
+"""]
 
 [commands.install]
 desc = "Install system-wide (clean install - uninstalls first)"
