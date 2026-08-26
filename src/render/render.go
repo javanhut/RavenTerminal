@@ -231,6 +231,7 @@ type Renderer struct {
 
 	// Help panel scroll state and cached section content
 	helpScrollOffset int
+	helpVisibleLines int // lines the last rendered panel actually fit
 	helpSections     []helpSection
 
 	// Search-preview wrap cache: rebuilt only when the preview content,
@@ -1678,8 +1679,10 @@ func (r *Renderer) ScrollHelpUp() {
 
 // ScrollHelpDown scrolls the help panel down
 func (r *Renderer) ScrollHelpDown() {
-	// Estimate visible lines based on default panel size
-	visibleLines := 20
+	visibleLines := r.helpVisibleLines
+	if visibleLines <= 0 {
+		visibleLines = 20 // never rendered yet
+	}
 	maxScroll := max(r.getTotalHelpLines()-visibleLines, 0)
 	if r.helpScrollOffset < maxScroll {
 		r.helpScrollOffset++
@@ -1691,25 +1694,82 @@ func (r *Renderer) ResetHelpScroll() {
 	r.helpScrollOffset = 0
 }
 
+const (
+	helpTitle  = "Keybindings Help"
+	helpFooter = "Up/Down: scroll | Esc: close"
+)
+
+// helpLayout is the help panel's geometry, derived from the font cell so a
+// large font or a HiDPI framebuffer widens the panel with the text instead of
+// clipping it. The cell counts are hard budgets: the renderer truncates every
+// string to them, so nothing draws past the border at any window size.
+type helpLayout struct {
+	panelWidth   float32
+	marginX      float32
+	scrollGutter float32
+	keyIndent    float32 // key column inset from contentX
+	keyColWidth  float32 // contentX to the description column
+	contentCells int     // full-width lines: title, section titles, footer
+	keyCells     int     // key label budget
+	descCells    int     // description budget
+}
+
+// helpPanelLayout sizes the panel to its widest content. longestFull is the
+// widest line spanning both columns (panel title, section titles, footer). A
+// window too narrow for all of it clamps, and the column budgets shrink to
+// share what is left rather than overflowing.
+func helpPanelLayout(width int, cellWidth float32, longestKey, longestDesc, longestFull int) helpLayout {
+	indent, gap := 1, 3 // key column inset, and the gap before descriptions
+
+	l := helpLayout{
+		marginX:      cellWidth * 2,
+		scrollGutter: cellWidth * 2,
+		keyCells:     longestKey,
+		descCells:    longestDesc,
+	}
+	chrome := l.marginX*2 + l.scrollGutter
+	l.contentCells = max(longestKey+indent+gap+longestDesc, longestFull)
+	l.panelWidth = chrome + cellWidth*float32(l.contentCells)
+	if maxWidth := float32(width) - l.marginX*2; l.panelWidth > maxWidth {
+		l.panelWidth = maxWidth
+		l.contentCells = max(int((l.panelWidth-chrome)/cellWidth), 0)
+	}
+
+	if l.contentCells < 16 { // no room for column chrome
+		indent, gap = 0, min(1, l.contentCells)
+	}
+	if avail := l.contentCells - indent - gap; l.keyCells+l.descCells > avail {
+		l.keyCells = max(min(l.keyCells, avail/2), 0)
+		l.descCells = max(avail-l.keyCells, 0)
+	}
+	l.keyIndent = cellWidth * float32(indent)
+	l.keyColWidth = cellWidth * float32(indent+l.keyCells+gap)
+	return l
+}
+
 // renderHelpPanel renders the keybindings help overlay
 func (r *Renderer) renderHelpPanel(width, height int, proj [16]float32) {
-	// Panel dimensions - dynamically sized based on window
-	// Use 80% of window size for the panel
-	panelWidth := float32(width) * 0.80
-	panelHeight := float32(height) * 0.85
+	lineHeight := r.cellHeight * 1.5
 
-	// Set reasonable min/max constraints
-	if panelWidth < 350 {
-		panelWidth = 350
+	// Size the panel from its content in cells. Fixed pixel min/max caps
+	// left the panel only a couple dozen columns wide on a HiDPI framebuffer
+	// (or with a large font), so every binding spilled past the border.
+	sections := r.getHelpSections()
+	longestKey, longestDesc := 0, 0
+	longestFull := max(textCells(helpTitle), textCells(helpFooter))
+	for _, section := range sections {
+		longestFull = max(longestFull, textCells(section.title))
+		for _, binding := range section.bindings {
+			longestKey = max(longestKey, textCells(binding[0]))
+			longestDesc = max(longestDesc, textCells(binding[1]))
+		}
 	}
-	if panelWidth > 700 {
-		panelWidth = 700
-	}
-	if panelHeight < 250 {
-		panelHeight = 250
-	}
-	if panelHeight > 800 {
-		panelHeight = 800
+	layout := helpPanelLayout(width, r.cellWidth, longestKey, longestDesc, longestFull)
+	panelWidth, marginX := layout.panelWidth, layout.marginX
+
+	panelHeight := float32(height) * 0.85
+	if maxHeight := float32(height) - lineHeight*2; panelHeight > maxHeight {
+		panelHeight = maxHeight
 	}
 
 	// Center the panel in the window
@@ -1732,38 +1792,22 @@ func (r *Renderer) renderHelpPanel(width, height int, proj [16]float32) {
 	r.drawRect(panelX, panelY, borderWidth, panelHeight, borderColor, proj)
 	r.drawRect(panelX+panelWidth-borderWidth, panelY, borderWidth, panelHeight, borderColor, proj)
 
-	// Content positioning with dynamic margins
-	marginX := panelWidth * 0.05
-	if marginX < 20 {
-		marginX = 20
-	}
 	contentX := panelX + marginX
-	contentWidth := panelWidth - marginX*2 - 25 // Leave room for scrollbar
+	contentWidth := r.cellWidth * float32(layout.contentCells)
 
-	lineHeight := r.cellHeight * 1.5
-	headerY := panelY + 40
-	contentStartY := headerY + lineHeight*2
-	footerHeight := float32(50)
+	// drawText takes the bottom of a cell box, not its top: keep the header
+	// and footer baselines font-relative so they never land on the border.
+	headerY := panelY + lineHeight*1.2
+	contentStartY := headerY + lineHeight*1.8
+	footerHeight := lineHeight * 2
 	contentEndY := panelY + panelHeight - footerHeight
-	visibleHeight := contentEndY - contentStartY
-	visibleLines := int(visibleHeight / lineHeight)
+	visibleLines := max(int((contentEndY-contentStartY)/lineHeight), 0)
+	r.helpVisibleLines = visibleLines
 
-	// Calculate column positions - size the key column to the longest key
-	// label so dual-chord labels ("Super+D / Ctrl+Shift+V") never overlap
-	// their descriptions.
-	longestKey := 0
-	for _, section := range r.getHelpSections() {
-		for _, binding := range section.bindings {
-			if w := textCells(binding[0]); w > longestKey {
-				longestKey = w
-			}
-		}
-	}
-	keyColWidth := r.cellWidth * float32(longestKey+3)
-	descColX := contentX + keyColWidth
+	descColX := contentX + layout.keyColWidth
 
 	// Title (fixed, doesn't scroll)
-	r.drawText(contentX, headerY, "Keybindings Help", r.theme.TabActive, proj)
+	r.drawText(contentX, headerY, truncateToCells(helpTitle, layout.contentCells), r.theme.TabActive, proj)
 
 	// Draw a separator line under the title
 	separatorY := headerY + lineHeight*0.8
@@ -1774,27 +1818,27 @@ func (r *Renderer) renderHelpPanel(width, height int, proj [16]float32) {
 	maxScroll := max(totalLines-visibleLines, 0)
 
 	// Draw scroll indicator on right side
-	scrollBarX := panelX + panelWidth - 18
+	scrollBarWidth := r.cellWidth * 0.5
+	scrollBarX := contentX + contentWidth + layout.scrollGutter*0.5 - scrollBarWidth*0.5
 	scrollBarHeight := contentEndY - contentStartY
 	scrollBarY := contentStartY
 
 	if maxScroll > 0 {
 		// Scroll track
 		trackColor := [4]float32{0.12, 0.13, 0.18, 1.0}
-		r.drawRect(scrollBarX, scrollBarY, 8, scrollBarHeight, trackColor, proj)
+		r.drawRect(scrollBarX, scrollBarY, scrollBarWidth, scrollBarHeight, trackColor, proj)
 
 		// Scroll thumb - size proportional to visible content
 		scrollThumbHeight := scrollBarHeight * float32(visibleLines) / float32(totalLines)
-		if scrollThumbHeight < 30 {
-			scrollThumbHeight = 30
+		if scrollThumbHeight < lineHeight {
+			scrollThumbHeight = lineHeight
 		}
 		scrollThumbY := scrollBarY + (scrollBarHeight-scrollThumbHeight)*float32(r.helpScrollOffset)/float32(maxScroll)
 
-		r.drawRect(scrollBarX, scrollThumbY, 8, scrollThumbHeight, r.theme.TabActive, proj)
+		r.drawRect(scrollBarX, scrollThumbY, scrollBarWidth, scrollThumbHeight, r.theme.TabActive, proj)
 	}
 
 	// Draw content with clipping
-	sections := r.getHelpSections()
 	currentLine := 0
 
 	for _, section := range sections {
@@ -1802,7 +1846,7 @@ func (r *Renderer) renderHelpPanel(width, height int, proj [16]float32) {
 		if currentLine >= r.helpScrollOffset && currentLine < r.helpScrollOffset+visibleLines {
 			drawY := contentStartY + float32(currentLine-r.helpScrollOffset)*lineHeight
 			if drawY+lineHeight <= contentEndY {
-				r.drawText(contentX, drawY, section.title, r.theme.TabActive, proj)
+				r.drawText(contentX, drawY, truncateToCells(section.title, layout.contentCells), r.theme.TabActive, proj)
 			}
 		}
 		currentLine++
@@ -1812,8 +1856,8 @@ func (r *Renderer) renderHelpPanel(width, height int, proj [16]float32) {
 			if currentLine >= r.helpScrollOffset && currentLine < r.helpScrollOffset+visibleLines {
 				drawY := contentStartY + float32(currentLine-r.helpScrollOffset)*lineHeight
 				if drawY+lineHeight <= contentEndY {
-					r.drawText(contentX+15, drawY, binding[0], r.theme.Cursor, proj)
-					r.drawText(descColX, drawY, binding[1], r.theme.Foreground, proj)
+					r.drawText(contentX+layout.keyIndent, drawY, truncateToCells(binding[0], layout.keyCells), r.theme.Cursor, proj)
+					r.drawText(descColX, drawY, truncateToCells(binding[1], layout.descCells), r.theme.Foreground, proj)
 				}
 			}
 			currentLine++
@@ -1825,12 +1869,12 @@ func (r *Renderer) renderHelpPanel(width, height int, proj [16]float32) {
 
 	// Footer separator and text (fixed, doesn't scroll)
 	// Position text first, then put separator above it
-	footerY := panelY + panelHeight - 20
-	footerText := "Up/Down: scroll | Esc: close"
+	footerY := panelY + panelHeight - lineHeight*0.5
+	footerText := truncateToCells(helpFooter, layout.contentCells)
 	r.drawText(contentX, footerY, footerText, [4]float32{0.5, 0.5, 0.5, 1.0}, proj)
 
 	// Separator line above the footer text
-	footerSepY := footerY - r.cellHeight - 8
+	footerSepY := footerY - lineHeight
 	r.drawRect(contentX, footerSepY, contentWidth, 1, r.theme.Foreground, proj)
 }
 
@@ -3511,15 +3555,22 @@ func textCells(s string) int {
 // ellipsis when something was cut. Safe for multibyte/wide runes (never slices
 // mid-rune, counts display cells rather than bytes).
 func truncateToCells(s string, max int) string {
-	if max <= 0 || textCells(s) <= max {
+	if max <= 0 {
+		return ""
+	}
+	if textCells(s) <= max {
 		return s
 	}
-	budget := max - 3 // room for "..."
+	ellipsis := "..."
+	if max < 4 {
+		ellipsis = "" // no room for the marker: hard-cut instead of overflowing
+	}
+	budget := max - textCells(ellipsis)
 	w := 0
 	for i, char := range s {
 		cw := grid.RuneWidth(char)
 		if w+cw > budget {
-			return s[:i] + "..."
+			return s[:i] + ellipsis
 		}
 		w += cw
 	}
