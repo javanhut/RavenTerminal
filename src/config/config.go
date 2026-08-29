@@ -109,10 +109,32 @@ type Config struct {
 	RestoreSession bool `toml:"restore_session"`
 }
 
-// sha256 of the pre-fix default VCS-detect script (broken ahead/behind
-// parsing), kept so LoadConfig can migrate old configs to defaultVCSDetect
-// without embedding the full 80-line legacy script.
-const defaultVCSDetectLegacyHash = "8478bf11ed2c355fd863f6a8257eb42b2899cc5e01b928010457a5cf6af10d6c"
+// sha256 digests of earlier default VCS-detect scripts, kept so LoadConfig
+// can migrate configs that persisted an old default to defaultVCSDetect
+// without embedding the full legacy scripts. Add the previous default's hash
+// here whenever defaultVCSDetect changes.
+var defaultVCSDetectLegacyHashes = []string{
+	// Broken ahead/behind parsing.
+	"8478bf11ed2c355fd863f6a8257eb42b2899cc5e01b928010457a5cf6af10d6c",
+	// Ivaldi timeline only, no staged/unstaged/untracked counts.
+	"425df6244b3dee44382cbb14f0f02cfc7f9e8b480c504510e2ff7861a8121133",
+}
+
+// ivaldiStatusAwk reduces `ivaldi status --json` to three numbers:
+// "<staged> <unstaged> <untracked>". Files gathered for the next seal
+// (state "staged") and paths in staged_deletions count as staged; modified
+// files and deletions that have not been gathered count as unstaged. It
+// contains no single quotes or backticks, so bash, fish, and Go raw strings
+// can all embed it verbatim.
+const ivaldiStatusAwk = `/"path":/ {p=$0; sub(/.*"path": *"/, "", p); sub(/".*/, "", p); last=p}
+/"state": *"staged"/ {s++}
+/"state": *"modified"/ {m++}
+/"state": *"deleted"/ {d[last]=1; dn++}
+/"state": *"untracked"/ {n++}
+/"staged_deletions": *\[/ {sd=1; if ($0 ~ /\]/) sd=0; next}
+sd && /\]/ {sd=0; next}
+sd && /"/ {p=$0; sub(/^[^"]*"/, "", p); sub(/".*/, "", p); s++; if (p in d) dn--}
+END {print s+0, m+dn, n+0}`
 
 const defaultLanguageDetect = `# Detect project language
 [ -f go.mod ] && echo "Go" && return 0
@@ -178,6 +200,7 @@ fi
 
 _ivaldi_tl=""
 _ivaldi_present=""
+_ivaldi_state=""
 if command -v ivaldi >/dev/null 2>&1; then
     _ivaldi_raw="$(ivaldi whereami 2>/dev/null)"
     if [ -z "$_ivaldi_raw" ]; then
@@ -187,6 +210,25 @@ if command -v ivaldi >/dev/null 2>&1; then
         _ivaldi_present="1"
     fi
     _ivaldi_tl=$(printf "%s\n" "$_ivaldi_raw" | awk -F: 'tolower($1) ~ /^[[:space:]]*timeline[[:space:]]*$/ {sub(/^[[:space:]]+/, "", $2); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}')
+
+    # Staged (gathered) / unstaged / untracked counts, like the Git ones.
+    _ivaldi_json="$(ivaldi status --json 2>/dev/null)"
+    if [ -n "$_ivaldi_json" ]; then
+        _ivaldi_present="1"
+        read -r _istaged _iunstaged _iuntracked <<<"$(printf "%s\n" "$_ivaldi_json" | awk '` + ivaldiStatusAwk + `')"
+        case "$_istaged" in
+            (''|*[!0-9]*) _istaged=0 ;;
+        esac
+        case "$_iunstaged" in
+            (''|*[!0-9]*) _iunstaged=0 ;;
+        esac
+        case "$_iuntracked" in
+            (''|*[!0-9]*) _iuntracked=0 ;;
+        esac
+        [ "$_istaged" -gt 0 ] && _ivaldi_state="$_ivaldi_state +$_istaged"
+        [ "$_iunstaged" -gt 0 ] && _ivaldi_state="$_ivaldi_state ~$_iunstaged"
+        [ "$_iuntracked" -gt 0 ] && _ivaldi_state="$_ivaldi_state ?$_iuntracked"
+    fi
 fi
 if [ -z "$_ivaldi_tl" ] && [ -f .ivaldi ]; then
     _ivaldi_present="1"
@@ -203,7 +245,9 @@ if [ -z "$_ivaldi_tl" ] && [ -d .ivaldi ]; then
 fi
 if [ -n "$_ivaldi_tl" ] || [ -n "$_ivaldi_present" ]; then
     if [ -n "$_ivaldi_tl" ]; then
-        _ivaldi_display="Ivaldi (tl: $_ivaldi_tl)"
+        _ivaldi_display="Ivaldi (tl: $_ivaldi_tl$_ivaldi_state)"
+    elif [ -n "$_ivaldi_state" ]; then
+        _ivaldi_display="Ivaldi ($(echo $_ivaldi_state))"
     else
         _ivaldi_display="Ivaldi"
     fi
@@ -425,8 +469,12 @@ func Load() (*Config, error) {
 	if _, err := toml.DecodeFile(configPath, cfg); err != nil {
 		return nil, err
 	}
-	if fmt.Sprintf("%x", sha256.Sum256([]byte(cfg.Scripts.VCSDetect))) == defaultVCSDetectLegacyHash {
-		cfg.Scripts.VCSDetect = defaultVCSDetect
+	vcsHash := fmt.Sprintf("%x", sha256.Sum256([]byte(cfg.Scripts.VCSDetect)))
+	for _, legacy := range defaultVCSDetectLegacyHashes {
+		if vcsHash == legacy {
+			cfg.Scripts.VCSDetect = defaultVCSDetect
+			break
+		}
 	}
 
 	// Migrate ls alias to platform-appropriate default if it's the old GNU-specific value

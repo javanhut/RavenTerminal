@@ -175,7 +175,7 @@ const ivaldiTimelineAwk = `tolower($1) ~ /^[[:space:]]*timeline[[:space:]]*$/ {s
 
 // Fish translation of the default VCS-detect body (see defaultVCSDetect in
 // config.go): Git branch + ahead/behind + staged/unstaged/untracked counts,
-// then Ivaldi timeline detection.
+// then Ivaldi timeline + staged/unstaged/untracked counts.
 const fishDefaultVCSDetect = `    # Detect VCS (Git + Ivaldi)
     set -l _vcs ""
     if git rev-parse --is-inside-work-tree >/dev/null 2>&1
@@ -221,6 +221,7 @@ const fishDefaultVCSDetect = `    # Detect VCS (Git + Ivaldi)
 
     set -l _ivaldi_tl ""
     set -l _ivaldi_present ""
+    set -l _ivaldi_state ""
     if command -q ivaldi
         set -l _ivaldi_raw (ivaldi whereami 2>/dev/null)
         if test -z "$_ivaldi_raw"
@@ -230,6 +231,18 @@ const fishDefaultVCSDetect = `    # Detect VCS (Git + Ivaldi)
             set _ivaldi_present 1
         end
         set _ivaldi_tl (printf '%s\n' $_ivaldi_raw | awk -F: '` + ivaldiTimelineAwk + `')
+
+        # Staged (gathered) / unstaged / untracked counts, like the Git ones.
+        set -l _ivaldi_json (ivaldi status --json 2>/dev/null)
+        if test -n "$_ivaldi_json"
+            set _ivaldi_present 1
+            set -l _icounts (printf '%s\n' $_ivaldi_json | awk '` + ivaldiStatusAwk + `' | string split ' ')
+            if test (count $_icounts) -ge 3
+                string match -qr '^[0-9]+$' -- $_icounts[1]; and test $_icounts[1] -gt 0; and set _ivaldi_state "$_ivaldi_state +$_icounts[1]"
+                string match -qr '^[0-9]+$' -- $_icounts[2]; and test $_icounts[2] -gt 0; and set _ivaldi_state "$_ivaldi_state ~$_icounts[2]"
+                string match -qr '^[0-9]+$' -- $_icounts[3]; and test $_icounts[3] -gt 0; and set _ivaldi_state "$_ivaldi_state ?$_icounts[3]"
+            end
+        end
     end
     if test -z "$_ivaldi_tl"; and test -f .ivaldi
         set _ivaldi_present 1
@@ -247,7 +260,9 @@ const fishDefaultVCSDetect = `    # Detect VCS (Git + Ivaldi)
     if test -n "$_ivaldi_tl"; or test -n "$_ivaldi_present"
         set -l _ivaldi_display "Ivaldi"
         if test -n "$_ivaldi_tl"
-            set _ivaldi_display "Ivaldi (tl: $_ivaldi_tl)"
+            set _ivaldi_display "Ivaldi (tl: $_ivaldi_tl$_ivaldi_state)"
+        else if test -n "$_ivaldi_state"
+            set _ivaldi_display "Ivaldi ("(string trim -- $_ivaldi_state)")"
         end
         if test -n "$_vcs"
             set _vcs "$_vcs | $_ivaldi_display"

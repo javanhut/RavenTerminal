@@ -300,3 +300,76 @@ func TestInitScriptRshSyntax(t *testing.T) {
 		})
 	}
 }
+
+// In an Ivaldi repository, both shells must report the timeline plus the
+// same staged/unstaged/untracked counts (gathered files and staged deletions
+// count as staged; ungathered edits and deletions as unstaged).
+func TestIvaldiVCSDetectMatchesBash(t *testing.T) {
+	cfg := DefaultConfig()
+	initPath, fishPath := writeScripts(t, cfg)
+	bash := shellPath(t, "bash")
+	ivaldi := shellPath(t, "ivaldi")
+	// fish is optional here: the bash assertions still run without it.
+	fish, _ := exec.LookPath("fish")
+
+	repo := t.TempDir()
+	run := func(args ...string) []byte {
+		t.Helper()
+		cmd := exec.Command(ivaldi, args...)
+		cmd.Dir = repo
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("ivaldi %v: %v\n%s", args, err, out)
+		}
+		return out
+	}
+	write := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run("forge")
+	// writeScripts points HOME at an empty dir, so no global author config
+	// exists; seal needs one, so set it repo-locally.
+	run("config", "--set", "user.name", "t")
+	run("config", "--set", "user.email", "t@example.com")
+	write("committed.txt", "a")
+	write("doomed.txt", "b")
+	run("gather", "committed.txt", "doomed.txt")
+	run("seal", "-m", "init")
+	write("committed.txt", "changed")            // unstaged modification  -> ~1
+	os.Remove(filepath.Join(repo, "doomed.txt")) // deletion, then gathered -> +1
+	run("gather", "doomed.txt")
+	write("staged.txt", "c") // new file, gathered     -> +1
+	run("gather", "staged.txt")
+	write("untracked.txt", "d") // never gathered         -> ?1
+
+	bashCmd := exec.Command(bash, "-c", ". "+shQuote(initPath)+"; __raven_detect_vcs")
+	bashCmd.Dir = repo
+	bashOut, err := bashCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bash vcs detect: %v\n%s", err, bashOut)
+	}
+
+	bashVCS := strings.TrimSpace(string(bashOut))
+	if fish != "" {
+		fishCmd := exec.Command(fish, "--no-config", "-c", "source "+FishQuote(fishPath)+"; __raven_detect_vcs")
+		fishCmd.Dir = repo
+		fishOut, err := fishCmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("fish vcs detect: %v\n%s", err, fishOut)
+		}
+		if fishVCS := strings.TrimSpace(string(fishOut)); fishVCS != bashVCS {
+			t.Errorf("fish %q != bash %q", fishVCS, bashVCS)
+		}
+	}
+	if !strings.Contains(bashVCS, "Ivaldi (tl: main") {
+		t.Errorf("vcs output %q does not contain Ivaldi (tl: main", bashVCS)
+	}
+	for _, marker := range []string{"+2", "~1", "?1"} {
+		if !strings.Contains(bashVCS, marker) {
+			t.Errorf("vcs output %q missing %s (staged/unstaged/untracked)", bashVCS, marker)
+		}
+	}
+}
