@@ -22,7 +22,7 @@ implemented in-tree — there is no external terminal backend. Runs on Linux
 - Split panes: vertical or horizontal, nestable, up to 16 panes per tab, with a resize mode
 - Optional session restore: reopen the previous run's tabs, splits, and working directories
 - Fullscreen toggle and font zoom
-- Leader-key shortcuts: Cmd on macOS, Super or Ctrl+Shift on Linux — plain Ctrl stays free for shell control characters
+- Leader-key shortcuts: Cmd on macOS, Super or Ctrl+Shift on Linux — plain Ctrl stays free for shell control characters, and Super+Ctrl is left to the compositor
 
 **Terminal**
 - Scrollback buffer with mouse-wheel and keyboard scrolling

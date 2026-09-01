@@ -110,14 +110,20 @@ type App struct {
 }
 
 // newApp builds the process's first window: it owns session restore and
-// session saving, which is why it is flagged primary.
-func newApp() *App {
+// session saving, which is why it is flagged primary. A non-empty command
+// (`raven-terminal -e cmd args...`) runs that command in the first tab
+// instead; such a window neither restores nor saves the session, so a
+// launched TUI app never disturbs the user's saved layout.
+func newApp(command []string) *App {
 	// Wake the event-driven main loop whenever a pane produces output, so shell output
 	// and key echoes render immediately. Registered before any pane (and its reader
 	// goroutine) is created to avoid a data race on the notifier.
 	tab.SetWakeNotifier(window.PostEmptyEvent)
 
 	a, err := newAppWith(func(cols, rows uint16) (*tab.TabManager, error) {
+		if len(command) > 0 {
+			return tab.NewTabManagerCommand(cols, rows, command)
+		}
 		// Reopen the previous session's layout when the user has that enabled.
 		// The config is read directly here because the settings menu (which
 		// normally owns it) is not built until after the tab manager exists.
@@ -130,7 +136,7 @@ func newApp() *App {
 	if err != nil {
 		log.Fatalf("Failed to create window: %v", err)
 	}
-	a.primary = true
+	a.primary = len(command) == 0
 	return a
 }
 
@@ -224,9 +230,10 @@ func (a *App) Destroy() {
 
 // saveSessionIfEnabled persists the tab layout on exit when the user has
 // restore turned on. Gated on the setting so a user who does not want session
-// restore never has a session file written for them.
+// restore never has a session file written for them, and on primary so a
+// secondary or `-e` window never overwrites the saved layout with its own.
 func (a *App) saveSessionIfEnabled() {
-	if a.settingsMenu.Config != nil && a.settingsMenu.Config.RestoreSession {
+	if a.primary && a.settingsMenu.Config != nil && a.settingsMenu.Config.RestoreSession {
 		a.saveSession()
 	}
 }

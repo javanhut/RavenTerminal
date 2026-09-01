@@ -123,3 +123,41 @@ func TestFindDoesNotCollideWithSearchPanel(t *testing.T) {
 		t.Fatalf("mac Cmd+F = %v, want ActionToggleSearchPanel", got)
 	}
 }
+
+// Super+Ctrl is the compositor's layer on Linux (Huginn's window management
+// lives there), so the terminal must neither act on it nor pass it to the
+// shell — even though under Huginn the chords never arrive at all.
+func TestLinuxSuperCtrlIsReservedForTheCompositor(t *testing.T) {
+	prev := isMacOS
+	defer func() { isMacOS = prev }()
+	isMacOS = false
+
+	sc := glfw.ModSuper | glfw.ModControl
+	cases := []struct {
+		name string
+		key  glfw.Key
+		mods glfw.ModifierKey
+	}{
+		{"Super+Ctrl+T (Huginn: open a terminal)", glfw.KeyT, sc},
+		{"Super+Ctrl+Q (Huginn: close window)", glfw.KeyQ, sc},
+		{"Super+Ctrl+C (Huginn: carousel)", glfw.KeyC, sc},
+		{"Super+Ctrl+A (Huginn: pinned apps)", glfw.KeyA, sc},
+		{"Super+Ctrl+Space (Huginn: launcher)", glfw.KeySpace, sc},
+		{"Super+Ctrl+1 (Huginn: workspace)", glfw.Key1, sc},
+		{"Super+Ctrl+Shift+1 (Huginn: send to workspace)", glfw.Key1, sc | glfw.ModShift},
+		{"Super+Ctrl+Left (Huginn: move window)", glfw.KeyLeft, sc},
+	}
+	for _, c := range cases {
+		res := TranslateKey(c.key, c.mods, false)
+		if res.Action != ActionNone || len(res.Data) != 0 {
+			t.Errorf("linux %s = %v %v, want nothing", c.name, res.Action, res.Data)
+		}
+	}
+
+	// On macOS there is no such compositor, and Cmd+Ctrl chords are the
+	// app's own — the guard must not leak across.
+	isMacOS = true
+	if got := TranslateKey(glfw.KeyT, sc, false).Action; got != ActionNewTab {
+		t.Errorf("mac Cmd+Ctrl+T = %v, want ActionNewTab", got)
+	}
+}

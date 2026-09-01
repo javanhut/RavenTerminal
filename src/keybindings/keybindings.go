@@ -76,6 +76,19 @@ func TranslateKey(key glfw.Key, mods glfw.ModifierKey, appCursorMode bool) KeyRe
 	// characters (Ctrl+C, Ctrl+D, ...), matching iTerm2/Terminal.app.
 	primary := super || (!isMacOS && ctrl && shift)
 
+	// Super+Ctrl is the compositor's layer on Linux. Huginn (RavenGUI) puts
+	// every window-management chord there — Super+Ctrl+T opens a terminal,
+	// Super+Ctrl+Q closes a window, Super+Ctrl+Shift+1..9 sends one to a
+	// workspace — and never forwards them, so under Huginn these never
+	// arrive. Under another compositor they would, and `primary` would read
+	// Super+Ctrl+T as "new tab": a chord the desktop documents as the
+	// compositor's must not do something else the moment the compositor is
+	// not there to take it. Swallowed rather than sent to the shell, since no
+	// control character was meant. See docs/keybindings.md, "Reserved".
+	if !isMacOS && super && ctrl {
+		return KeyResult{Action: ActionNone}
+	}
+
 	// Exit: Ctrl+Q everywhere, plus Super+Q (Cmd+Q-style) on both platforms.
 	if (ctrl && key == glfw.KeyQ) || (super && key == glfw.KeyQ) {
 		return KeyResult{Action: ActionExit}

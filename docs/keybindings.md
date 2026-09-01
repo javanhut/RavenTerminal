@@ -11,6 +11,30 @@ iTerm2 / Terminal.app:
 "Leader+X" below means Cmd+X on macOS, and Super+X or Ctrl+Shift+X on Linux,
 unless a row says otherwise.
 
+## Reserved: Super+Ctrl on Linux
+
+On Linux the terminal never acts on a **Super+Ctrl** chord — with or without
+Shift — and never sends one to the shell. That layer belongs to the
+compositor: Huginn (the RavenLinux desktop) keeps all of its window management
+there and intercepts it before any client sees it. The full list is in
+RavenGUI's `docs/integration.md`; the ones you will meet are:
+
+| Chord | Huginn does |
+|-------|-------------|
+| Super+Ctrl+Space | open the application launcher |
+| Super+Ctrl+A | open the pinned applications |
+| Super+Ctrl+S | open quick settings |
+| Super+Ctrl+E / T | open a terminal |
+| Super+Ctrl+Q / X | close the focused window |
+| Super+Ctrl+J / K | focus the next / previous window |
+| Super+Ctrl+arrows | move the focused window between tiles |
+| Super+Ctrl+1..9, Super+Ctrl+Shift+1..9 | go to / send the window to a workspace |
+| Super+Ctrl+H | show the compositor's keybinding list |
+
+Plain **Super** and **Super+Shift** are the terminal's, which is what makes the
+leader layer below work. `Super+L` is also the compositor's (it locks the
+session) and is not listed above because the terminal has no binding on it.
+
 ## General
 
 | Keybinding | Action |
@@ -57,8 +81,9 @@ unless a row says otherwise.
 | Cmd/Super+Shift+Tab | Cycle to next pane |
 
 Note: macOS reserves Cmd+Shift+Tab for the app switcher unless remapped, and
-tiling window managers often grab Super chords; the leader+] / leader+[
-bindings always cycle panes.
+tiling window managers often grab Super chords (on RavenLinux they do not —
+Huginn leaves Super and Super+Shift alone, see "Reserved" above); the
+leader+] / leader+[ bindings always cycle panes.
 
 ## Scrolling
 

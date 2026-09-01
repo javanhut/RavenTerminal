@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -293,7 +294,24 @@ func previewCacheKey(useProxy bool, url string) string {
 func main() {
 	// runApps owns the lifetime of every window, including destroying each one
 	// as it closes and terminating GLFW after the last.
-	runApps(newApp())
+	runApps(newApp(commandFromArgs(os.Args[1:])))
+}
+
+// commandFromArgs extracts the command a `-e` (xterm convention) or `--`
+// introduces: everything after the flag, verbatim, is the program and its
+// arguments. Desktop entries rely on this — `Exec=raven-terminal -e crow %F`
+// must run crow, not a bare shell. Returns nil when no command was given.
+func commandFromArgs(args []string) []string {
+	for i, arg := range args {
+		switch arg {
+		case "-e", "--execute", "--":
+			if i+1 < len(args) {
+				return args[i+1:]
+			}
+			return nil
+		}
+	}
+	return nil
 }
 
 // writePaste sends clipboard text to a terminal, normalizing newlines and,

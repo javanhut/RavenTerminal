@@ -126,7 +126,13 @@ func DrainClipboard() (string, bool) {
 
 // NewPane creates a new terminal pane
 func NewPane(id int, cols, rows uint16, startDir string) (*Pane, error) {
-	pty, err := shell.NewPtySession(cols, rows, startDir)
+	return newPaneCommand(id, cols, rows, startDir, nil)
+}
+
+// newPaneCommand creates a pane running `command` instead of a shell when
+// command is non-empty (the `-e` path).
+func newPaneCommand(id int, cols, rows uint16, startDir string, command []string) (*Pane, error) {
+	pty, err := shell.NewPtySessionCommand(cols, rows, startDir, command)
 	if err != nil {
 		return nil, err
 	}
@@ -302,8 +308,14 @@ type Tab struct {
 
 // NewTab creates a new terminal tab
 func NewTab(id int, cols, rows uint16, startDir string) (*Tab, error) {
+	return newTabCommand(id, cols, rows, startDir, nil)
+}
+
+// newTabCommand creates a tab whose first pane runs `command` instead of a
+// shell when command is non-empty.
+func newTabCommand(id int, cols, rows uint16, startDir string, command []string) (*Tab, error) {
 	// Create the first pane
-	pane, err := NewPane(1, cols, rows, startDir)
+	pane, err := newPaneCommand(1, cols, rows, startDir, command)
 	if err != nil {
 		return nil, err
 	}
@@ -977,6 +989,13 @@ type TabManager struct {
 
 // NewTabManager creates a new tab manager
 func NewTabManager(cols, rows uint16) (*TabManager, error) {
+	return NewTabManagerCommand(cols, rows, nil)
+}
+
+// NewTabManagerCommand creates a tab manager whose initial tab runs `command`
+// instead of a shell when command is non-empty (`raven-terminal -e cmd`).
+// Tabs the user opens afterwards still get a normal shell.
+func NewTabManagerCommand(cols, rows uint16, command []string) (*TabManager, error) {
 	tm := &TabManager{
 		tabs:        make([]*Tab, 0, MaxTabs),
 		activeIndex: 0,
@@ -985,6 +1004,14 @@ func NewTabManager(cols, rows uint16) (*TabManager, error) {
 	}
 
 	// Create initial tab
+	if len(command) > 0 {
+		tab, err := newTabCommand(1, cols, rows, "", command)
+		if err != nil {
+			return nil, err
+		}
+		tm.insertAfterActive(tab)
+		return tm, nil
+	}
 	if err := tm.NewTab(); err != nil {
 		return nil, err
 	}

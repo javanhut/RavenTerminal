@@ -259,6 +259,21 @@ func (p *PtySession) ShellName() string {
 
 // NewPtySession creates a new PTY session with a login shell
 func NewPtySession(cols, rows uint16, startDir string) (*PtySession, error) {
+	return newPtySession(cols, rows, startDir, nil)
+}
+
+// NewPtySessionCommand creates a PTY session running `command` instead of an
+// interactive shell — the `raven-terminal -e cmd args...` path. The session
+// still gets the full terminal environment (TERM, composed PATH, display
+// variables), and the pane closes when the command exits, matching xterm -e.
+func NewPtySessionCommand(cols, rows uint16, startDir string, command []string) (*PtySession, error) {
+	if len(command) == 0 {
+		return NewPtySession(cols, rows, startDir)
+	}
+	return newPtySession(cols, rows, startDir, command)
+}
+
+func newPtySession(cols, rows uint16, startDir string, command []string) (*PtySession, error) {
 	// Load config
 	cfg, err := config.Load()
 	if err != nil {
@@ -280,6 +295,11 @@ func NewPtySession(cols, rows uint16, startDir string) (*PtySession, error) {
 		shellBase = shell[idx+1:]
 	}
 
+	// The PATH the session will see; also used to resolve a `-e` program by
+	// name, since the launching process's own PATH may lack per-user dirs
+	// like ~/.local/bin.
+	sessionPath := composePath(cfg.Shell.Paths, resolveBasePath(shell))
+
 	// Write the init script
 	initScriptPath, err := cfg.WriteInitScript()
 	if err != nil {
@@ -289,7 +309,13 @@ func NewPtySession(cols, rows uint16, startDir string) (*PtySession, error) {
 
 	// Build shell command based on config
 	var cmd *exec.Cmd
-	if cfg.Shell.SourceRC {
+	if len(command) > 0 {
+		cmd = commandFor(command, sessionPath)
+		shellBase = command[0]
+		if idx := strings.LastIndex(shellBase, "/"); idx >= 0 {
+			shellBase = shellBase[idx+1:]
+		}
+	} else if cfg.Shell.SourceRC {
 		// Source user's rc files - run as interactive login shell
 		switch shellBase {
 		case "bash":
@@ -368,7 +394,7 @@ func NewPtySession(cols, rows uint16, startDir string) (*PtySession, error) {
 	// login-shell environment (fixing GUI-launched macOS PATH) with the user's
 	// configured directories prepended.
 	env := os.Environ()
-	env = replaceEnv(env, "PATH", composePath(cfg.Shell.Paths, resolveBasePath(shell)))
+	env = replaceEnv(env, "PATH", sessionPath)
 	env = replaceEnv(env, "TERM", "xterm-256color")
 	env = replaceEnv(env, "COLORTERM", "truecolor")
 	env = replaceEnv(env, "TERM_PROGRAM", "RavenTerminal")
@@ -546,6 +572,27 @@ func processCwd(pid int) string {
 		}
 	}
 	return ""
+}
+
+// commandFor builds the exec.Cmd for an explicit `-e` command. A bare program
+// name is resolved against the PATH the session will export rather than the
+// launching process's PATH — a GUI compositor's environment often lacks
+// per-user directories like ~/.local/bin where such programs live.
+func commandFor(argv []string, pathEnv string) *exec.Cmd {
+	prog := argv[0]
+	if !strings.Contains(prog, "/") {
+		for _, dir := range strings.Split(pathEnv, ":") {
+			if dir == "" {
+				continue
+			}
+			candidate := dir + "/" + prog
+			if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+				prog = candidate
+				break
+			}
+		}
+	}
+	return exec.Command(prog, argv[1:]...)
 }
 
 // findShell finds the shell to use based on config
