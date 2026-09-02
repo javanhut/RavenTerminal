@@ -1579,11 +1579,13 @@ func (g *Grid) DeleteLinesWithBgLocked(n int, bg Color) {
 		n = bottom + 1 - g.CursorRow
 	}
 
-	// Shift lines up within the scroll region (move transfers style ownership)
+	// Shift lines up within the scroll region (move transfers style ownership).
+	// The soft-wrap mark describes the line's content, so it travels with it.
 	for row := g.CursorRow; row <= bottom-n; row++ {
 		for col := 0; col < g.Cols; col++ {
 			g.moveCell(g.index(col, row), g.index(col, row+n))
 		}
+		g.rows[row].flags = g.rows[row].flags&^RowSoftWrapped | g.rows[row+n].flags&RowSoftWrapped
 	}
 
 	// Clear bottom n lines of the scroll region with background color
@@ -1621,11 +1623,13 @@ func (g *Grid) InsertLinesWithBgLocked(n int, bg Color) {
 		n = bottom + 1 - g.CursorRow
 	}
 
-	// Shift lines down within the scroll region (move transfers style ownership)
+	// Shift lines down within the scroll region (move transfers style ownership).
+	// The soft-wrap mark describes the line's content, so it travels with it.
 	for row := bottom; row >= g.CursorRow+n; row-- {
 		for col := 0; col < g.Cols; col++ {
 			g.moveCell(g.index(col, row), g.index(col, row-n))
 		}
+		g.rows[row].flags = g.rows[row].flags&^RowSoftWrapped | g.rows[row-n].flags&RowSoftWrapped
 	}
 
 	// Clear n lines at cursor position with background color

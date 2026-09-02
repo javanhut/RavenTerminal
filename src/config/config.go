@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -470,11 +471,8 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	vcsHash := fmt.Sprintf("%x", sha256.Sum256([]byte(cfg.Scripts.VCSDetect)))
-	for _, legacy := range defaultVCSDetectLegacyHashes {
-		if vcsHash == legacy {
-			cfg.Scripts.VCSDetect = defaultVCSDetect
-			break
-		}
+	if slices.Contains(defaultVCSDetectLegacyHashes, vcsHash) {
+		cfg.Scripts.VCSDetect = defaultVCSDetect
 	}
 
 	// Migrate ls alias to platform-appropriate default if it's the old GNU-specific value

@@ -90,6 +90,13 @@ func (g *Grid) fillSpan(row, col0, col1 int, bg Color) {
 	if col0 >= col1 {
 		return
 	}
+	// An erase that reaches the last column ends the logical line here: the
+	// row no longer continues onto the next one. Clear the soft-wrap mark even
+	// on the no-op fast path below, since a stale mark makes SelectedText and
+	// reflow glue this row to its successor.
+	if col1 == g.Cols {
+		g.rows[row].flags &^= RowSoftWrapped
+	}
 	cells := g.rows[row].cells
 	st := styleOf(NewCellWithBg(bg))
 	// Compare against the target blank WITHOUT touching refcounts first:

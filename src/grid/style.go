@@ -347,6 +347,12 @@ func (g *Grid) putCellStyledRow(row *Row, col int, char rune, id StyleID, width 
 	*p = storedCell{Style: id, Char: char, Width: width, Link: link}
 	g.styles.release(old)
 	row.flags |= RowDirty
+	if col == len(row.cells)-1 {
+		// Overwriting the last column ends any earlier soft wrap; if this
+		// write itself overflows, the wrap path re-marks the row when the
+		// next character actually moves to the following line.
+		row.flags &^= RowSoftWrapped
+	}
 }
 
 // getCell reads and inflates the cell at a linear index.

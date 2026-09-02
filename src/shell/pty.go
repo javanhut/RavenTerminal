@@ -581,7 +581,7 @@ func processCwd(pid int) string {
 func commandFor(argv []string, pathEnv string) *exec.Cmd {
 	prog := argv[0]
 	if !strings.Contains(prog, "/") {
-		for _, dir := range strings.Split(pathEnv, ":") {
+		for dir := range strings.SplitSeq(pathEnv, ":") {
 			if dir == "" {
 				continue
 			}

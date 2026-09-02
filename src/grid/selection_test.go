@@ -192,3 +192,65 @@ func TestSelectionClearedOnResize(t *testing.T) {
 		t.Fatalf("selection should be cleared by resize/reflow")
 	}
 }
+
+// A row that once soft-wrapped but was redrawn shorter (readline / TUI style:
+// reposition, rewrite, erase to end of line) must be its own line again.
+func TestSelectedTextEraseToEndClearsSoftWrap(t *testing.T) {
+	g := NewGrid(10, 4)
+	writeStr(g, "aaaaaaaaaaBB") // row 0 wraps onto row 1
+	g.SetCursorPos(1, 1)
+	writeStr(g, "short")
+	g.ClearLineToEnd()
+	g.SetSelection(0, 0, 9, 1)
+	if got, want := g.SelectedText(), "short\nBB"; got != want {
+		t.Fatalf("SelectedText = %q, want %q", got, want)
+	}
+}
+
+// Overwriting the last column ends the earlier soft wrap; a following CR/LF
+// makes the row a hard line, and a real overflow re-marks it.
+func TestSelectedTextOverwriteLastColumnClearsSoftWrap(t *testing.T) {
+	g := NewGrid(5, 4)
+	writeStr(g, "abcdefgh") // "abcde" (wrapped) + "fgh"
+	g.SetCursorPos(5, 1)
+	writeStr(g, "X")
+	g.CarriageReturn()
+	g.Newline()
+	g.SetSelection(0, 0, 4, 1)
+	if got, want := g.SelectedText(), "abcdX\nfgh"; got != want {
+		t.Fatalf("SelectedText = %q, want %q", got, want)
+	}
+
+	// Overflowing again re-marks the row as wrapped.
+	g.SetCursorPos(5, 1)
+	writeStr(g, "YZ")
+	g.SetSelection(0, 0, 4, 1)
+	if got, want := g.SelectedText(), "abcdYZgh"; got != want {
+		t.Fatalf("after re-wrap SelectedText = %q, want %q", got, want)
+	}
+}
+
+// DeleteLines / InsertLines move rows within the scroll region; the soft-wrap
+// mark belongs to the content and must move with it rather than stay behind.
+func TestSelectedTextDeleteInsertLinesMoveSoftWrap(t *testing.T) {
+	g := NewGrid(5, 4)
+	writeStr(g, "abcdefgh") // rows 0-1: "abcde"(wrapped) "fgh"
+	g.CarriageReturn()
+	g.Newline()
+	writeStr(g, "xy") // row 2
+	g.SetCursorPos(1, 1)
+	g.DeleteLines(1) // rows: "fgh" "xy" ""
+	g.SetSelection(0, 0, 4, 1)
+	if got, want := g.SelectedText(), "fgh\nxy"; got != want {
+		t.Fatalf("after DL SelectedText = %q, want %q", got, want)
+	}
+
+	g = NewGrid(5, 4)
+	writeStr(g, "abcdefgh")
+	g.SetCursorPos(1, 1)
+	g.InsertLines(1) // rows: "" "abcde"(wrapped) "fgh"
+	g.SetSelection(0, 0, 4, 2)
+	if got, want := g.SelectedText(), "\nabcdefgh"; got != want {
+		t.Fatalf("after IL SelectedText = %q, want %q", got, want)
+	}
+}
