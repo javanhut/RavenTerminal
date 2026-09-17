@@ -1873,9 +1873,32 @@ static void dataOfferHandleOffer(void* userData,
     }
 }
 
+// Which actions the drag source is willing to perform. GLFW only ever asks to
+// copy, so there is nothing to weigh up; the event still needs a slot.
+static void dataOfferHandleSourceActions(void* userData,
+                                         struct wl_data_offer* offer,
+                                         uint32_t actions)
+{
+}
+
+// The action the compositor settled on, which can change while the drag is in
+// flight and is final by the time the drop arrives. Remembered so that the
+// drop only calls wl_data_offer.finish when an action was actually chosen:
+// finishing without one is a protocol error, and the compositor answers a
+// protocol error by disconnecting the client.
+static void dataOfferHandleAction(void* userData,
+                                  struct wl_data_offer* offer,
+                                  uint32_t action)
+{
+    if (offer == _glfw.wl.dragOffer)
+        _glfw.wl.dragAction = action;
+}
+
 static const struct wl_data_offer_listener dataOfferListener =
 {
-    dataOfferHandleOffer
+    dataOfferHandleOffer,
+    dataOfferHandleSourceActions,
+    dataOfferHandleAction
 };
 
 static void dataDeviceHandleDataOffer(void* userData,
@@ -1925,11 +1948,13 @@ static void dataDeviceHandleEnter(void* userData,
                     window = wl_surface_get_user_data(surface);
             }
 
-            if (surface == window->wl.surface && _glfw.wl.offers[i].text_uri_list)
+            if (window && surface == window->wl.surface &&
+                _glfw.wl.offers[i].text_uri_list)
             {
                 _glfw.wl.dragOffer = offer;
                 _glfw.wl.dragFocus = window;
                 _glfw.wl.dragSerial = serial;
+                _glfw.wl.dragAction = WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE;
             }
 
             _glfw.wl.offers[i] = _glfw.wl.offers[_glfw.wl.offerCount - 1];
@@ -1942,8 +1967,21 @@ static void dataDeviceHandleEnter(void* userData,
         return;
 
     if (_glfw.wl.dragOffer)
+    {
         wl_data_offer_accept(offer, serial, "text/uri-list");
-    else
+
+        // From version 3 a drop resolves through an action, and one that
+        // resolves to none is reported to the source as a failed drag. Ask to
+        // copy: reading a URI list takes nothing away from the source.
+        if (wl_proxy_get_version((struct wl_proxy*) offer) >=
+            WL_DATA_OFFER_SET_ACTIONS_SINCE_VERSION)
+        {
+            wl_data_offer_set_actions(offer,
+                                      WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY,
+                                      WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY);
+        }
+    }
+    else if (offer)
     {
         wl_data_offer_accept(offer, serial, NULL);
         wl_data_offer_destroy(offer);
@@ -1958,6 +1996,7 @@ static void dataDeviceHandleLeave(void* userData,
         wl_data_offer_destroy(_glfw.wl.dragOffer);
         _glfw.wl.dragOffer = NULL;
         _glfw.wl.dragFocus = NULL;
+        _glfw.wl.dragAction = WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE;
     }
 }
 
@@ -1989,7 +2028,25 @@ static void dataDeviceHandleDrop(void* userData,
         free(paths);
     }
 
+    // finish says the transfer completed, so it is only honest when the data
+    // was read, and it is a protocol error unless an action was chosen.
+    // Destroying the offer without it is how a drop that went nowhere gets
+    // reported back to the source as a cancelled drag. Either way the offer is
+    // spent: the compositor makes a fresh one for every drag.
+    if (string &&
+        wl_proxy_get_version((struct wl_proxy*) _glfw.wl.dragOffer) >=
+            WL_DATA_OFFER_FINISH_SINCE_VERSION &&
+        _glfw.wl.dragAction != WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE)
+    {
+        wl_data_offer_finish(_glfw.wl.dragOffer);
+    }
+
     free(string);
+
+    wl_data_offer_destroy(_glfw.wl.dragOffer);
+    _glfw.wl.dragOffer = NULL;
+    _glfw.wl.dragFocus = NULL;
+    _glfw.wl.dragAction = WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE;
 }
 
 static void dataDeviceHandleSelection(void* userData,
@@ -2918,11 +2975,34 @@ static void dataSourceHandleCancelled(void* userData,
     _glfw.wl.selectionSource = NULL;
 }
 
+// The three events wl_data_source gained in version 3. They report on a drag
+// this client started, and GLFW starts none, so they cannot arrive -- but an
+// event with no listener function aborts the process, which is too sharp an
+// edge to leave lying around for the sake of three empty functions.
+static void dataSourceHandleDndDropPerformed(void* userData,
+                                             struct wl_data_source* source)
+{
+}
+
+static void dataSourceHandleDndFinished(void* userData,
+                                        struct wl_data_source* source)
+{
+}
+
+static void dataSourceHandleAction(void* userData,
+                                   struct wl_data_source* source,
+                                   uint32_t action)
+{
+}
+
 static const struct wl_data_source_listener dataSourceListener =
 {
     dataSourceHandleTarget,
     dataSourceHandleSend,
     dataSourceHandleCancelled,
+    dataSourceHandleDndDropPerformed,
+    dataSourceHandleDndFinished,
+    dataSourceHandleAction,
 };
 
 void _glfwPlatformSetClipboardString(const char* string)

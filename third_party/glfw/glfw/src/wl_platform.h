@@ -386,6 +386,10 @@ typedef struct _GLFWlibraryWayland
     struct wl_data_offer*       dragOffer;
     _GLFWwindow*                dragFocus;
     uint32_t                    dragSerial;
+    // The action the compositor settled on for the current drag, as the last
+    // wl_data_offer.action event reported it. Finishing a drop that resolved
+    // to no action is a protocol error, so the drop handler checks this first.
+    uint32_t                    dragAction;
 
     const char*                 tag;
 

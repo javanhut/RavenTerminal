@@ -94,9 +94,16 @@ static void registryHandleGlobal(void* userData,
     {
         if (!_glfw.wl.dataDeviceManager)
         {
+            // Version 3 or whatever the compositor offers below it. Binding
+            // version 1 while a version 3 compositor sends the events added
+            // since (`wl_data_offer.source_actions` above all) is fatal:
+            // libwayland aborts a client that has no listener slot for an
+            // incoming opcode, so a drag crossing the window kills the process.
+            // The listeners below implement every event through version 3.
             _glfw.wl.dataDeviceManager =
                 wl_registry_bind(registry, name,
-                                 &wl_data_device_manager_interface, 1);
+                                 &wl_data_device_manager_interface,
+                                 _glfw_min(3, version));
         }
     }
     else if (strcmp(interface, "xdg_wm_base") == 0)
