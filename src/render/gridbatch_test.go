@@ -86,7 +86,7 @@ func makeSnapshot(rng *rand.Rand, cols, rows int, styled bool) *grid.Snapshot {
 // referenceBuildGridBatches is a verbatim copy of the original renderGridAt
 // pass-1 per-cell loop (before the optimization), kept here so tests can
 // assert the optimized buildGridBatches produces identical batches.
-func referenceBuildGridBatches(r *Renderer, snap *grid.Snapshot, offsetX, offsetY, paneWidth, paneHeight float32, hoverRow int, rb *rectBatch, gb *glyphBatch, p2 []pass2Item) ([]float32, []float32, []pass2Item) {
+func referenceBuildGridBatches(r *Renderer, snap *grid.Snapshot, offsetX, offsetY, paneWidth, paneHeight float32, hover bool, rb *rectBatch, gb *glyphBatch, p2 []pass2Item) ([]float32, []float32, []pass2Item) {
 	cols := snap.Cols
 	rows := snap.Rows
 	rb.reset()
@@ -119,7 +119,9 @@ func referenceBuildGridBatches(r *Renderer, snap *grid.Snapshot, offsetX, offset
 			hidden := cell.Flags&grid.FlagHidden != 0
 			isBlock := isBlockElement(cell.Char)
 			needGlyph := !hidden && cell.Char != ' ' && cell.Char != 0 && !isBlock
-			hovered := row == hoverRow && col >= r.hoverStartCol && col <= r.hoverEndCol
+			hovered := hover && row >= r.hoverStartRow && row <= r.hoverEndRow &&
+				(row > r.hoverStartRow || col >= r.hoverStartCol) &&
+				(row < r.hoverEndRow || col <= r.hoverEndCol)
 			needDecor := !hidden && (isBlock || hovered ||
 				cell.Flags&(grid.FlagUnderline|grid.FlagStrikethrough) != 0)
 			if !needGlyph && !needDecor {
@@ -211,16 +213,17 @@ func TestBuildGridBatchesMatchesReference(t *testing.T) {
 			}
 			for ci, clip := range clips {
 				r := newBenchRenderer()
-				hoverRow := -1
-				if ci%2 == 1 {
+				hover := ci%2 == 1
+				if hover {
+					// A span wrapping onto a second row, as a soft-wrapped link does.
 					r.hoverActive = true
-					r.hoverStartCol, r.hoverEndCol = 1, 3
-					hoverRow = rows / 2
+					r.hoverStartRow, r.hoverStartCol = rows/2, 1
+					r.hoverEndRow, r.hoverEndCol = rows/2+1, 3
 				}
 				var rb rectBatch
 				var gb glyphBatch
-				wantRects, wantGlyphs, wantP2 := referenceBuildGridBatches(r, snap, clip.offX, clip.offY, clip.w, clip.h, hoverRow, &rb, &gb, nil)
-				r.buildGridBatches(snap, clip.offX, clip.offY, clip.w, clip.h, hoverRow)
+				wantRects, wantGlyphs, wantP2 := referenceBuildGridBatches(r, snap, clip.offX, clip.offY, clip.w, clip.h, hover, &rb, &gb, nil)
+				r.buildGridBatches(snap, clip.offX, clip.offY, clip.w, clip.h, hover)
 
 				if len(r.colorDraws) != 0 {
 					t.Fatalf("styled=%v geo=%v clip=%d: unexpected color draws", styled, geo, ci)
@@ -294,9 +297,9 @@ func benchGrid(b *testing.B, cols, rows int, styled bool, optimized bool) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if optimized {
-			r.buildGridBatches(snap, 0, 0, w, h, -1)
+			r.buildGridBatches(snap, 0, 0, w, h, false)
 		} else {
-			_, _, p2 = referenceBuildGridBatches(r, snap, 0, 0, w, h, -1, &rb, &gb, p2)
+			_, _, p2 = referenceBuildGridBatches(r, snap, 0, 0, w, h, false, &rb, &gb, p2)
 		}
 	}
 }

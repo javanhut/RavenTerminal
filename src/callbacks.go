@@ -62,6 +62,20 @@ func (a *App) reportMousePress(pane *tab.Pane, btn, col, row int, shift bool) bo
 	return true
 }
 
+// openLinkAt opens the link under (col,row) in the browser, reporting
+// whether there was one. A failed launch still consumes the click.
+func (a *App) openLinkAt(pane *tab.Pane, col, row int) bool {
+	urlText, _ := linkAtCell(pane.Terminal.GetGrid(), col, row)
+	if urlText == "" {
+		return false
+	}
+	if err := openURL(urlText); err != nil {
+		log.Printf("failed to open url %q: %v", urlText, err)
+		a.showToast("Can't open link")
+	}
+	return true
+}
+
 func (a *App) showToast(message string) {
 	if strings.TrimSpace(message) == "" {
 		return
@@ -71,6 +85,14 @@ func (a *App) showToast(message string) {
 }
 
 func (a *App) onKey(w *glfw.Window, key glfw.Key, scancode int, action glfw.Action, mods glfw.ModifierKey) {
+	// Ctrl gates the link underline inside mouse-reporting apps, so toggling
+	// it re-evaluates the hover without waiting for the mouse to move.
+	if (key == glfw.KeyLeftControl || key == glfw.KeyRightControl) && action != glfw.Repeat &&
+		a.haveCursorPos && !a.settingsMenu.IsOpen() && !a.showHelp {
+		if activeTab := a.tabManager.ActiveTab(); activeTab != nil {
+			a.refreshLinkHover(activeTab, a.lastCursorX, a.lastCursorY)
+		}
+	}
 	if action == glfw.Release {
 		return
 	}
@@ -1341,20 +1363,18 @@ func (a *App) onMouseButton(w *glfw.Window, button glfw.MouseButton, action glfw
 				a.selection.pane.Terminal.GetGrid().ClearSelection()
 			}
 
+			// Ctrl+click on a link opens it even when the application has
+			// mouse reporting on, so links stay usable inside TUIs.
+			if mods&glfw.ModControl != 0 && a.openLinkAt(pane, col, row) {
+				activeTab.SetActivePane(pane)
+				return
+			}
+
 			// Application mouse reporting (vim/tmux/htop): forward the press
 			// unless shift is held (shift = local selection, by convention).
 			if a.reportMousePress(pane, 0, col, row, mods&glfw.ModShift != 0) {
 				activeTab.SetActivePane(pane)
 				return
-			}
-
-			if mods&glfw.ModControl != 0 {
-				if urlText, _, _ := linkAtCell(pane.Terminal.GetGrid(), col, row); urlText != "" {
-					if err := openURL(urlText); err != nil {
-						log.Printf("failed to open url %q: %v", urlText, err)
-					}
-					return
-				}
 			}
 
 			// Multi-click detection: same cell within 400ms.
@@ -1512,17 +1532,12 @@ func (a *App) onMouseButton(w *glfw.Window, button glfw.MouseButton, action glfw
 		activeTab.SetActivePane(pane)
 		g := pane.Terminal.GetGrid()
 
-		if a.reportMousePress(pane, 2, col, row, mods&glfw.ModShift != 0) {
+		if mods&glfw.ModControl != 0 && a.openLinkAt(pane, col, row) {
 			return
 		}
 
-		if mods&glfw.ModControl != 0 {
-			if urlText, _, _ := linkAtCell(g, col, row); urlText != "" {
-				if err := openURL(urlText); err != nil {
-					log.Printf("failed to open url %q: %v", urlText, err)
-				}
-				return
-			}
+		if a.reportMousePress(pane, 2, col, row, mods&glfw.ModShift != 0) {
+			return
 		}
 
 		if g.HasSelection() {
@@ -1660,28 +1675,41 @@ func (a *App) onCursorPos(w *glfw.Window, xpos, ypos float64) {
 			}
 			cellChanged := mcol != a.report.lastCol || mrow != a.report.lastRow
 			act := parser.DecideMouse(mouseCtxFor(target, shift), parser.MouseMotion, 0, mcol, mrow, held, cellChanged)
-			switch act.Kind {
-			case parser.MouseActionSend:
+			if act.Kind == parser.MouseActionSend {
 				a.report.lastCol, a.report.lastRow = mcol, mrow
 				target.Write(act.Bytes)
-				a.renderer.ClearHoverURL()
-				return
-			case parser.MouseActionIgnore:
-				a.renderer.ClearHoverURL()
-				return
 			}
 		}
 	}
 
+	a.refreshLinkHover(activeTab, xpos, ypos)
+}
+
+// refreshLinkHover underlines the link under the cursor. While the pane's
+// application has mouse reporting on, a plain click goes to the application,
+// so the underline shows only with Ctrl held: the modifier that makes a click
+// open the link instead.
+func (a *App) refreshLinkHover(activeTab *tab.Tab, x, y float64) {
+	if a.report.pane != nil { // a drag is being forwarded to the application
+		a.renderer.ClearHoverURL()
+		return
+	}
 	width, height := a.win.GetFramebufferSize()
-	pane, col, row, ok := a.renderer.HitTestPane(activeTab, xpos, ypos, width, height)
+	pane, col, row, ok := a.renderer.HitTestPane(activeTab, x, y, width, height)
 	if !ok || pane == nil {
 		a.renderer.ClearHoverURL()
 		return
 	}
+	if mode, _, _, _ := pane.Terminal.MouseState(); mode != 0 {
+		w := a.win.GLFW()
+		if w.GetKey(glfw.KeyLeftControl) != glfw.Press && w.GetKey(glfw.KeyRightControl) != glfw.Press {
+			a.renderer.ClearHoverURL()
+			return
+		}
+	}
 
-	if _, startCol, endCol := linkAtCell(pane.Terminal.GetGrid(), col, row); startCol <= endCol {
-		a.renderer.SetHoverURL(pane.Terminal.GetGrid(), row, startCol, endCol)
+	if _, span := linkAtCell(pane.Terminal.GetGrid(), col, row); span.ok {
+		a.renderer.SetHoverURL(pane.Terminal.GetGrid(), span.start.row, span.start.col, span.end.row, span.end.col)
 		return
 	}
 	a.renderer.ClearHoverURL()

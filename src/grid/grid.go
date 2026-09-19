@@ -919,6 +919,18 @@ func (g *Grid) DisplayCell(col, row int) Cell {
 	return g.displayCellLocked(col, row)
 }
 
+// DisplayRowSoftWrapped reports whether the display row (accounting for
+// scrollback) continues onto the next row because it overflowed the width.
+func (g *Grid) DisplayRowSoftWrapped(row int) bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if row < 0 || row >= g.Rows {
+		return false
+	}
+	r := g.rowAtAbsLocked(g.viewTopAbsLocked() + row)
+	return r != nil && r.flags&RowSoftWrapped != 0
+}
+
 func (g *Grid) displayCellLocked(col, row int) Cell {
 	if g.scrollOffset == 0 {
 		if col < 0 || col >= g.Cols || row < 0 || row >= g.Rows {

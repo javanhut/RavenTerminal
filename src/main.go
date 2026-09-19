@@ -339,64 +339,101 @@ func clampInt(value, min, max int) int {
 	return value
 }
 
-func urlAtCell(g *grid.Grid, col, row int) string {
-	urlText, _, _ := urlAtCellRange(g, col, row)
-	return urlText
+// cellPos is a viewport cell coordinate.
+type cellPos struct{ col, row int }
+
+// linkSpan is a link's extent in the viewport: it may cover several rows when
+// the link soft-wraps. Start and End are inclusive; ok is false for no link.
+type linkSpan struct {
+	start, end cellPos
+	ok         bool
+}
+
+// logicalLine gathers the soft-wrap-joined viewport rows containing row, as
+// parallel slices of cells and their positions. Wide-char continuation cells
+// are dropped so a wide glyph is one rune, not a rune plus a blank.
+func logicalLine(g *grid.Grid, row int) ([]grid.Cell, []cellPos) {
+	first, last := row, row
+	for first > 0 && g.DisplayRowSoftWrapped(first-1) {
+		first--
+	}
+	for last < g.Rows-1 && g.DisplayRowSoftWrapped(last) {
+		last++
+	}
+	cells := make([]grid.Cell, 0, (last-first+1)*g.Cols)
+	pos := make([]cellPos, 0, cap(cells))
+	for r := first; r <= last; r++ {
+		for c := 0; c < g.Cols; c++ {
+			cell := g.DisplayCell(c, r)
+			if cell.Width == grid.CellWidthContinuation {
+				continue
+			}
+			cells = append(cells, cell)
+			pos = append(pos, cellPos{c, r})
+		}
+	}
+	return cells, pos
 }
 
 // linkAtCell resolves a clickable URL at (col,row), preferring an explicit OSC 8
-// hyperlink and falling back to heuristic URL detection. The returned column range
-// spans the run of cells sharing the link, for hover underlining.
-func linkAtCell(g *grid.Grid, col, row int) (string, int, int) {
+// hyperlink and falling back to heuristic URL detection. Both follow the line
+// across soft wraps. The returned span covers the whole link, for hover
+// underlining.
+func linkAtCell(g *grid.Grid, col, row int) (string, linkSpan) {
 	if g == nil || row < 0 || row >= g.Rows || col < 0 || col >= g.Cols {
-		return "", -1, -1
+		return "", linkSpan{}
 	}
-	cell := g.DisplayCell(col, row)
-	if cell.Link != 0 {
-		if url := g.LinkURL(cell.Link); url != "" {
-			start, end := col, col
-			for c := col - 1; c >= 0; c-- {
-				if g.DisplayCell(c, row).Link != cell.Link {
-					break
-				}
-				start = c
-			}
-			for c := col + 1; c < g.Cols; c++ {
-				if g.DisplayCell(c, row).Link != cell.Link {
-					break
-				}
-				end = c
-			}
-			return url, start, end
+	cells, pos := logicalLine(g, row)
+	idx := -1
+	for i, p := range pos {
+		if p.row == row && p.col <= col {
+			idx = i // last cell starting at or before col: the one under it
 		}
 	}
-	return urlAtCellRange(g, col, row)
+	if idx < 0 {
+		return "", linkSpan{}
+	}
+
+	if id := cells[idx].Link; id != 0 {
+		if url := g.LinkURL(id); url != "" {
+			start, end := idx, idx
+			for start > 0 && cells[start-1].Link == id {
+				start--
+			}
+			for end+1 < len(cells) && cells[end+1].Link == id {
+				end++
+			}
+			return url, linkSpan{pos[start], pos[end], true}
+		}
+	}
+
+	line := make([]rune, len(cells))
+	for i, cell := range cells {
+		line[i] = cell.Char
+		if line[i] == 0 {
+			line[i] = ' '
+		}
+	}
+	target, start, end := urlInLine(line, idx)
+	if target == "" {
+		return "", linkSpan{}
+	}
+	return target, linkSpan{pos[start], pos[end], true}
 }
 
-func urlAtCellRange(g *grid.Grid, col, row int) (string, int, int) {
-	if g == nil || row < 0 || row >= g.Rows || col < 0 || col >= g.Cols {
+// urlInLine finds a URL in the whitespace-delimited word containing line[idx],
+// returning it with its inclusive rune range (trimmed of surrounding
+// punctuation), or "" if the word isn't a URL.
+func urlInLine(line []rune, idx int) (string, int, int) {
+	if idx < 0 || idx >= len(line) || line[idx] == ' ' {
 		return "", -1, -1
 	}
 
-	line := make([]rune, g.Cols)
-	for c := 0; c < g.Cols; c++ {
-		cell := g.DisplayCell(c, row)
-		ch := cell.Char
-		if ch == 0 {
-			ch = ' '
-		}
-		line[c] = ch
-	}
-
-	if line[col] == ' ' {
-		return "", -1, -1
-	}
-
-	start := col
+	start := idx
 	for start > 0 && line[start-1] != ' ' {
 		start--
 	}
-	end := col
+	end := idx
 	for end+1 < len(line) && line[end+1] != ' ' {
 		end++
 	}
@@ -409,7 +446,7 @@ func urlAtCellRange(g *grid.Grid, col, row int) (string, int, int) {
 	for end >= start && strings.ContainsRune(trimRightChars, line[end]) {
 		end--
 	}
-	if start > end {
+	if start > end || idx < start || idx > end {
 		return "", -1, -1
 	}
 

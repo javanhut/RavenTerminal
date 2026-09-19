@@ -243,8 +243,9 @@ type Renderer struct {
 
 	// Hover underline state for URLs
 	hoverGrid     *grid.Grid
-	hoverRow      int
-	hoverStartCol int
+	hoverStartRow int // hover span, inclusive; may cover several rows when
+	hoverStartCol int // a link soft-wraps
+	hoverEndRow   int
 	hoverEndCol   int
 	hoverActive   bool
 
@@ -2870,10 +2871,7 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 	cols := snap.Cols
 
 	// Hover underline applies only when the hover target is this grid.
-	hoverRow := -1
-	if r.hoverActive && r.hoverGrid == g {
-		hoverRow = r.hoverRow
-	}
+	hover := r.hoverActive && r.hoverGrid == g
 
 	// Pass 1: accumulate all backgrounds/selection and all glyphs into two
 	// batches, then flush each in a single draw call. Glyphs are rasterized on
@@ -2884,7 +2882,7 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 	// glyph warm loop with a rare retry.
 	for attempt := 0; ; attempt++ {
 		startGen := r.atlasGen
-		r.buildGridBatches(snap, offsetX, offsetY, paneWidth, paneHeight, hoverRow)
+		r.buildGridBatches(snap, offsetX, offsetY, paneWidth, paneHeight, hover)
 		if r.atlasGen == startGen || attempt > 0 {
 			break
 		}
@@ -3002,7 +3000,7 @@ func fitCells(offset, sz float32, n int, limit float32) int {
 // snapshot — everything pass 1 of renderGridAt records. It performs no GL
 // calls of its own, but a glyph cache miss may rasterize (and grow the
 // atlas), so the caller re-runs it when atlasGen changes mid-pass.
-func (r *Renderer) buildGridBatches(snap *grid.Snapshot, offsetX, offsetY, paneWidth, paneHeight float32, hoverRow int) {
+func (r *Renderer) buildGridBatches(snap *grid.Snapshot, offsetX, offsetY, paneWidth, paneHeight float32, hover bool) {
 	cols := snap.Cols
 
 	r.gridRects.reset()
@@ -3023,7 +3021,7 @@ func (r *Renderer) buildGridBatches(snap *grid.Snapshot, offsetX, offsetY, paneW
 	for row := range maxRow {
 		rowCells := snap.Cells[row*cols : row*cols+cols]
 		y := offsetY + float32(row)*r.cellHeight
-		rowHovered := row == hoverRow
+		hoverLo, hoverHi := r.hoverColsForRow(hover, row, cols)
 		for col := range maxCol {
 			cell := rowCells[col]
 			x := offsetX + float32(col)*r.cellWidth
@@ -3055,7 +3053,7 @@ func (r *Renderer) buildGridBatches(snap *grid.Snapshot, offsetX, offsetY, paneW
 			// missing from the monochrome font is tried as a color emoji
 			// before the '?' fallback.
 			needGlyph := !hidden && cell.Char != ' ' && cell.Char != 0 && !isBlock
-			hovered := rowHovered && col >= r.hoverStartCol && col <= r.hoverEndCol
+			hovered := col >= hoverLo && col <= hoverHi
 			needDecor := !hidden && (isBlock || hovered ||
 				cell.Flags&(grid.FlagUnderline|grid.FlagStrikethrough) != 0)
 			if !needGlyph && !needDecor {
@@ -3131,21 +3129,39 @@ func (r *Renderer) buildGridBatches(snap *grid.Snapshot, offsetX, offsetY, paneW
 	}
 }
 
-// SetHoverURL sets the hover underline range for a grid. Latches a redraw
-// only when the hover state actually changes (it is called on every mouse
-// move).
-func (r *Renderer) SetHoverURL(g *grid.Grid, row, startCol, endCol int) {
-	if g == nil || row < 0 || startCol < 0 || endCol < startCol {
+// hoverColsForRow returns the inclusive column range of the hover underline
+// on a viewport row, or an empty range (lo > hi) when the row isn't hovered.
+func (r *Renderer) hoverColsForRow(hover bool, row, cols int) (int, int) {
+	if !hover || row < r.hoverStartRow || row > r.hoverEndRow {
+		return 1, 0
+	}
+	lo, hi := 0, cols-1
+	if row == r.hoverStartRow {
+		lo = r.hoverStartCol
+	}
+	if row == r.hoverEndRow {
+		hi = r.hoverEndCol
+	}
+	return lo, hi
+}
+
+// SetHoverURL sets the hover underline span (inclusive, possibly multi-row)
+// for a grid. Latches a redraw only when the hover state actually changes (it
+// is called on every mouse move).
+func (r *Renderer) SetHoverURL(g *grid.Grid, startRow, startCol, endRow, endCol int) {
+	if g == nil || startRow < 0 || startCol < 0 || endRow < startRow ||
+		(endRow == startRow && endCol < startCol) {
 		r.ClearHoverURL()
 		return
 	}
-	if r.hoverActive && r.hoverGrid == g && r.hoverRow == row &&
-		r.hoverStartCol == startCol && r.hoverEndCol == endCol {
+	if r.hoverActive && r.hoverGrid == g && r.hoverStartRow == startRow &&
+		r.hoverStartCol == startCol && r.hoverEndRow == endRow && r.hoverEndCol == endCol {
 		return
 	}
 	r.hoverGrid = g
-	r.hoverRow = row
+	r.hoverStartRow = startRow
 	r.hoverStartCol = startCol
+	r.hoverEndRow = endRow
 	r.hoverEndCol = endCol
 	r.hoverActive = true
 	r.uiDirty = true
