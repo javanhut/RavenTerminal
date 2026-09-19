@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/javanhut/RavenTerminal/src/grid"
@@ -62,7 +63,7 @@ func TestLinkAtCellOSC8AcrossWrap(t *testing.T) {
 	}
 }
 
-func TestDesktopOpenerFallsBackToGio(t *testing.T) {
+func TestDesktopOpenerPrefersRavenOpen(t *testing.T) {
 	has := func(avail ...string) func(string) (string, error) {
 		return func(name string) (string, error) {
 			for _, a := range avail {
@@ -74,11 +75,20 @@ func TestDesktopOpenerFallsBackToGio(t *testing.T) {
 		}
 	}
 
-	if name, args, err := desktopOpener(has("xdg-open", "gio")); err != nil || name != "xdg-open" || len(args) != 0 {
-		t.Errorf("with xdg-open: got %q %v %v", name, args, err)
+	cases := []struct {
+		avail    []string
+		wantName string
+		wantArgs []string
+	}{
+		{[]string{"raven-open", "xdg-open", "gio"}, "raven-open", nil},
+		{[]string{"xdg-open", "gio"}, "xdg-open", nil},
+		{[]string{"gio"}, "gio", []string{"open"}},
 	}
-	if name, args, err := desktopOpener(has("gio")); err != nil || name != "gio" || len(args) != 1 || args[0] != "open" {
-		t.Errorf("gio only: got %q %v %v", name, args, err)
+	for _, c := range cases {
+		name, args, err := desktopOpener(has(c.avail...))
+		if err != nil || name != c.wantName || strings.Join(args, " ") != strings.Join(c.wantArgs, " ") {
+			t.Errorf("with %v: got %q %v %v, want %q %v", c.avail, name, args, err, c.wantName, c.wantArgs)
+		}
 	}
 	if _, _, err := desktopOpener(has()); err == nil {
 		t.Error("no opener: want error")

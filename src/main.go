@@ -488,17 +488,24 @@ func openURL(target string) error {
 }
 
 // desktopOpener picks the command that hands a URL to the desktop's default
-// browser. xdg-open is the convention, but xdg-utils is a separate package a
-// system can lack; gio ships with GLib, which any GTK desktop already has,
-// and resolves the handler from the same mimeapps.list/mimeinfo.cache.
+// browser. On Raven that is raven-open, the system's own opener, called by
+// its real name so a missing or replaced xdg-open symlink cannot break link
+// clicks. Elsewhere it is xdg-open, and failing that gio, which ships with
+// GLib on any GTK desktop and reads the same mimeapps.list.
 func desktopOpener(lookPath func(string) (string, error)) (string, []string, error) {
-	if _, err := lookPath("xdg-open"); err == nil {
-		return "xdg-open", nil, nil
+	for _, opener := range []struct {
+		name string
+		args []string
+	}{
+		{"raven-open", nil},
+		{"xdg-open", nil},
+		{"gio", []string{"open"}},
+	} {
+		if _, err := lookPath(opener.name); err == nil {
+			return opener.name, opener.args, nil
+		}
 	}
-	if _, err := lookPath("gio"); err == nil {
-		return "gio", []string{"open"}, nil
-	}
-	return "", nil, fmt.Errorf("no url opener found (install xdg-utils)")
+	return "", nil, fmt.Errorf("no url opener found (tried raven-open, xdg-open and gio)")
 }
 
 // validateOpenTarget gates which links the OS opener may see. Terminal
