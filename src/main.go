@@ -478,9 +478,27 @@ func openURL(target string) error {
 	case "windows":
 		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", target)
 	default:
-		cmd = exec.Command("xdg-open", target)
+		name, args, err := desktopOpener(exec.LookPath)
+		if err != nil {
+			return err
+		}
+		cmd = exec.Command(name, append(args, target)...)
 	}
 	return cmd.Start()
+}
+
+// desktopOpener picks the command that hands a URL to the desktop's default
+// browser. xdg-open is the convention, but xdg-utils is a separate package a
+// system can lack; gio ships with GLib, which any GTK desktop already has,
+// and resolves the handler from the same mimeapps.list/mimeinfo.cache.
+func desktopOpener(lookPath func(string) (string, error)) (string, []string, error) {
+	if _, err := lookPath("xdg-open"); err == nil {
+		return "xdg-open", nil, nil
+	}
+	if _, err := lookPath("gio"); err == nil {
+		return "gio", []string{"open"}, nil
+	}
+	return "", nil, fmt.Errorf("no url opener found (install xdg-utils)")
 }
 
 // validateOpenTarget gates which links the OS opener may see. Terminal
