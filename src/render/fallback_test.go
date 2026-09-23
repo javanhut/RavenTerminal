@@ -1,6 +1,7 @@
 package render
 
 import (
+	"os/exec"
 	"testing"
 
 	"golang.org/x/image/font"
@@ -140,5 +141,110 @@ func TestGlyphQuadIconConstraint(t *testing.T) {
 	x, yTop, w, h = r.glyphQuad('a', g, 100, 50, 1)
 	if x != 101 || yTop != 55 || w != 9 || h != 12 { // yTop = 50+16-11
 		t.Errorf("text quad = (%v,%v,%v,%v), want (101,55,9,12)", x, yTop, w, h)
+	}
+}
+
+// Braille is drawn as geometry: each set bit is one dot in a 2x4 grid, so a
+// spinner frame renders even though no embedded font carries the block.
+func TestBrailleDots(t *testing.T) {
+	if !isGeometryRune('⠋') || !isGeometryRune(0x2800) || !isGeometryRune(0x28FF) || isGeometryRune(0x2900) {
+		t.Fatalf("isGeometryRune misclassifies the Braille block edges")
+	}
+	if dots := brailleDots(0x2800, 10, 20); len(dots) != 0 {
+		t.Errorf("blank pattern drew %d dots, want 0", len(dots))
+	}
+	if dots := brailleDots(0x28FF, 10, 20); len(dots) != 8 {
+		t.Errorf("full pattern drew %d dots, want 8", len(dots))
+	}
+	// Dot 1 (bit 0) is top-left; dot 8 (bit 7) is bottom-right.
+	cases := []struct {
+		c              rune
+		wantX, wantTop bool // right column / top row
+	}{
+		{0x2801, false, true},
+		{0x2808, true, true},
+		{0x2840, false, false},
+		{0x2880, true, false},
+	}
+	for _, tc := range cases {
+		dots := brailleDots(tc.c, 10, 20)
+		if len(dots) != 1 {
+			t.Fatalf("%U drew %d dots, want 1", tc.c, len(dots))
+		}
+		x, y, size := dots[0][0], dots[0][1], dots[0][2]
+		if size < 1 || x < 0 || y < 0 || x+size > 10 || y+size > 20 {
+			t.Errorf("%U dot (%v,%v,%v) falls outside the 10x20 cell", tc.c, x, y, size)
+		}
+		if right := x >= 5; right != tc.wantX {
+			t.Errorf("%U dot x=%v, want right column=%v", tc.c, x, tc.wantX)
+		}
+		if top := y < 5; top != tc.wantTop {
+			t.Errorf("%U dot y=%v, want top row=%v", tc.c, y, tc.wantTop)
+		}
+	}
+}
+
+// stubFontconfig replaces fc-match for one test, counting calls.
+func stubFontconfig(t *testing.T, path string, err error) *int {
+	t.Helper()
+	calls := 0
+	orig := fontconfigMatch
+	fontconfigMatch = func(rune) (string, error) { calls++; return path, err }
+	t.Cleanup(func() { fontconfigMatch = orig })
+	return &calls
+}
+
+// A rune no font in the chain covers is looked up through fontconfig once, not
+// on every frame, and a missing fc-match switches the lookup off for good.
+func TestFontconfigFallbackCaching(t *testing.T) {
+	const missing = rune(0x1D5FF) // 𝗿, in no embedded font
+
+	r := newTestRenderer(t)
+	r.systemFallbacksLoaded = true // keep the host's fonts out of it
+	calls := stubFontconfig(t, "", nil)
+	for range 3 {
+		if r.faceFor(missing) != nil {
+			t.Fatalf("faceFor found a face with fontconfig stubbed to nothing")
+		}
+	}
+	if *calls != 1 {
+		t.Errorf("fc-match ran %d times for one rune, want 1", *calls)
+	}
+
+	r = newTestRenderer(t)
+	r.systemFallbacksLoaded = true
+	calls = stubFontconfig(t, "", exec.ErrNotFound)
+	r.faceFor(missing)
+	r.faceFor(missing + 1)
+	if *calls != 1 || !r.fontconfigOff {
+		t.Errorf("fc-match ran %d times after ErrNotFound (off=%v), want 1 and off", *calls, r.fontconfigOff)
+	}
+
+	r = newTestRenderer(t)
+	r.systemFallbacksLoaded = true
+	stubFontconfig(t, "/usr/share/fonts/noto/NotoColorEmoji.ttf", nil)
+	n := len(r.fallbackFaces)
+	r.faceFor(missing)
+	if len(r.fallbackFaces) != n {
+		t.Errorf("a color emoji font was added to the monochrome chain")
+	}
+}
+
+// End to end against the host's fontconfig: a font fc-match reports for a rune
+// joins the chain. Skipped where fc-match or a covering font is absent.
+func TestFontconfigFallbackFindsInstalledFont(t *testing.T) {
+	const math = rune(0x1D5FF) // 𝗿, Mathematical Sans-Serif Bold
+	path, err := fontconfigMatch(math)
+	if err != nil || path == "" {
+		t.Skip("fc-match unavailable")
+	}
+	r := newTestRenderer(t)
+	r.systemFallbacksLoaded = true
+	face := r.faceFor(math)
+	if face == nil {
+		t.Skipf("fc-match's best font for %U (%s) doesn't cover it", math, path)
+	}
+	if face == r.face {
+		t.Errorf("faceFor(%U) returned the primary face, which lacks the glyph", math)
 	}
 }

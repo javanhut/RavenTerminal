@@ -2,6 +2,7 @@ package render
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/go-gl/gl/v4.1-core/gl"
 )
@@ -59,9 +60,47 @@ func (b *glyphBatch) addGlyph(x, y, w, h, tx, ty, tw, th float32, c [4]float32, 
 	)
 }
 
-// isBlockElement reports whether a rune is a block/quadrant element that the
-// renderer draws as geometry (U+2580–U+259F) rather than as a font glyph.
-func isBlockElement(c rune) bool { return c >= 0x2580 && c <= 0x259F }
+// isGeometryRune reports whether a rune is one the renderer draws as geometry
+// rather than as a font glyph: block/quadrant elements (U+2580–U+259F) and
+// Braille patterns (U+2800–U+28FF). Few fonts carry Braille — none of the
+// embedded Nerd Fonts do — yet CLI spinners and charts lean on it heavily.
+func isGeometryRune(c rune) bool {
+	return (c >= 0x2580 && c <= 0x259F) || isBraille(c)
+}
+
+func isBraille(c rune) bool { return c >= 0x2800 && c <= 0x28FF }
+
+// brailleDots returns the raised dots of a Braille pattern as (x, y, size)
+// squares relative to the cell's top-left corner. The low 8 bits of the
+// codepoint are the dots: bits 0–2 run down the left column, bits 3–5 down the
+// right, and bits 6 and 7 are the bottom row (left, right). Positions are
+// pixel-snapped so every dot in a pattern renders at the same size.
+func brailleDots(c rune, cellW, cellH float32) [][3]float32 {
+	bits := uint8(c - 0x2800)
+	if bits == 0 {
+		return nil
+	}
+	// col, row for each bit, in bit order.
+	layout := [8][2]int{{0, 0}, {0, 1}, {0, 2}, {1, 0}, {1, 1}, {1, 2}, {0, 3}, {1, 3}}
+	size := float32(math.Floor(float64(min(cellW/2, cellH/4) * 0.6)))
+	if size < 1 {
+		size = 1
+	}
+	dots := make([][3]float32, 0, 8)
+	for bit, pos := range layout {
+		if bits&(1<<bit) == 0 {
+			continue
+		}
+		cx := cellW * float32(2*pos[0]+1) / 4
+		cy := cellH * float32(2*pos[1]+1) / 8
+		dots = append(dots, [3]float32{
+			float32(math.Round(float64(cx - size/2))),
+			float32(math.Round(float64(cy - size/2))),
+			size,
+		})
+	}
+	return dots
+}
 
 // initBatches creates the two batch shader programs and their VAOs/VBOs.
 func (r *Renderer) initBatches() error {

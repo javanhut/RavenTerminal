@@ -117,7 +117,7 @@ func referenceBuildGridBatches(r *Renderer, snap *grid.Snapshot, offsetX, offset
 			}
 
 			hidden := cell.Flags&grid.FlagHidden != 0
-			isBlock := isBlockElement(cell.Char)
+			isBlock := isGeometryRune(cell.Char)
 			needGlyph := !hidden && cell.Char != ' ' && cell.Char != 0 && !isBlock
 			hovered := hover && row >= r.hoverStartRow && row <= r.hoverEndRow &&
 				(row > r.hoverStartRow || col >= r.hoverStartCol) &&

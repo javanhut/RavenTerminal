@@ -168,6 +168,9 @@ type Renderer struct {
 	fallbackFonts         []fallbackFont
 	fallbackFaces         []font.Face
 	systemFallbacksLoaded bool
+	fallbackPaths         map[string]bool // font files already in the chain
+	fontconfigTried       map[rune]bool   // runes already looked up via fc-match
+	fontconfigOff         bool            // fc-match isn't installed
 
 	// OpenGL resources
 	quadVAO     uint32
@@ -2920,8 +2923,8 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 	for i := range r.pass2 {
 		it := &r.pass2[i]
 		cell := snap.Cells[it.row*cols+it.col]
-		if isBlockElement(cell.Char) {
-			r.drawBlockElement(it.x, it.y, cell.Char, it.fg, proj)
+		if isGeometryRune(cell.Char) {
+			r.drawGeometryRune(it.x, it.y, cell.Char, it.fg, proj)
 		}
 		if cell.Flags&grid.FlagUnderline != 0 || it.hovered {
 			ulColor := it.fg
@@ -2970,7 +2973,7 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 				r.drawRect(cursorX, cursorY, r.cellWidth, r.cellHeight, r.theme.Cursor, proj)
 				// Redraw character under cursor in inverse
 				if cell.Char != ' ' && cell.Char != 0 && cell.Flags&grid.FlagHidden == 0 {
-					if !r.drawBlockElement(cursorX, cursorY, cell.Char, r.theme.Background, proj) {
+					if !r.drawGeometryRune(cursorX, cursorY, cell.Char, r.theme.Background, proj) {
 						if _, ok := r.resolveGlyph(cell.Char); ok {
 							r.drawChar(cursorX, cursorY+r.cellHeight, cell.Char, r.theme.Background, proj)
 						} else if cg, ok := r.ensureColorGlyph(cell.Char); ok {
@@ -3062,7 +3065,7 @@ func (r *Renderer) buildGridBatches(snap *grid.Snapshot, offsetX, offsetY, paneW
 			}
 
 			hidden := cell.Flags&grid.FlagHidden != 0
-			isBlock := isBlockElement(cell.Char)
+			isBlock := isGeometryRune(cell.Char)
 			// Block-element chars and the cursor cell are drawn immediately
 			// in pass 2; everything else is a batched glyph. A glyph
 			// missing from the monochrome font is tried as a color emoji
@@ -3389,8 +3392,15 @@ var quadrantBlockMasks = map[rune]uint8{
 	'\u259F': 0b1110, // Quadrant upper right and lower left and lower right
 }
 
-// drawBlockElement renders block element characters as geometry to avoid seams.
-func (r *Renderer) drawBlockElement(x, y float32, char rune, clr [4]float32, proj [16]float32) bool {
+// drawGeometryRune renders block element characters as geometry to avoid
+// seams, and Braille patterns as dots so they never depend on font coverage.
+func (r *Renderer) drawGeometryRune(x, y float32, char rune, clr [4]float32, proj [16]float32) bool {
+	if isBraille(char) {
+		for _, d := range brailleDots(char, r.cellWidth, r.cellHeight) {
+			r.drawRect(x+d[0], y+d[1], d[2], d[2], clr, proj)
+		}
+		return true
+	}
 	switch char {
 	case '\u2588': // Full block
 		r.drawRect(x, y, r.cellWidth, r.cellHeight, clr, proj)
