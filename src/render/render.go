@@ -3212,6 +3212,7 @@ func (r *Renderer) DrawToast(message string, width, height int) {
 
 	r.drawRect(x, y, boxW, boxH, bg, proj)
 	r.drawText(x+paddingX, y+boxH-paddingY, message, r.theme.Foreground, proj)
+	r.uiFlush() // drawn after the Render* entry point's own flush
 }
 
 // DrawFindBar renders the scrollback find prompt: a bar pinned to the bottom
@@ -3247,6 +3248,7 @@ func (r *Renderer) DrawFindBar(query, status string, width, height int) {
 		statusX := x + boxW - paddingX - float32(len([]rune(status)))*r.cellWidth
 		r.drawText(statusX, baseline, status, withAlpha(r.theme.Foreground, 0.6), proj)
 	}
+	r.uiFlush() // drawn after the Render* entry point's own flush
 }
 
 // drawRect draws a colored rectangle

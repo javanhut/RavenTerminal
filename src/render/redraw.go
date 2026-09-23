@@ -28,6 +28,8 @@ package render
 //   - FindBarOpen:        the scrollback find bar is up (its query text and
 //     match counter change on keystrokes, outside the grid dirty tracking),
 //     or it closed since the last frame (one repaint to erase it)
+//   - FingerprintModal:   the sudo fingerprint modal appeared, changed (a
+//     verdict or retry advice from the helper), or went away
 //   - SizeChanged:        the framebuffer size changed (resize)
 //   - FocusChanged:       window focus changed (affects cursor rendering)
 //   - ScaleChanged:       the monitor content scale changed (HiDPI move)
@@ -51,6 +53,7 @@ type RedrawTriggers struct {
 	AIPanelOpen        bool
 	HelpOpen           bool
 	FindBarOpen        bool
+	FingerprintModal   bool
 	SizeChanged        bool
 	FocusChanged       bool
 	ScaleChanged       bool

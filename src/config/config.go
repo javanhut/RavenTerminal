@@ -108,6 +108,11 @@ type Config struct {
 	// RestoreSession reopens the previous run's tabs, splits, and working
 	// directories at startup. Only the layout is restored — shells are fresh.
 	RestoreSession bool `toml:"restore_session"`
+	// FingerprintSudo shows RavenLinux's sudo fingerprint prompt as a modal
+	// over the pane instead of leaving it as a line of text. Whether sudo asks
+	// for a finger at all is the system's switch (Settings > Security >
+	// Approve sudo); this only decides how the terminal presents it.
+	FingerprintSudo bool `toml:"fingerprint_sudo"`
 }
 
 // sha256 digests of earlier default VCS-detect scripts, kept so LoadConfig
@@ -330,6 +335,7 @@ func DefaultConfig() *Config {
 		FontSize:           15.0,
 		AllowClipboardRead: false, // opt-in: OSC 52 read leaks clipboard contents to apps
 		RestoreSession:     false, // opt-in: reopening old tabs surprises users who expect a clean start
+		FingerprintSudo:    true,  // the system switch is already the opt-in; this is presentation
 	}
 }
 

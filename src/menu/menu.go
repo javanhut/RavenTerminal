@@ -292,6 +292,7 @@ func (m *Menu) buildBasicMenu() {
 		{Label: "Shell: " + currentShell},
 		{Label: "Source RC Files", IsToggle: true, Toggled: m.Config.Shell.SourceRC},
 		{Label: "Restore Session", IsToggle: true, Toggled: m.Config.RestoreSession},
+		{Label: "Fingerprint for sudo", IsToggle: true, Toggled: m.Config.FingerprintSudo},
 		{Label: "Scripts..."},
 		{Label: "Commands (" + itoa(len(m.Config.Commands)) + ")..."},
 		{Label: "Aliases (" + itoa(len(m.Config.Aliases)) + ")..."},
@@ -834,6 +835,10 @@ func (m *Menu) handleMainSelect() {
 		m.StatusMessage = "Updated (save to persist)"
 	case label == "Restore Session":
 		m.Config.RestoreSession = !m.Config.RestoreSession
+		m.rebuildCurrent()
+		m.StatusMessage = "Updated (save to persist)"
+	case label == "Fingerprint for sudo":
+		m.Config.FingerprintSudo = !m.Config.FingerprintSudo
 		m.rebuildCurrent()
 		m.StatusMessage = "Updated (save to persist)"
 	case strings.HasPrefix(label, "Panel Width:"):

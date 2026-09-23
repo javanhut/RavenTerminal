@@ -31,6 +31,7 @@ implemented in-tree — there is no external terminal backend. Runs on Linux
 - Clickable OSC 8 hyperlinks, underlined on hover
 - Kitty keyboard protocol
 - Inline images via Kitty graphics and Sixel, anchored to scrollback so they scroll with content
+- RavenLinux sudo fingerprint prompt shown as a modal (Settings > Basic > Fingerprint for sudo; Esc falls back to the password)
 
 **Shell integration**
 - In-terminal settings menu persisted to TOML

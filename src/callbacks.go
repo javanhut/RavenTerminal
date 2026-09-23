@@ -103,6 +103,11 @@ func (a *App) onKey(w *glfw.Window, key glfw.Key, scancode int, action glfw.Acti
 		return
 	}
 
+	// The sudo fingerprint modal sits above everything, so it sees keys first.
+	if a.fingerprintKey(key, mods) {
+		return
+	}
+
 	// Find bar owns the keyboard while it is up: it is a modal prompt, so
 	// Enter/Escape/Backspace edit the search rather than reaching the shell.
 	// Printable runes arrive via onChar. Checked before the panels so the bar

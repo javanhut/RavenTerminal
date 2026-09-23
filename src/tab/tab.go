@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/javanhut/RavenTerminal/src/fingerprint"
 	"github.com/javanhut/RavenTerminal/src/parser"
 	"github.com/javanhut/RavenTerminal/src/shell"
 )
@@ -62,11 +63,14 @@ func (n *SplitNode) IsLeaf() bool {
 // Pane represents a single terminal pane within a tab
 type Pane struct {
 	Terminal *parser.Terminal
-	pty      *shell.PtySession
-	id       int
-	exited   bool
-	exitedMu sync.Mutex
-	readerMu sync.Mutex
+	// Fingerprint follows RavenLinux's sudo fingerprint prompt in this pane's
+	// output, for the modal the app draws over it.
+	Fingerprint *fingerprint.Watcher
+	pty         *shell.PtySession
+	id          int
+	exited      bool
+	exitedMu    sync.Mutex
+	readerMu    sync.Mutex
 	// respDone stops the query-reply drain goroutine on Close.
 	respDone  chan struct{}
 	closeOnce sync.Once
@@ -138,10 +142,11 @@ func newPaneCommand(id int, cols, rows uint16, startDir string, command []string
 	}
 
 	pane := &Pane{
-		Terminal: parser.NewTerminal(int(cols), int(rows)),
-		pty:      pty,
-		id:       id,
-		exited:   false,
+		Terminal:    parser.NewTerminal(int(cols), int(rows)),
+		Fingerprint: fingerprint.New(),
+		pty:         pty,
+		id:          id,
+		exited:      false,
 	}
 	// Query replies (DA1, DSR, XTGETTCAP, ...) are emitted while the parser
 	// holds Terminal.mu, and pty.Write can block indefinitely if the child
@@ -201,6 +206,7 @@ func (p *Pane) readLoop() {
 			tap.Write(buf[:n])
 		}
 		p.processChunk(buf[:n])
+		p.Fingerprint.Feed(buf[:n])
 
 		// Wake the main loop so this output renders without waiting for the idle
 		// timeout. Coalesced: skip posting while a wake is still outstanding.
