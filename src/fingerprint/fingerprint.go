@@ -70,9 +70,16 @@ var keep int
 
 func init() {
 	rules = []rule{
-		{msgPrompt, func(w *Watcher, now time.Time) { w.set(Waiting, "", now) }},
+		{msgPrompt, func(w *Watcher, now time.Time) {
+			// A prompt straight after a miss is the helper asking again
+			// within the same sudo, so the count carries on.
+			if w.phase != Missed || now.Sub(w.changed) >= MissedLinger {
+				w.tries = 0
+			}
+			w.set(Waiting, "", now)
+		}},
 		{msgMatched, func(w *Watcher, now time.Time) { w.set(Matched, "", now) }},
-		{msgMissed, func(w *Watcher, now time.Time) { w.set(Missed, "", now) }},
+		{msgMissed, func(w *Watcher, now time.Time) { w.tries++; w.set(Missed, "", now) }},
 		{msgFallback, func(w *Watcher, now time.Time) { w.set(Idle, "", now) }},
 	}
 	for _, r := range retries {
@@ -80,6 +87,7 @@ func init() {
 		rules = append(rules, rule{r, func(w *Watcher, now time.Time) {
 			if w.phase == Waiting {
 				w.hint = hint
+				w.tries++
 			}
 		}})
 	}
@@ -94,6 +102,7 @@ type Watcher struct {
 	mu      sync.Mutex
 	phase   Phase
 	hint    string
+	tries   int // readings used up in this check: retries and misses
 	changed time.Time
 	tail    []byte
 	scratch []byte
@@ -166,4 +175,12 @@ func (w *Watcher) State(now time.Time) (phase Phase, hint string, visible bool) 
 		return Idle, "", false
 	}
 	return w.phase, w.hint, true
+}
+
+// Tries is how many readings the current check has used up: each retry the
+// helper asked for, and each miss.
+func (w *Watcher) Tries() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.tries
 }

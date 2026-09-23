@@ -229,6 +229,15 @@ type Renderer struct {
 	colorAlphaLoc int32
 	colorDraws    []colorDrawItem
 
+	// Modal UI (see shapes.go): the signed-distance shape shader and labels
+	// rasterized at their own pixel size, from fontParsed for words and
+	// iconFont (the embedded Nerd Font) for icons.
+	shapes     shapeProgram
+	labels     map[labelKey]*label
+	labelFaces map[faceKey]font.Face
+	fontParsed *opentype.Font
+	iconFont   *opentype.Font
+
 	// Help panel scroll state and cached section content
 	helpScrollOffset int
 	helpVisibleLines int // lines the last rendered panel actually fit
@@ -432,6 +441,8 @@ func (r *Renderer) loadFontData(fontData []byte) error {
 		r.face.Close()
 	}
 	r.face = face
+	r.fontParsed = parsedFont
+	r.clearLabels()
 
 	metrics := face.Metrics()
 	r.cellHeight = float32((metrics.Ascent + metrics.Descent).Ceil())
@@ -597,6 +608,10 @@ func (r *Renderer) initGL() error {
 	gl.BindVertexArray(0)
 
 	if err := r.initBatches(); err != nil {
+		return err
+	}
+
+	if err := r.initShapes(); err != nil {
 		return err
 	}
 
@@ -3865,6 +3880,7 @@ func (r *Renderer) Destroy() {
 	gl.DeleteVertexArrays(1, &r.glyphBatchVAO)
 	gl.DeleteBuffers(1, &r.glyphBatchVBO)
 	gl.DeleteProgram(r.glyphBatchProgram)
+	r.destroyShapes()
 	gl.DeleteTextures(1, &r.fontAtlas)
 	if r.face != nil {
 		r.face.Close()

@@ -38,22 +38,33 @@ func (a *App) fingerprintModal(now time.Time) fingerprintState {
 			continue
 		}
 		s := fingerprintState{pane: p, phase: phase, visible: true}
+		tries := p.Fingerprint.Tries()
 		switch phase {
 		case fingerprint.Waiting:
 			sub := hint
 			if sub == "" {
-				sub = "sudo is asking to confirm it's you"
+				sub = "Place your finger on the sensor to continue."
 			}
 			s.modal = render.FingerprintModal{
-				Title:    "Touch the fingerprint sensor",
+				Title:    "Scan your fingerprint",
 				Subtitle: sub,
-				Footer:   "Enter or Esc: type your password instead",
 				Tone:     render.FingerprintWaiting,
+				Tries:    tries,
 			}
 		case fingerprint.Matched:
-			s.modal = render.FingerprintModal{Title: "Fingerprint recognised", Tone: render.FingerprintMatched}
+			s.modal = render.FingerprintModal{
+				Title:    "Fingerprint recognised",
+				Subtitle: "Continuing with sudo.",
+				Tone:     render.FingerprintMatched,
+				Tries:    tries,
+			}
 		case fingerprint.Missed:
-			s.modal = render.FingerprintModal{Title: "Fingerprint not recognised", Tone: render.FingerprintMissed}
+			s.modal = render.FingerprintModal{
+				Title:    "Fingerprint not recognised",
+				Subtitle: "Try again, or use your password.",
+				Tone:     render.FingerprintMissed,
+				Tries:    tries,
+			}
 		}
 		return s
 	}
@@ -75,10 +86,7 @@ func (a *App) fingerprintKey(key glfw.Key, mods glfw.ModifierKey) bool {
 	}
 	switch {
 	case key == glfw.KeyEscape:
-		if s.phase == fingerprint.Waiting {
-			_ = s.pane.Write([]byte("\r"))
-		}
-		s.pane.Fingerprint.Dismiss()
+		fingerprintFallback(s)
 		return true
 	case key == glfw.KeyEnter, key == glfw.KeyKPEnter,
 		key == glfw.KeyC && mods&glfw.ModControl != 0:
@@ -89,4 +97,36 @@ func (a *App) fingerprintKey(key glfw.Key, mods glfw.ModifierKey) bool {
 		s.pane.Fingerprint.Dismiss()
 	}
 	return false
+}
+
+// fingerprintFallback takes the modal down and, while the helper is still
+// waiting, sends it the Enter that switches sudo to the password prompt.
+func fingerprintFallback(s fingerprintState) {
+	if s.phase == fingerprint.Waiting {
+		_ = s.pane.Write([]byte("\r"))
+	}
+	s.pane.Fingerprint.Dismiss()
+}
+
+// fingerprintClick handles a mouse press while the modal is up and reports
+// whether it consumed it; the modal is modal, so every press on it or on the
+// dimmed window around it is. (x, y) are in framebuffer pixels.
+//
+// Authentication Settings only hides the modal: the helper keeps watching the
+// sensor while the settings menu is open, and a finger still gets through.
+func (a *App) fingerprintClick(width, height int, x, y float32) bool {
+	s := a.fingerprintModal(time.Now())
+	if !s.visible {
+		return false
+	}
+	switch a.renderer.FingerprintModalHit(s.modal, width, height, x, y) {
+	case render.FingerprintHitClose, render.FingerprintHitPassword:
+		fingerprintFallback(s)
+	case render.FingerprintHitSettings:
+		s.pane.Fingerprint.Dismiss()
+		a.searchPanel.Open = false
+		a.aiPanel.Open = false
+		a.settingsMenu.Open()
+	}
+	return true
 }

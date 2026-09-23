@@ -1245,6 +1245,17 @@ func (a *App) onScroll(w *glfw.Window, xoff, yoff float64) {
 }
 
 func (a *App) onMouseButton(w *glfw.Window, button glfw.MouseButton, action glfw.Action, mods glfw.ModifierKey) {
+	// The sudo fingerprint modal is drawn above everything, so it takes
+	// presses first. Releases fall through so a press made before it appeared
+	// still gets its release.
+	if action == glfw.Press {
+		width, height := a.win.GetFramebufferSize()
+		x, y := w.GetCursorPos()
+		s := a.renderer.ContentScale()
+		if a.fingerprintClick(width, height, float32(x)*s, float32(y)*s) {
+			return
+		}
+	}
 	if a.settingsMenu.IsOpen() || a.showHelp {
 		return
 	}

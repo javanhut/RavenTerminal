@@ -109,3 +109,27 @@ func TestWaitTimesOut(t *testing.T) {
 		t.Fatal("an abandoned wait should stop showing")
 	}
 }
+
+func TestTriesCountRetriesAndMisses(t *testing.T) {
+	t0 := time.Unix(1000, 0)
+	w := newAt(t0)
+	w.Feed(msgPrompt)
+	if n := w.Tries(); n != 0 {
+		t.Fatalf("fresh check tries=%d", n)
+	}
+	w.Feed([]byte("Centre your finger on the sensor.\r\n"))
+	w.Feed(msgMissed)
+	if n := w.Tries(); n != 2 {
+		t.Fatalf("after a retry and a miss tries=%d, want 2", n)
+	}
+	// The helper asking again right after a miss is the same sudo.
+	w.Feed(msgPrompt)
+	if n := w.Tries(); n != 2 {
+		t.Fatalf("re-prompt after a miss reset tries to %d", n)
+	}
+	w.Dismiss()
+	w.Feed(msgPrompt)
+	if n := w.Tries(); n != 0 {
+		t.Fatalf("new check kept tries=%d", n)
+	}
+}
