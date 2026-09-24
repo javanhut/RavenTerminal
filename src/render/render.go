@@ -168,6 +168,9 @@ type Renderer struct {
 	fallbackFonts         []fallbackFont
 	fallbackFaces         []font.Face
 	systemFallbacksLoaded bool
+	fallbackPaths         map[string]bool // font files already in the chain
+	fontconfigTried       map[rune]bool   // runes already looked up via fc-match
+	fontconfigOff         bool            // fc-match isn't installed
 
 	// OpenGL resources
 	quadVAO     uint32
@@ -228,6 +231,15 @@ type Renderer struct {
 	colorTexLoc   int32
 	colorAlphaLoc int32
 	colorDraws    []colorDrawItem
+
+	// Modal UI (see shapes.go): the signed-distance shape shader and labels
+	// rasterized at their own pixel size, from fontParsed for words and
+	// iconFont (the embedded Nerd Font) for icons.
+	shapes     shapeProgram
+	labels     map[labelKey]*label
+	labelFaces map[faceKey]font.Face
+	fontParsed *opentype.Font
+	iconFont   *opentype.Font
 
 	// Help panel scroll state and cached section content
 	helpScrollOffset int
@@ -432,6 +444,8 @@ func (r *Renderer) loadFontData(fontData []byte) error {
 		r.face.Close()
 	}
 	r.face = face
+	r.fontParsed = parsedFont
+	r.clearLabels()
 
 	metrics := face.Metrics()
 	r.cellHeight = float32((metrics.Ascent + metrics.Descent).Ceil())
@@ -597,6 +611,10 @@ func (r *Renderer) initGL() error {
 	gl.BindVertexArray(0)
 
 	if err := r.initBatches(); err != nil {
+		return err
+	}
+
+	if err := r.initShapes(); err != nil {
 		return err
 	}
 
@@ -2905,8 +2923,8 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 	for i := range r.pass2 {
 		it := &r.pass2[i]
 		cell := snap.Cells[it.row*cols+it.col]
-		if isBlockElement(cell.Char) {
-			r.drawBlockElement(it.x, it.y, cell.Char, it.fg, proj)
+		if isGeometryRune(cell.Char) {
+			r.drawGeometryRune(it.x, it.y, cell.Char, it.fg, proj)
 		}
 		if cell.Flags&grid.FlagUnderline != 0 || it.hovered {
 			ulColor := it.fg
@@ -2955,7 +2973,7 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 				r.drawRect(cursorX, cursorY, r.cellWidth, r.cellHeight, r.theme.Cursor, proj)
 				// Redraw character under cursor in inverse
 				if cell.Char != ' ' && cell.Char != 0 && cell.Flags&grid.FlagHidden == 0 {
-					if !r.drawBlockElement(cursorX, cursorY, cell.Char, r.theme.Background, proj) {
+					if !r.drawGeometryRune(cursorX, cursorY, cell.Char, r.theme.Background, proj) {
 						if _, ok := r.resolveGlyph(cell.Char); ok {
 							r.drawChar(cursorX, cursorY+r.cellHeight, cell.Char, r.theme.Background, proj)
 						} else if cg, ok := r.ensureColorGlyph(cell.Char); ok {
@@ -3047,7 +3065,7 @@ func (r *Renderer) buildGridBatches(snap *grid.Snapshot, offsetX, offsetY, paneW
 			}
 
 			hidden := cell.Flags&grid.FlagHidden != 0
-			isBlock := isBlockElement(cell.Char)
+			isBlock := isGeometryRune(cell.Char)
 			// Block-element chars and the cursor cell are drawn immediately
 			// in pass 2; everything else is a batched glyph. A glyph
 			// missing from the monochrome font is tried as a color emoji
@@ -3212,6 +3230,7 @@ func (r *Renderer) DrawToast(message string, width, height int) {
 
 	r.drawRect(x, y, boxW, boxH, bg, proj)
 	r.drawText(x+paddingX, y+boxH-paddingY, message, r.theme.Foreground, proj)
+	r.uiFlush() // drawn after the Render* entry point's own flush
 }
 
 // DrawFindBar renders the scrollback find prompt: a bar pinned to the bottom
@@ -3247,6 +3266,7 @@ func (r *Renderer) DrawFindBar(query, status string, width, height int) {
 		statusX := x + boxW - paddingX - float32(len([]rune(status)))*r.cellWidth
 		r.drawText(statusX, baseline, status, withAlpha(r.theme.Foreground, 0.6), proj)
 	}
+	r.uiFlush() // drawn after the Render* entry point's own flush
 }
 
 // drawRect draws a colored rectangle
@@ -3372,8 +3392,15 @@ var quadrantBlockMasks = map[rune]uint8{
 	'\u259F': 0b1110, // Quadrant upper right and lower left and lower right
 }
 
-// drawBlockElement renders block element characters as geometry to avoid seams.
-func (r *Renderer) drawBlockElement(x, y float32, char rune, clr [4]float32, proj [16]float32) bool {
+// drawGeometryRune renders block element characters as geometry to avoid
+// seams, and Braille patterns as dots so they never depend on font coverage.
+func (r *Renderer) drawGeometryRune(x, y float32, char rune, clr [4]float32, proj [16]float32) bool {
+	if isBraille(char) {
+		for _, d := range brailleDots(char, r.cellWidth, r.cellHeight) {
+			r.drawRect(x+d[0], y+d[1], d[2], d[2], clr, proj)
+		}
+		return true
+	}
 	switch char {
 	case '\u2588': // Full block
 		r.drawRect(x, y, r.cellWidth, r.cellHeight, clr, proj)
@@ -3863,6 +3890,7 @@ func (r *Renderer) Destroy() {
 	gl.DeleteVertexArrays(1, &r.glyphBatchVAO)
 	gl.DeleteBuffers(1, &r.glyphBatchVBO)
 	gl.DeleteProgram(r.glyphBatchProgram)
+	r.destroyShapes()
 	gl.DeleteTextures(1, &r.fontAtlas)
 	if r.face != nil {
 		r.face.Close()

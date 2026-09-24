@@ -292,6 +292,8 @@ func (m *Menu) buildBasicMenu() {
 		{Label: "Shell: " + currentShell},
 		{Label: "Source RC Files", IsToggle: true, Toggled: m.Config.Shell.SourceRC},
 		{Label: "Restore Session", IsToggle: true, Toggled: m.Config.RestoreSession},
+		{Label: "Show sudo fingerprint modal", IsToggle: true, Toggled: m.Config.FingerprintSudo},
+		{Label: "  sudo asks for a finger only when Settings > Security > Approve sudo is on", Disabled: true},
 		{Label: "Scripts..."},
 		{Label: "Commands (" + itoa(len(m.Config.Commands)) + ")..."},
 		{Label: "Aliases (" + itoa(len(m.Config.Aliases)) + ")..."},
@@ -836,6 +838,10 @@ func (m *Menu) handleMainSelect() {
 		m.Config.RestoreSession = !m.Config.RestoreSession
 		m.rebuildCurrent()
 		m.StatusMessage = "Updated (save to persist)"
+	case label == "Show sudo fingerprint modal":
+		m.Config.FingerprintSudo = !m.Config.FingerprintSudo
+		m.rebuildCurrent()
+		m.StatusMessage = "Updated (save to persist). This only changes how the prompt looks; Approve sudo in Settings > Security turns it on"
 	case strings.HasPrefix(label, "Panel Width:"):
 		pw := m.Config.Appearance.PanelWidthPercent
 		if pw == 0 {

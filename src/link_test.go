@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -66,10 +67,8 @@ func TestLinkAtCellOSC8AcrossWrap(t *testing.T) {
 func TestDesktopOpenerPrefersRavenOpen(t *testing.T) {
 	has := func(avail ...string) func(string) (string, error) {
 		return func(name string) (string, error) {
-			for _, a := range avail {
-				if a == name {
-					return "/usr/bin/" + name, nil
-				}
+			if slices.Contains(avail, name) {
+				return "/usr/bin/" + name, nil
 			}
 			return "", errors.New("not found")
 		}

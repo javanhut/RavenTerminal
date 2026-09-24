@@ -89,17 +89,18 @@ type App struct {
 	prevToastVisible bool
 	// Panel-open states are ORed with their previous value so the frame after
 	// a close still renders once, erasing the overlay.
-	prevMenuOpen   bool
-	prevSearchOpen bool
-	prevAIOpen     bool
-	prevHelpOpen   bool
-	prevFindOpen   bool
-	prevFocused    bool
-	prevFBWidth    int
-	prevFBHeight   int
-	prevSyncActive bool
-	prevActiveTab  *tab.Tab
-	lastScale      float32 // 0 forces the content scale to apply on frame one
+	prevMenuOpen    bool
+	prevSearchOpen  bool
+	prevAIOpen      bool
+	prevHelpOpen    bool
+	prevFindOpen    bool
+	prevFingerprint fingerprintState
+	prevFocused     bool
+	prevFBWidth     int
+	prevFBHeight    int
+	prevSyncActive  bool
+	prevActiveTab   *tab.Tab
+	lastScale       float32 // 0 forces the content scale to apply on frame one
 	// Grid size last pushed to the tabs, so fitGrid can skip the PTY ioctls
 	// when nothing actually changed.
 	fitCols uint16
@@ -852,6 +853,7 @@ func (a *App) renderFrame(now time.Time) {
 
 	toastVisible := now.Before(a.toast.expiresAt)
 	menuOpen := a.settingsMenu.IsOpen()
+	fp := a.fingerprintModal(now)
 	trig := render.RedrawTriggers{
 		PaneContentDirty:   paneDirty,
 		GridSwapped:        gridSwapped,
@@ -866,6 +868,7 @@ func (a *App) renderFrame(now time.Time) {
 		AIPanelOpen:        a.aiPanel.Open || a.prevAIOpen,
 		HelpOpen:           a.showHelp || a.prevHelpOpen,
 		FindBarOpen:        a.find.open || a.prevFindOpen,
+		FingerprintModal:   fp != a.prevFingerprint,
 		SizeChanged:        width != a.prevFBWidth || height != a.prevFBHeight,
 		FocusChanged:       a.windowFocused != a.prevFocused,
 		ScaleChanged:       scaleChanged,
@@ -881,6 +884,7 @@ func (a *App) renderFrame(now time.Time) {
 	a.prevAIOpen = a.aiPanel.Open
 	a.prevHelpOpen = a.showHelp
 	a.prevFindOpen = a.find.open
+	a.prevFingerprint = fp
 	a.prevFocused = a.windowFocused
 	a.prevFBWidth, a.prevFBHeight = width, height
 
@@ -896,6 +900,9 @@ func (a *App) renderFrame(now time.Time) {
 		}
 		if toastVisible {
 			a.renderer.DrawToast(a.toast.message, width, height)
+		}
+		if fp.visible {
+			a.renderer.DrawFingerprintModal(fp.modal, width, height)
 		}
 
 		// Swap buffers. While an app holds synchronized output (?2026),
