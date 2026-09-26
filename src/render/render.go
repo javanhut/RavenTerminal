@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/javanhut/RavenTerminal/src/aipanel"
 	"github.com/javanhut/RavenTerminal/src/assets/fonts"
+	"github.com/javanhut/RavenTerminal/src/config"
 	"github.com/javanhut/RavenTerminal/src/grid"
 	"github.com/javanhut/RavenTerminal/src/menu"
 	"github.com/javanhut/RavenTerminal/src/parser"
@@ -40,6 +41,11 @@ type Theme struct {
 	TabBar     [4]float32
 	TabActive  [4]float32
 	Selection  [4]float32
+	// Light marks a light-background palette: overlay chrome (panels, menus,
+	// help) switches to its light variant so text stays readable.
+	Light bool
+	// ANSI overrides the 16 standard palette entries; nil keeps standard16.
+	ANSI *[16][4]float32
 }
 
 // DefaultTheme returns the default color theme
@@ -47,9 +53,12 @@ func DefaultTheme() Theme {
 	return ThemeByName("raven-blue")
 }
 
-// ThemeByName returns a theme for a known theme name.
+// ThemeByName returns a theme for a known theme name. "raven" (and an empty
+// name) follows the desktop's appearance from desktop.toml.
 func ThemeByName(name string) Theme {
 	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "raven", "":
+		return RavenTheme(config.LoadDesktopAppearance())
 	case "crow-black":
 		return Theme{
 			Background: [4]float32{0.020, 0.020, 0.020, 1.0}, // #050505
@@ -100,6 +109,160 @@ func ThemeByName(name string) Theme {
 			Selection:  [4]float32{0.455, 0.714, 1.0, 0.35},
 		}
 	}
+}
+
+// FollowsDesktop reports whether a theme name resolves from desktop.toml,
+// so it must be re-applied when that file changes.
+func FollowsDesktop(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "raven", "":
+		return true
+	}
+	return false
+}
+
+// RavenTheme builds the "follow desktop" theme: Raven Blue for dark/auto, a
+// light counterpart for light, with the desktop accent as the cursor,
+// selection and UI highlight colour.
+func RavenTheme(d config.DesktopAppearance) Theme {
+	accent := hexColor(d.AccentHex())
+	var t Theme
+	if d.IsLight() {
+		t = Theme{
+			Background: hexColor("#f5f7fb"),
+			Foreground: hexColor("#1f2433"),
+			TabBar:     hexColor("#e4e8f0"),
+			Light:      true,
+			ANSI:       &lightANSI,
+		}
+	} else {
+		t = ThemeByName("raven-blue")
+	}
+	t.Cursor = accent
+	t.TabActive = accent
+	t.Selection = withAlpha(accent, 0.35)
+	return t
+}
+
+// hexColor parses "#RRGGBB" (already validated) into an opaque RGBA color.
+func hexColor(s string) [4]float32 {
+	var c [4]float32
+	c[3] = 1
+	if len(s) != 7 {
+		return c
+	}
+	for i := range 3 {
+		var v int
+		for _, ch := range s[1+2*i : 3+2*i] {
+			v <<= 4
+			switch {
+			case ch >= '0' && ch <= '9':
+				v |= int(ch - '0')
+			case ch >= 'a' && ch <= 'f':
+				v |= int(ch-'a') + 10
+			case ch >= 'A' && ch <= 'F':
+				v |= int(ch-'A') + 10
+			}
+		}
+		c[i] = float32(v) / 255
+	}
+	return c
+}
+
+// lightANSI is the 16-colour palette for the light Raven theme: every entry
+// dark enough to read on #f5f7fb, so "white" (7/15) is a mid grey rather
+// than vanishing into the background (GitHub Light's approach).
+var lightANSI = [16][4]float32{
+	hexColor("#24292f"), // 0: Black
+	hexColor("#cf222e"), // 1: Red
+	hexColor("#116329"), // 2: Green
+	hexColor("#7d5a00"), // 3: Yellow
+	hexColor("#0969da"), // 4: Blue
+	hexColor("#8250df"), // 5: Magenta
+	hexColor("#1b7c83"), // 6: Cyan
+	hexColor("#6e7781"), // 7: White
+	hexColor("#57606a"), // 8: Bright Black
+	hexColor("#a40e26"), // 9: Bright Red
+	hexColor("#1a7f37"), // 10: Bright Green
+	hexColor("#633c01"), // 11: Bright Yellow
+	hexColor("#218bff"), // 12: Bright Blue
+	hexColor("#a475f9"), // 13: Bright Magenta
+	hexColor("#3192aa"), // 14: Bright Cyan
+	hexColor("#8c959f"), // 15: Bright White
+}
+
+// uiPalette holds the neutral overlay-chrome colours (panels, menus, help)
+// that are not part of a theme's identity but must flip for light themes.
+type uiPalette struct {
+	PanelBg, PanelHeaderBg, PanelInputBg, InputBorder [4]float32
+	ScrollTrack, Track, TextBoxBg, Separator          [4]float32
+	ModalBg, ListHighlight, ListHighlightFocus        [4]float32
+	MenuHighlight                                     [4]float32
+	DimText, FaintText, ErrorText, Muted, MenuHeader  [4]float32
+	ToggleOn, Code, MdHeader, Bullet, Quote           [4]float32
+	Thinking, ThinkingHeader                          [4]float32
+}
+
+var darkUI = uiPalette{
+	PanelBg:            [4]float32{0.05, 0.06, 0.08, 0.97},
+	PanelHeaderBg:      [4]float32{0.09, 0.10, 0.14, 1.0},
+	PanelInputBg:       [4]float32{0.02, 0.02, 0.04, 1.0},
+	InputBorder:        [4]float32{0.22, 0.24, 0.32, 1.0},
+	ScrollTrack:        [4]float32{1, 1, 1, 0.07},
+	Track:              [4]float32{0.12, 0.13, 0.18, 1.0},
+	TextBoxBg:          [4]float32{0.03, 0.03, 0.05, 1.0},
+	Separator:          [4]float32{0.3, 0.3, 0.4, 1.0},
+	ModalBg:            [4]float32{0.06, 0.07, 0.10, 1.0},
+	ListHighlight:      [4]float32{0.10, 0.12, 0.19, 1.0},
+	ListHighlightFocus: [4]float32{0.13, 0.16, 0.26, 1.0},
+	MenuHighlight:      [4]float32{0.15, 0.17, 0.25, 1.0},
+	DimText:            [4]float32{0.58, 0.60, 0.66, 1.0},
+	FaintText:          [4]float32{0.42, 0.44, 0.50, 1.0},
+	ErrorText:          [4]float32{0.9, 0.3, 0.3, 1.0},
+	Muted:              [4]float32{0.5, 0.5, 0.5, 1.0},
+	MenuHeader:         [4]float32{0.5, 0.5, 0.6, 1.0},
+	ToggleOn:           [4]float32{0.3, 0.8, 0.4, 1.0},
+	Code:               [4]float32{0.7, 0.8, 0.6, 1.0},
+	MdHeader:           [4]float32{0.9, 0.7, 0.4, 1.0},
+	Bullet:             [4]float32{0.7, 0.7, 0.9, 1.0},
+	Quote:              [4]float32{0.6, 0.7, 0.6, 1.0},
+	Thinking:           [4]float32{0.6, 0.5, 0.7, 0.85},
+	ThinkingHeader:     [4]float32{0.7, 0.5, 0.8, 1.0},
+}
+
+var lightUI = uiPalette{
+	PanelBg:            [4]float32{0.980, 0.984, 0.992, 0.98},
+	PanelHeaderBg:      [4]float32{0.918, 0.929, 0.953, 1.0},
+	PanelInputBg:       [4]float32{1.0, 1.0, 1.0, 1.0},
+	InputBorder:        [4]float32{0.76, 0.79, 0.85, 1.0},
+	ScrollTrack:        [4]float32{0, 0, 0, 0.07},
+	Track:              [4]float32{0.86, 0.88, 0.92, 1.0},
+	TextBoxBg:          [4]float32{1.0, 1.0, 1.0, 1.0},
+	Separator:          [4]float32{0.76, 0.79, 0.85, 1.0},
+	ModalBg:            [4]float32{0.980, 0.984, 0.992, 1.0},
+	ListHighlight:      [4]float32{0.90, 0.92, 0.96, 1.0},
+	ListHighlightFocus: [4]float32{0.85, 0.89, 0.97, 1.0},
+	MenuHighlight:      [4]float32{0.86, 0.90, 0.97, 1.0},
+	DimText:            [4]float32{0.36, 0.39, 0.46, 1.0},
+	FaintText:          [4]float32{0.50, 0.53, 0.59, 1.0},
+	ErrorText:          [4]float32{0.75, 0.13, 0.18, 1.0},
+	Muted:              [4]float32{0.42, 0.44, 0.48, 1.0},
+	MenuHeader:         [4]float32{0.40, 0.42, 0.52, 1.0},
+	ToggleOn:           [4]float32{0.10, 0.50, 0.22, 1.0},
+	Code:               [4]float32{0.07, 0.39, 0.16, 1.0},
+	MdHeader:           [4]float32{0.60, 0.35, 0.0, 1.0},
+	Bullet:             [4]float32{0.20, 0.30, 0.65, 1.0},
+	Quote:              [4]float32{0.30, 0.42, 0.30, 1.0},
+	Thinking:           [4]float32{0.42, 0.30, 0.55, 0.9},
+	ThinkingHeader:     [4]float32{0.45, 0.25, 0.62, 1.0},
+}
+
+// ui returns the overlay-chrome palette matching the theme's brightness.
+func (t Theme) ui() *uiPalette {
+	if t.Light {
+		return &lightUI
+	}
+	return &darkUI
 }
 
 // SetThemeByName applies a named theme to the renderer.
@@ -684,14 +847,6 @@ func (r *Renderer) RenderWithHelpAndPanels(tm *tab.TabManager, width, height int
 	r.uiFlush()
 }
 
-// Shared overlay-panel palette.
-var (
-	panelDimText   = [4]float32{0.58, 0.60, 0.66, 1.0}
-	panelFaintText = [4]float32{0.42, 0.44, 0.50, 1.0}
-	panelErrorText = [4]float32{0.9, 0.3, 0.3, 1.0}
-	panelInputBg   = [4]float32{0.02, 0.02, 0.04, 1.0}
-)
-
 // panelFocusChord returns the platform chord that moves keyboard focus
 // between an overlay panel and the terminal (the pane-cycle binding).
 func panelFocusChord() string {
@@ -720,8 +875,8 @@ func (r *Renderer) drawPanelFrame(x, y, w, h, lineHeight float32, focused bool, 
 		borderColor = withAlpha(r.theme.TabActive, 0.3)
 		borderWidth = 1
 	}
-	panelBg := [4]float32{0.05, 0.06, 0.08, 0.97}
-	headerBg := [4]float32{0.09, 0.10, 0.14, 1.0}
+	panelBg := r.theme.ui().PanelBg
+	headerBg := r.theme.ui().PanelHeaderBg
 
 	r.drawRoundedRect(x-borderWidth, y-borderWidth, w+2*borderWidth, h+2*borderWidth, radius+borderWidth, borderColor, proj)
 	r.drawRoundedRect(x, y, w, h, radius, panelBg, proj)
@@ -739,12 +894,12 @@ func (r *Renderer) drawPanelFrame(x, y, w, h, lineHeight float32, focused bool, 
 // drawPanelInputBox draws a rounded input field whose border brightens when
 // it will receive typed characters.
 func (r *Renderer) drawPanelInputBox(x, y, w, h float32, active bool, proj [16]float32) {
-	border := [4]float32{0.22, 0.24, 0.32, 1.0}
+	border := r.theme.ui().InputBorder
 	if active {
 		border = withAlpha(r.theme.TabActive, 0.85)
 	}
 	r.drawRoundedRect(x-1, y-1, w+2, h+2, 5, border, proj)
-	r.drawRoundedRect(x, y, w, h, 4, panelInputBg, proj)
+	r.drawRoundedRect(x, y, w, h, 4, r.theme.ui().PanelInputBg, proj)
 }
 
 // drawPanelScrollbar draws a thin scroll indicator along the right edge of a
@@ -757,7 +912,7 @@ func (r *Renderer) drawPanelScrollbar(x, top, bottom float32, total, visible, sc
 	if trackH <= 16 {
 		return
 	}
-	r.drawRect(x, top, 3, trackH, [4]float32{1, 1, 1, 0.07}, proj)
+	r.drawRect(x, top, 3, trackH, r.theme.ui().ScrollTrack, proj)
 	thumbH := trackH * float32(visible) / float32(total)
 	if thumbH < 14 {
 		thumbH = 14
@@ -786,21 +941,21 @@ func (r *Renderer) renderSearchPanel(panel *searchpanel.Panel, width, height int
 
 	r.drawText(layout.ContentX, layout.HeaderY, "Web Search", r.theme.TabActive, proj)
 	proxyBadge := "proxy off"
-	proxyColor := panelFaintText
+	proxyColor := r.theme.ui().FaintText
 	if panel.ProxyEnabled {
 		proxyBadge = "proxy on"
 		proxyColor = r.theme.Cursor
 	}
 	r.drawTextRight(layout.ContentX+layout.ContentWidth, layout.HeaderY, proxyBadge, proxyColor, proj)
 
-	r.drawText(layout.ContentX, layout.InputLabelY, "Query", panelDimText, proj)
+	r.drawText(layout.ContentX, layout.InputLabelY, "Query", r.theme.ui().DimText, proj)
 	inputActive := panel.Focused && panel.Mode == searchpanel.ModeResults
 	r.drawPanelInputBox(layout.ContentX, layout.InputBoxY, layout.ContentWidth, layout.LineHeight, inputActive, proj)
 
 	inputText := truncateHeadToCells(panel.Query, maxChars)
 	inputTextY := layout.InputBoxY + layout.LineHeight*0.75
 	if inputText == "" {
-		r.drawText(layout.ContentX+8, inputTextY, "Search the web...", panelFaintText, proj)
+		r.drawText(layout.ContentX+8, inputTextY, "Search the web...", r.theme.ui().FaintText, proj)
 		if inputActive {
 			r.drawInputCursor(layout.ContentX+8, inputTextY, proj)
 		}
@@ -826,18 +981,18 @@ func (r *Renderer) renderSearchPanel(panel *searchpanel.Panel, width, height int
 		}
 		status = panel.SpinnerFrame() + " " + status
 	} else if strings.Contains(status, "failed") || strings.HasPrefix(status, "Failed") {
-		statusColor = panelErrorText
+		statusColor = r.theme.ui().ErrorText
 	} else if status == "" {
 		if panel.HistoryIndex >= 0 {
 			status = fmt.Sprintf("history %d/%d", panel.HistoryIndex+1, len(panel.History))
-			statusColor = panelDimText
+			statusColor = r.theme.ui().DimText
 		} else if panel.Mode == searchpanel.ModeResults && len(panel.Results) > 0 {
 			noun := "results"
 			if len(panel.Results) == 1 {
 				noun = "result"
 			}
 			status = fmt.Sprintf("%d %s for \"%s\"", len(panel.Results), noun, panel.LastQuery)
-			statusColor = panelDimText
+			statusColor = r.theme.ui().DimText
 		}
 	}
 	if status != "" {
@@ -898,7 +1053,7 @@ func (r *Renderer) renderSearchPanel(panel *searchpanel.Panel, width, height int
 			"Enter: search | Up/Down: history",
 			"Enter: search")
 	}
-	r.drawText(layout.ContentX, layout.FooterY, footerText, panelDimText, proj)
+	r.drawText(layout.ContentX, layout.FooterY, footerText, r.theme.ui().DimText, proj)
 }
 
 func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [16]float32) {
@@ -913,7 +1068,7 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 		avail := maxChars - len("AI Chat") - 2
 		if avail > 3 {
 			r.drawTextRight(layout.ContentX+layout.ContentWidth, layout.HeaderY,
-				truncateToCells(model, avail), panelFaintText, proj)
+				truncateToCells(model, avail), r.theme.ui().FaintText, proj)
 		}
 	}
 
@@ -923,12 +1078,12 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 	if status := panel.Status; status != "" && !panel.Loading {
 		statusColor := r.theme.Cursor
 		if strings.Contains(status, "failed") || strings.HasPrefix(status, "Missing") {
-			statusColor = panelErrorText
+			statusColor = r.theme.ui().ErrorText
 		}
 		r.drawText(layout.ContentX, layout.StatusY, truncateToCells(status, maxChars), statusColor, proj)
 	}
 
-	r.drawText(layout.ContentX, layout.InputLabelY, "Message", panelDimText, proj)
+	r.drawText(layout.ContentX, layout.InputLabelY, "Message", r.theme.ui().DimText, proj)
 	r.drawPanelInputBox(layout.ContentX, layout.InputBoxY, layout.ContentWidth, layout.InputBoxH, panel.Focused, proj)
 
 	// Wrap input text for multiline display
@@ -941,7 +1096,7 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 	inputStartLine := panel.InputScroll
 
 	if panel.Input == "" {
-		r.drawText(layout.ContentX+8, inputY, "Ask anything...", panelFaintText, proj)
+		r.drawText(layout.ContentX+8, inputY, "Ask anything...", r.theme.ui().FaintText, proj)
 		if panel.Focused {
 			r.drawInputCursor(layout.ContentX+8, inputY, proj)
 		}
@@ -962,7 +1117,7 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 		scrollIndicator := fmt.Sprintf("↕ %d/%d", panel.InputScroll+1, len(inputLines)-visibleInputLines+1)
 		r.drawText(layout.ContentX+layout.ContentWidth-float32(len(scrollIndicator))*r.cellWidth-8,
 			layout.InputBoxY+layout.InputBoxH-layout.LineHeight*0.3,
-			scrollIndicator, [4]float32{0.5, 0.5, 0.5, 1.0}, proj)
+			scrollIndicator, r.theme.ui().Muted, proj)
 	}
 
 	lines := panel.WrappedForRender(maxChars)
@@ -984,12 +1139,12 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 
 	if len(lines) == 0 {
 		r.drawText(layout.ContentX, layout.MessagesStart,
-			truncateToCells("Ask a question to begin.", maxChars), panelDimText, proj)
+			truncateToCells("Ask a question to begin.", maxChars), r.theme.ui().DimText, proj)
 		r.drawText(layout.ContentX, layout.MessagesStart+layout.LineHeight,
 			fitToCells(maxChars,
 				"Enter sends, Shift+Enter adds a newline.",
 				"Enter sends, Shift+Enter: newline.",
-				"Enter sends."), panelFaintText, proj)
+				"Enter sends."), r.theme.ui().FaintText, proj)
 	} else {
 		visibleLines := layout.VisibleLines
 		totalLines := len(lines)
@@ -1014,11 +1169,12 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 			panel.AnchorOffset = visibleLines - totalLines
 			lineY = layout.MessagesStart + float32(panel.AnchorOffset)*layout.LineHeight
 		}
-		codeColor := [4]float32{0.7, 0.8, 0.6, 1.0}           // Greenish for code
-		headerColor := [4]float32{0.9, 0.7, 0.4, 1.0}         // Orange/gold for headers
-		bulletColor := [4]float32{0.7, 0.7, 0.9, 1.0}         // Light blue for bullets
-		thinkingColor := [4]float32{0.6, 0.5, 0.7, 0.85}      // Purple/dim for thinking
-		thinkingHeaderColor := [4]float32{0.7, 0.5, 0.8, 1.0} // Brighter purple for thinking header
+		ui := r.theme.ui()
+		codeColor := ui.Code                     // Greenish for code
+		headerColor := ui.MdHeader               // Orange/gold for headers
+		bulletColor := ui.Bullet                 // Blue for bullets
+		thinkingColor := ui.Thinking             // Purple/dim for thinking
+		thinkingHeaderColor := ui.ThinkingHeader // Brighter purple for thinking header
 		// Compute selection range for highlight
 		selStart, selEnd := panel.SelectionStart, panel.SelectionEnd
 		if selEnd < selStart {
@@ -1042,7 +1198,7 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 				case "user":
 					barColor = withAlpha(r.theme.TabActive, 0.9)
 				case "error":
-					barColor = panelErrorText
+					barColor = r.theme.ui().ErrorText
 				case "thinking":
 					barColor = thinkingColor
 				}
@@ -1071,9 +1227,9 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 					case "assistant":
 						color = r.theme.Foreground
 					case "error":
-						color = [4]float32{0.9, 0.3, 0.3, 1.0} // Red for errors
+						color = ui.ErrorText // Red for errors
 					case "tool":
-						color = panelDimText // tool activity notes stay quiet
+						color = r.theme.ui().DimText // tool activity notes stay quiet
 					default:
 						if line.Role != "" {
 							color = r.theme.Cursor
@@ -1103,7 +1259,7 @@ func (r *Renderer) renderAIPanel(panel *aipanel.Panel, width, height int, proj [
 			"Enter: send | Shift+Enter: newline",
 			"Enter sends")
 	}
-	r.drawText(layout.ContentX, layout.FooterY, footerText, panelDimText, proj)
+	r.drawText(layout.ContentX, layout.FooterY, footerText, r.theme.ui().DimText, proj)
 }
 
 // fitToCells returns the first candidate that fits within max display cells,
@@ -1129,7 +1285,7 @@ func (r *Renderer) renderSearchResults(panel *searchpanel.Panel, layout searchpa
 					hint = "No results."
 				}
 			}
-			r.drawText(layout.ContentX, layout.ResultsStart, hint, panelFaintText, proj)
+			r.drawText(layout.ContentX, layout.ResultsStart, hint, r.theme.ui().FaintText, proj)
 		}
 		return
 	}
@@ -1150,9 +1306,9 @@ func (r *Renderer) renderSearchResults(panel *searchpanel.Panel, layout searchpa
 		drawY := layout.ResultsStart + float32(drawLine)*layout.LineHeight
 
 		if i == panel.Selected {
-			highlightColor := [4]float32{0.10, 0.12, 0.19, 1.0}
+			highlightColor := r.theme.ui().ListHighlight
 			if panel.Focused {
-				highlightColor = [4]float32{0.13, 0.16, 0.26, 1.0}
+				highlightColor = r.theme.ui().ListHighlightFocus
 			}
 			r.drawRoundedRect(layout.ContentX-8, drawY-layout.LineHeight+6, layout.ContentWidth+16, layout.LineHeight*2.2, 4, highlightColor, proj)
 			r.drawRect(layout.ContentX-8, drawY-layout.LineHeight+6, 3, layout.LineHeight*2.2, r.theme.TabActive, proj)
@@ -1169,7 +1325,7 @@ func (r *Renderer) renderSearchResults(panel *searchpanel.Panel, layout searchpa
 		if subLine == "" {
 			subLine = strings.TrimSpace(result.URL)
 		}
-		r.drawText(layout.ContentX+12, drawY+layout.LineHeight, truncateToCells(subLine, maxChars), panelDimText, proj)
+		r.drawText(layout.ContentX+12, drawY+layout.LineHeight, truncateToCells(subLine, maxChars), r.theme.ui().DimText, proj)
 	}
 
 	r.drawPanelScrollbar(layout.PanelX+layout.PanelWidth-7,
@@ -1289,9 +1445,9 @@ func buildWrappedPreview(lines []string, maxChars int, theme Theme) []styledLine
 	out := []styledLine{}
 	inCode := false
 
-	codeColor := [4]float32{0.7, 0.8, 0.6, 1.0}   // Greenish for code
-	bulletColor := [4]float32{0.7, 0.7, 0.9, 1.0} // Light blue for bullets
-	quoteColor := [4]float32{0.6, 0.7, 0.6, 1.0}  // Muted green for quotes
+	codeColor := theme.ui().Code     // Greenish for code
+	bulletColor := theme.ui().Bullet // Blue for bullets
+	quoteColor := theme.ui().Quote   // Muted green for quotes
 
 	for _, raw := range lines {
 		trimmed := strings.TrimSpace(raw)
@@ -1299,7 +1455,7 @@ func buildWrappedPreview(lines []string, maxChars int, theme Theme) []styledLine
 		// Toggle code block state; keep the fence line, dimmed.
 		if strings.HasPrefix(trimmed, "```") {
 			inCode = !inCode
-			out = append(out, styledLine{text: truncateToCells(trimmed, maxChars), color: panelDimText})
+			out = append(out, styledLine{text: truncateToCells(trimmed, maxChars), color: theme.ui().DimText})
 			continue
 		}
 
@@ -1800,7 +1956,7 @@ func (r *Renderer) renderHelpPanel(width, height int, proj [16]float32) {
 	r.drawRect(0, 0, float32(width), float32(height), overlayColor, proj)
 
 	// Draw panel background
-	panelBg := [4]float32{0.06, 0.07, 0.10, 1.0}
+	panelBg := r.theme.ui().ModalBg
 	r.drawRect(panelX, panelY, panelWidth, panelHeight, panelBg, proj)
 
 	// Draw panel border
@@ -1844,7 +2000,7 @@ func (r *Renderer) renderHelpPanel(width, height int, proj [16]float32) {
 
 	if maxScroll > 0 {
 		// Scroll track
-		trackColor := [4]float32{0.12, 0.13, 0.18, 1.0}
+		trackColor := r.theme.ui().Track
 		r.drawRect(scrollBarX, scrollBarY, scrollBarWidth, scrollBarHeight, trackColor, proj)
 
 		// Scroll thumb - size proportional to visible content
@@ -1890,7 +2046,7 @@ func (r *Renderer) renderHelpPanel(width, height int, proj [16]float32) {
 	// Position text first, then put separator above it
 	footerY := panelY + panelHeight - lineHeight*0.5
 	footerText := truncateToCells(helpFooter, layout.contentCells)
-	r.drawText(contentX, footerY, footerText, [4]float32{0.5, 0.5, 0.5, 1.0}, proj)
+	r.drawText(contentX, footerY, footerText, r.theme.ui().Muted, proj)
 
 	// Separator line above the footer text
 	footerSepY := footerY - lineHeight
@@ -1968,7 +2124,7 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 	r.drawRect(0, 0, float32(width), float32(height), overlayColor, proj)
 
 	// Draw panel background
-	panelBg := [4]float32{0.06, 0.07, 0.10, 1.0}
+	panelBg := r.theme.ui().ModalBg
 	r.drawRect(panelX, panelY, panelWidth, panelHeight, panelBg, proj)
 
 	// Draw panel border
@@ -2040,9 +2196,9 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 
 	// Draw menu items
 	itemIndex := 0
-	headerColor := [4]float32{0.5, 0.5, 0.6, 1.0}    // Dim color for headers
-	toggleOnColor := [4]float32{0.3, 0.8, 0.4, 1.0}  // Green for enabled toggles
-	toggleOffColor := [4]float32{0.5, 0.5, 0.5, 1.0} // Gray for disabled toggles
+	headerColor := r.theme.ui().MenuHeader // Dim color for headers
+	toggleOnColor := r.theme.ui().ToggleOn // Green for enabled toggles
+	toggleOffColor := r.theme.ui().Muted   // Gray for disabled toggles
 
 	for i, item := range m.Items {
 		if i < m.ScrollOffset {
@@ -2084,7 +2240,7 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 
 		// Highlight selected item
 		if i == m.SelectedIndex {
-			highlightColor := [4]float32{0.15, 0.17, 0.25, 1.0}
+			highlightColor := r.theme.ui().MenuHighlight
 			r.drawRect(contentX, y-lineHeight+8, contentWidth, lineHeight, highlightColor, proj)
 			r.drawText(contentX+5, y, ">", r.theme.TabActive, proj)
 			if item.IsToggle {
@@ -2140,7 +2296,7 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 
 			// Text area background
 			textBoxY := inputAreaY + lineHeight*0.3
-			r.drawRect(contentX, textBoxY, contentWidth, textAreaHeight, [4]float32{0.03, 0.03, 0.05, 1.0}, proj)
+			r.drawRect(contentX, textBoxY, contentWidth, textAreaHeight, r.theme.ui().TextBoxBg, proj)
 
 			lines := strings.Split(inputText, "\n")
 			// Scroll the window of lines onto the caret rather than pinning it
@@ -2171,7 +2327,7 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 
 			// Input box background
 			inputBoxY := inputAreaY + lineHeight*0.3
-			r.drawRect(contentX, inputBoxY, contentWidth, lineHeight, [4]float32{0.03, 0.03, 0.05, 1.0}, proj)
+			r.drawRect(contentX, inputBoxY, contentWidth, lineHeight, r.theme.ui().TextBoxBg, proj)
 
 			baselineY := inputBoxY + lineHeight*0.75
 			vis, visCol := inputWindow([]rune(inputText), caretCol, maxInputChars)
@@ -2192,7 +2348,7 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 	}
 
 	// Footer separator
-	r.drawRect(contentX, footerSepY, contentWidth, 1, [4]float32{0.3, 0.3, 0.4, 1.0}, proj)
+	r.drawRect(contentX, footerSepY, contentWidth, 1, r.theme.ui().Separator, proj)
 
 	// Footer help text - truncate if needed
 	var footerText string
@@ -2205,14 +2361,14 @@ func (r *Renderer) renderMenu(m *menu.Menu, width, height int, proj [16]float32)
 	} else {
 		footerText = "Up/Down | Enter | Del | Esc"
 	}
-	r.drawText(contentX, footerTextY, footerText, [4]float32{0.5, 0.5, 0.5, 1.0}, proj)
+	r.drawText(contentX, footerTextY, footerText, r.theme.ui().Muted, proj)
 
 	if maxScroll > 0 {
 		scrollBarX := contentX + contentWidth + scrollBarPadding
 		scrollBarHeight := contentEndY - contentStartY
 		scrollBarY := contentStartY
 
-		trackColor := [4]float32{0.12, 0.13, 0.18, 1.0}
+		trackColor := r.theme.ui().Track
 		r.drawRect(scrollBarX, scrollBarY, scrollBarWidth, scrollBarHeight, trackColor, proj)
 
 		scrollThumbHeight := scrollBarHeight * float32(visibleItems) / float32(totalItems)
@@ -2678,7 +2834,7 @@ func (r *Renderer) renderTabBar(tm *tab.TabManager, width, height int, proj [16]
 
 		if active {
 			// Rounded pill highlight for the active tab.
-			r.drawRoundedRect(g.boxX, boxY, g.boxW, g.boxH, 9, lighten(r.theme.TabBar, 0.11), proj)
+			r.drawRoundedRect(g.boxX, boxY, g.boxW, g.boxH, 9, r.raise(r.theme.TabBar, 0.11), proj)
 			// Accent strip on the leading edge.
 			r.drawRoundedRect(g.boxX, boxY+3, 3, g.boxH-6, 1.5, r.theme.TabActive, proj)
 		} else if i > 0 {
@@ -2716,7 +2872,7 @@ func (r *Renderer) renderTabBar(tm *tab.TabManager, width, height int, proj [16]
 
 	// "+" new-tab button below the last tab.
 	plusY := g.topPad + float32(len(tabs))*(g.boxH+g.gap)
-	r.drawRoundedRect(g.boxX, plusY, g.boxW, g.plusH, 9, lighten(r.theme.TabBar, 0.05), proj)
+	r.drawRoundedRect(g.boxX, plusY, g.boxW, g.plusH, 9, r.raise(r.theme.TabBar, 0.05), proj)
 	plusBaseline := plusY + g.plusH*0.5 + g.cellH*0.30
 	r.drawTextScaled(g.boxX+g.boxW*0.5-charW*0.5, plusBaseline, "+", withAlpha(r.theme.Foreground, 0.55), proj, g.scale)
 }
@@ -2861,6 +3017,15 @@ func (r *Renderer) drawRoundedRect(x, y, w, h, radius float32, clr [4]float32, p
 func withAlpha(c [4]float32, a float32) [4]float32 {
 	c[3] = a
 	return c
+}
+
+// raise lifts a surface off its background: lighter on dark themes, darker
+// on light ones.
+func (r *Renderer) raise(c [4]float32, amt float32) [4]float32 {
+	if r.theme.Light {
+		return lighten(c, -amt)
+	}
+	return lighten(c, amt)
 }
 
 // lighten returns a copy of a color with its RGB channels raised by amt (clamped).
@@ -3692,6 +3857,9 @@ func (r *Renderer) colorToRGBA(c grid.Color, isBackground bool) [4]float32 {
 		}
 		return r.theme.Foreground
 	case grid.ColorIndexed:
+		if c.Index < 16 && r.theme.ANSI != nil {
+			return r.theme.ANSI[c.Index]
+		}
 		return indexedColor(c.Index)
 	case grid.ColorRGB:
 		return [4]float32{float32(c.R) / 255, float32(c.G) / 255, float32(c.B) / 255, 1.0}

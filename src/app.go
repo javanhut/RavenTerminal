@@ -70,6 +70,9 @@ type App struct {
 
 	settingsMenu *menu.Menu
 	currentTheme string
+	// desktopGen is the desktop.toml generation last applied; the "raven"
+	// theme is re-resolved when config.DesktopGeneration moves past it.
+	desktopGen uint64
 
 	searchCache  *memoCache[[]searchpanel.Result]
 	previewCache *memoCache[cachedPreview]
@@ -325,6 +328,7 @@ func (a *App) onOllamaLoadModel(baseURL, model string) {
 // what OnConfigReload does on later changes.
 func (a *App) applyInitialConfig() {
 	a.currentTheme = ""
+	a.desktopGen = config.DesktopGeneration() // starts the shared desktop.toml watcher
 	if a.settingsMenu.Config != nil {
 		a.currentTheme = a.settingsMenu.Config.Theme
 		a.searchPanel.SetEnabled(a.settingsMenu.Config.WebSearch.Enabled)
@@ -385,6 +389,15 @@ func (a *App) tick(now time.Time) bool {
 		if a.settingsMenu.Config != nil && a.settingsMenu.Config.Theme != a.currentTheme {
 			a.renderer.SetThemeByName(a.settingsMenu.Config.Theme)
 			a.currentTheme = a.settingsMenu.Config.Theme
+		}
+		// Desktop appearance changed (Settings rewrote desktop.toml): the
+		// watcher only bumps a counter; the theme is re-applied here, on the
+		// main thread, exactly like a settings-menu theme change.
+		if gen := config.DesktopGeneration(); gen != a.desktopGen {
+			a.desktopGen = gen
+			if render.FollowsDesktop(a.currentTheme) {
+				a.renderer.SetThemeByName(a.currentTheme)
+			}
 		}
 		if a.settingsMenu.Config != nil {
 			a.searchPanel.SetEnabled(a.settingsMenu.Config.WebSearch.Enabled)

@@ -331,7 +331,7 @@ func DefaultConfig() *Config {
 			"ls": getDefaultLsAlias(),
 		},
 		Exports:            map[string]string{},
-		Theme:              "raven-blue",
+		Theme:              "raven", // follow desktop.toml; a missing key keeps this too
 		FontSize:           15.0,
 		AllowClipboardRead: false, // opt-in: OSC 52 read leaks clipboard contents to apps
 		RestoreSession:     false, // opt-in: reopening old tabs surprises users who expect a clean start

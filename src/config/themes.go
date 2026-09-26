@@ -9,6 +9,7 @@ type ThemeOption struct {
 // ThemeOptions lists the available themes for the UI.
 func ThemeOptions() []ThemeOption {
 	return []ThemeOption{
+		{Name: "raven", Label: "Raven (follow desktop)"},
 		{Name: "raven-blue", Label: "Raven Blue"},
 		{Name: "crow-black", Label: "Crow Black"},
 		{Name: "magpie-black-white-grey", Label: "Magpie Black/White/Grey"},
@@ -25,7 +26,7 @@ func ThemeLabel(name string) string {
 		}
 	}
 	if name == "" {
-		return "Raven Blue"
+		return "Raven (follow desktop)"
 	}
 	return name
 }
