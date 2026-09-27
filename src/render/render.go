@@ -46,6 +46,9 @@ type Theme struct {
 	Light bool
 	// ANSI overrides the 16 standard palette entries; nil keeps standard16.
 	ANSI *[16][4]float32
+	// UI overrides the overlay-chrome palette (a desktop glass theme); nil
+	// keeps darkUI/lightUI.
+	UI *uiPalette
 }
 
 // DefaultTheme returns the default color theme
@@ -122,8 +125,8 @@ func FollowsDesktop(name string) bool {
 }
 
 // RavenTheme builds the "follow desktop" theme: Raven Blue for dark/auto, a
-// light counterpart for light, with the desktop accent as the cursor,
-// selection and UI highlight colour.
+// light counterpart for light, re-tinted to the desktop glass theme, with
+// the desktop accent as the cursor, selection and UI highlight colour.
 func RavenTheme(d config.DesktopAppearance) Theme {
 	accent := hexColor(d.AccentHex())
 	var t Theme
@@ -138,10 +141,52 @@ func RavenTheme(d config.DesktopAppearance) Theme {
 	} else {
 		t = ThemeByName("raven-blue")
 	}
+	if ground, text, ok := d.GlassColors(); ok {
+		t.applyGlass(hexColor(ground), hexColor(text))
+	}
 	t.Cursor = accent
 	t.TabActive = accent
 	t.Selection = withAlpha(accent, 0.35)
 	return t
+}
+
+// applyGlass re-tints the grounds, text and overlay chrome to a desktop
+// glass theme, as the Raven apps' glass_tint does: on dark glass raised
+// surfaces are a shade toward white and the tab bar and input wells a shade
+// toward the shadow; on light glass they are a shade toward white or the
+// text. Alphas and ANSI colours are kept.
+func (t *Theme) applyGlass(ground, text [4]float32) {
+	white, black := [4]float32{1, 1, 1, 1}, [4]float32{0, 0, 0, 1}
+	ui := *t.ui()
+	set := func(dst *[4]float32, c [4]float32) { *dst = withAlpha(c, dst[3]) }
+	set(&t.Background, ground)
+	t.Foreground = text
+	set(&ui.PanelBg, ground)
+	if t.Light {
+		set(&t.TabBar, mixColor(ground, text, 0.05))
+		set(&ui.ModalBg, mixColor(ground, white, 0.35))
+		set(&ui.PanelHeaderBg, mixColor(ground, text, 0.05))
+		set(&ui.Track, mixColor(ground, text, 0.10))
+	} else {
+		set(&t.TabBar, mixColor(ground, black, 0.22))
+		set(&ui.ModalBg, mixColor(ground, white, 0.04))
+		set(&ui.PanelHeaderBg, mixColor(ground, white, 0.08))
+		set(&ui.Track, mixColor(ground, white, 0.11))
+		set(&ui.PanelInputBg, mixColor(ground, black, 0.22))
+		set(&ui.TextBoxBg, mixColor(ground, black, 0.22))
+	}
+	set(&ui.ListHighlight, mixColor(ground, text, 0.08))
+	set(&ui.ListHighlightFocus, mixColor(ground, text, 0.14))
+	set(&ui.MenuHighlight, mixColor(ground, text, 0.16))
+	t.UI = &ui
+}
+
+// mixColor blends a toward b by f (0..1), keeping a's alpha.
+func mixColor(a, b [4]float32, f float32) [4]float32 {
+	for i := range 3 {
+		a[i] += (b[i] - a[i]) * f
+	}
+	return a
 }
 
 // hexColor parses "#RRGGBB" (already validated) into an opaque RGBA color.
@@ -259,6 +304,9 @@ var lightUI = uiPalette{
 
 // ui returns the overlay-chrome palette matching the theme's brightness.
 func (t Theme) ui() *uiPalette {
+	if t.UI != nil {
+		return t.UI
+	}
 	if t.Light {
 		return &lightUI
 	}

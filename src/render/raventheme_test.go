@@ -75,3 +75,30 @@ func TestRavenThemeLightIsReadable(t *testing.T) {
 		t.Errorf("indexed 200 = %v, want cube color", got)
 	}
 }
+
+func TestRavenThemeGlass(t *testing.T) {
+	base := RavenTheme(config.DesktopAppearance{})
+	for _, g := range []string{"", "black", "Black Glass", "sepia"} {
+		th := RavenTheme(config.DesktopAppearance{GlassTheme: g})
+		if th.Background != base.Background || th.UI != nil || th.ui() != &darkUI {
+			t.Errorf("%q should leave the palette alone", g)
+		}
+	}
+	th := RavenTheme(config.DesktopAppearance{GlassTheme: "Rose Glass", Accent: "#F7768E"})
+	if th.Background != hexColor("#5A3A4E") || th.Foreground != hexColor("#FFF4F8") {
+		t.Errorf("rose dark = %v / %v", th.Background, th.Foreground)
+	}
+	if th.Background[3] != base.Background[3] || th.ui().PanelBg[3] != darkUI.PanelBg[3] {
+		t.Error("glass must keep the palette's alpha")
+	}
+	if th.ui().PanelBg != withAlpha(th.Background, darkUI.PanelBg[3]) || th.TabActive != hexColor("#F7768E") {
+		t.Errorf("chrome/accent not applied: %+v", th)
+	}
+	th = RavenTheme(config.DesktopAppearance{ThemeMode: "light", GlassTheme: "fog"})
+	if !th.Light || th.Background != hexColor("#E5EAF1") || th.Foreground != hexColor("#1C2433") {
+		t.Errorf("fog light = %+v", th)
+	}
+	if th.ui().PanelInputBg != lightUI.PanelInputBg {
+		t.Error("light glass keeps white input wells")
+	}
+}

@@ -84,3 +84,21 @@ func TestDefaultThemeFollowsDesktop(t *testing.T) {
 		t.Error("raven should be the first theme option")
 	}
 }
+
+func TestDesktopGlassColors(t *testing.T) {
+	for _, v := range []string{"rose", "Rose Glass", "rose-glass"} {
+		g, fg, ok := ParseDesktopAppearance("[appearance]\nglass_theme = \"" + v + "\"\n").GlassColors()
+		if !ok || g != "#5A3A4E" || fg != "#FFF4F8" {
+			t.Errorf("%q: %s %s %v", v, g, fg, ok)
+		}
+	}
+	d := DesktopAppearance{ThemeMode: "light", GlassTheme: "arctic"}
+	if g, fg, _ := d.GlassColors(); g != "#DDEEF8" || fg != "#0E2A3C" {
+		t.Errorf("arctic light: %s %s", g, fg)
+	}
+	for _, v := range []string{"", "black", "Black Glass", "sepia"} {
+		if _, _, ok := (DesktopAppearance{GlassTheme: v}).GlassColors(); ok {
+			t.Errorf("%q should not tint", v)
+		}
+	}
+}

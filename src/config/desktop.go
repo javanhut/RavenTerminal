@@ -12,7 +12,7 @@ import (
 )
 
 // The slice of RavenSettingsUI's desktop.toml the "raven" theme follows:
-// [appearance] theme_mode and accent. Settings owns the file and writes it
+// [appearance] theme_mode, accent and glass_theme. Settings owns the file and writes it
 // atomically (rename over); every key is optional and a parse error means
 // the defaults, so a newer Settings never breaks an older terminal.
 
@@ -23,6 +23,9 @@ const DefaultDesktopAccent = "#7AA2F7"
 type DesktopAppearance struct {
 	ThemeMode string `toml:"theme_mode"` // "light" | "dark" | "auto"
 	Accent    string `toml:"accent"`     // "#RRGGBB"
+	// GlassTheme is the compositor's glass: "black" (the default) or one
+	// of glassThemes, in any spelling Settings may write ("Rose Glass").
+	GlassTheme string `toml:"glass_theme"`
 }
 
 type desktopFile struct {
@@ -74,6 +77,38 @@ func (d DesktopAppearance) AccentHex() string {
 		return d.Accent
 	}
 	return DefaultDesktopAccent
+}
+
+// glassThemes are the compositor's glass grounds and text (RavenGUI,
+// huginn-comp/src/theme.rs): value, dark ground, dark text, light ground,
+// light text. Black Glass is the terminal's own palette, so it is absent.
+var glassThemes = [][5]string{
+	{"fog", "#6E7D94", "#FFFFFF", "#E5EAF1", "#1C2433"},
+	{"arctic", "#4F7F9F", "#FFFFFF", "#DDEEF8", "#0E2A3C"},
+	{"midnight", "#0E1630", "#E8EEFF", "#E3E7F6", "#101A3A"},
+	{"rose", "#5A3A4E", "#FFF4F8", "#F6E7EE", "#3A1E2C"},
+}
+
+// GlassColors returns the glass theme's ground and text (#RRGGBB) for the
+// current light/dark mode. ok is false for Black Glass and for any value
+// this build does not know, which the compositor also draws as black.
+func (d DesktopAppearance) GlassColors() (ground, text string, ok bool) {
+	var b strings.Builder
+	for _, r := range strings.ToLower(d.GlassTheme) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	want := strings.TrimSuffix(b.String(), "glass")
+	for _, t := range glassThemes {
+		if t[0] == want {
+			if d.IsLight() {
+				return t[3], t[4], true
+			}
+			return t[1], t[2], true
+		}
+	}
+	return "", "", false
 }
 
 func isHexColor(s string) bool {
