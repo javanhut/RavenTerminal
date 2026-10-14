@@ -294,7 +294,31 @@ func previewCacheKey(useProxy bool, url string) string {
 func main() {
 	// runApps owns the lifetime of every window, including destroying each one
 	// as it closes and terminating GLFW after the last.
-	runApps(newApp(commandFromArgs(os.Args[1:])))
+	args := os.Args[1:]
+	runApps(newApp(startDirFromArgs(args), commandFromArgs(args)))
+}
+
+// startDirFromArgs returns the directory `--working-directory DIR` (also
+// `--working-directory=DIR`, or `-d DIR`) names for the first tab, or "" for
+// the home directory. Only flags before a `-e`/`--` count: everything after
+// those belongs to the command being run. This is how the rest of Raven opens
+// a terminal in a folder (`raven-open --terminal DIR`).
+func startDirFromArgs(args []string) string {
+	dir := ""
+	for i := 0; i < len(args); i++ {
+		switch arg := args[i]; {
+		case arg == "-e" || arg == "--execute" || arg == "--":
+			return dir
+		case arg == "--working-directory" || arg == "-d":
+			if i+1 < len(args) {
+				i++
+				dir = args[i]
+			}
+		case strings.HasPrefix(arg, "--working-directory="):
+			dir = strings.TrimPrefix(arg, "--working-directory=")
+		}
+	}
+	return dir
 }
 
 // commandFromArgs extracts the command a `-e` (xterm convention) or `--`

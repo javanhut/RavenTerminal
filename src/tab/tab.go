@@ -1002,6 +1002,13 @@ func NewTabManager(cols, rows uint16) (*TabManager, error) {
 // instead of a shell when command is non-empty (`raven-terminal -e cmd`).
 // Tabs the user opens afterwards still get a normal shell.
 func NewTabManagerCommand(cols, rows uint16, command []string) (*TabManager, error) {
+	return NewTabManagerIn(cols, rows, "", command)
+}
+
+// NewTabManagerIn is NewTabManagerCommand with the initial tab started in
+// startDir (`raven-terminal --working-directory DIR`). An empty or unusable
+// startDir falls back to the home directory, as a fresh tab always has.
+func NewTabManagerIn(cols, rows uint16, startDir string, command []string) (*TabManager, error) {
 	tm := &TabManager{
 		tabs:        make([]*Tab, 0, MaxTabs),
 		activeIndex: 0,
@@ -1011,16 +1018,18 @@ func NewTabManagerCommand(cols, rows uint16, command []string) (*TabManager, err
 
 	// Create initial tab
 	if len(command) > 0 {
-		tab, err := newTabCommand(1, cols, rows, "", command)
+		tab, err := newTabCommand(1, cols, rows, startDir, command)
 		if err != nil {
 			return nil, err
 		}
 		tm.insertAfterActive(tab)
 		return tm, nil
 	}
-	if err := tm.NewTab(); err != nil {
+	tab, err := NewTab(1, cols, rows, startDir)
+	if err != nil {
 		return nil, err
 	}
+	tm.insertAfterActive(tab)
 
 	return tm, nil
 }

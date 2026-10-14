@@ -117,16 +117,18 @@ type App struct {
 // session saving, which is why it is flagged primary. A non-empty command
 // (`raven-terminal -e cmd args...`) runs that command in the first tab
 // instead; such a window neither restores nor saves the session, so a
-// launched TUI app never disturbs the user's saved layout.
-func newApp(command []string) *App {
+// launched TUI app never disturbs the user's saved layout. Neither does a
+// window opened in a particular folder (startDir, from --working-directory):
+// it was asked for one tab there, not for the saved layout.
+func newApp(startDir string, command []string) *App {
 	// Wake the event-driven main loop whenever a pane produces output, so shell output
 	// and key echoes render immediately. Registered before any pane (and its reader
 	// goroutine) is created to avoid a data race on the notifier.
 	tab.SetWakeNotifier(window.PostEmptyEvent)
 
 	a, err := newAppWith(func(cols, rows uint16) (*tab.TabManager, error) {
-		if len(command) > 0 {
-			return tab.NewTabManagerCommand(cols, rows, command)
+		if len(command) > 0 || startDir != "" {
+			return tab.NewTabManagerIn(cols, rows, startDir, command)
 		}
 		// Reopen the previous session's layout when the user has that enabled.
 		// The config is read directly here because the settings menu (which
@@ -140,7 +142,7 @@ func newApp(command []string) *App {
 	if err != nil {
 		log.Fatalf("Failed to create window: %v", err)
 	}
-	a.primary = len(command) == 0
+	a.primary = len(command) == 0 && startDir == ""
 	return a
 }
 
