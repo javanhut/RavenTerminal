@@ -33,7 +33,8 @@ dep = ["build"]
 # X11-only, which silently fails on a Wayland-only compositor (no XWayland).
 [commands.build]
 desc = "Build the application (backend: auto | wayland | x11)"
-run = ["""
+run = [
+  """
 backend="{{backend}}"
 if [ "$backend" = "auto" ]; then
   if [ "$XDG_SESSION_TYPE" = "wayland" ] && pkg-config --exists wayland-client xkbcommon 2>/dev/null; then
@@ -47,7 +48,8 @@ echo -e "{{blue}}[INFO]{{nc}} Building {{app_name}} (backend: $backend)..."
 go build $tags -o {{app_name}} ./src
 chmod +x {{app_name}}
 echo -e "{{green}}[OK]{{nc}} Build successful: ./{{app_name}} ($backend)"
-"""]
+""",
+]
 
 # The VCS checkout doesn't preserve the executable bit on scripts/, which
 # left install failing with "Permission denied". Every task that runs a
@@ -65,6 +67,7 @@ run = [
 # sudo. Without this, `imlazy install backend=wayland` builds Wayland, then
 # installs an x11 binary over it.
 [commands.install]
+escalate = true
 desc = "Install system-wide (clean install - uninstalls first)"
 dep = ["permission", "build"]
 run = [
@@ -135,7 +138,8 @@ run = [
 # mirror the Makefile exactly.
 [commands.deps]
 desc = "Install build dependencies for your OS"
-run = ["""
+run = [
+  """
 echo -e "{{blue}}[INFO]{{nc}} Installing build dependencies..."
 case "$(uname -s)" in
   Linux)
@@ -169,13 +173,15 @@ case "$(uname -s)" in
     ;;
 esac
 echo -e "{{green}}[OK]{{nc}} Dependencies installed successfully!"
-"""]
+""",
+]
 
 # NOTE: `$$` in a run entry reaches the shell verbatim (expands to the PID),
 # so plain shell `$` is used everywhere below.
 [commands.deps-check]
 desc = "Check if build dependencies are installed"
-run = ["""
+run = [
+  """
 echo -e "{{blue}}[INFO]{{nc}} Checking dependencies..."
 missing=""
 if command -v go >/dev/null 2>&1; then
@@ -205,7 +211,8 @@ if [ -n "$missing" ]; then
   exit 1
 fi
 echo -e "{{green}}[OK]{{nc}} All dependencies are installed!"
-"""]
+""",
+]
 
 [commands.test]
 desc = "Run tests"
@@ -239,7 +246,9 @@ echo -e "{{green}}[OK]{{nc}} All checks passed"
 
 [commands.race]
 desc = "Race-detector tests (same package set as CI)"
-run = ["go test -race ./src ./src/grid ./src/parser ./src/aitools ./src/shell ./src/websearch ./src/ollama ./src/tab"]
+run = [
+  "go test -race ./src ./src/grid ./src/parser ./src/aitools ./src/shell ./src/websearch ./src/ollama ./src/tab",
+]
 
 [commands.vuln]
 desc = "Vulnerability scan with govulncheck (same as CI)"
@@ -252,14 +261,16 @@ dep = ["check", "race", "vuln"]
 [commands.macos-icon]
 desc = "Generate macOS app icon (macOS only)"
 dep = ["permission"]
-run = ["""
+run = [
+  """
 if [ "$(uname -s)" = "Darwin" ]; then
   {{scripts_dir}}/generate-macos-icon.sh
 else
   echo -e "{{yellow}}[WARNING]{{nc}} This command must be run on macOS."
   echo "The macOS icon is generated automatically during install when conversion tools are available."
 fi
-"""]
+""",
+]
 
 [commands.make_help]
 desc = "Show Raven Terminal task help"
