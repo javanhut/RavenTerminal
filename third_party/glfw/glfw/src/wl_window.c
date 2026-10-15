@@ -36,6 +36,7 @@
 #include <assert.h>
 #include <unistd.h>
 #include <string.h>
+#include <strings.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/timerfd.h>
@@ -1855,6 +1856,32 @@ static const struct wl_seat_listener seatListener =
     seatHandleName,
 };
 
+// Plain-text MIME types accepted for the clipboard, most preferred first.
+// Sources differ: some never offer the exact "text/plain;charset=utf-8" and
+// only advertise a case or spacing variant, bare "text/plain", or the X11-style
+// UTF8_STRING/STRING/TEXT names, so requiring the one spelling drops their
+// selections entirely and pastes come back empty.
+static const char* textMimeTypes[] =
+{
+    "text/plain;charset=utf-8",
+    "text/plain; charset=utf-8",
+    "UTF8_STRING",
+    "text/plain",
+    "STRING",
+    "TEXT",
+};
+
+static int textMimeTypeRank(const char* mimeType)
+{
+    for (int i = 0;  i < (int) (sizeof(textMimeTypes) / sizeof(textMimeTypes[0]));  i++)
+    {
+        if (strcasecmp(mimeType, textMimeTypes[i]) == 0)
+            return i + 1;
+    }
+
+    return 0;
+}
+
 static void dataOfferHandleOffer(void* userData,
                                  struct wl_data_offer* offer,
                                  const char* mimeType)
@@ -1863,8 +1890,15 @@ static void dataOfferHandleOffer(void* userData,
     {
         if (_glfw.wl.offers[i].offer == offer)
         {
-            if (strcmp(mimeType, "text/plain;charset=utf-8") == 0)
-                _glfw.wl.offers[i].text_plain_utf8 = GLFW_TRUE;
+            _GLFWofferWayland* entry = &_glfw.wl.offers[i];
+            const int rank = textMimeTypeRank(mimeType);
+
+            if (rank && (!entry->textMimeRank || rank < entry->textMimeRank) &&
+                strlen(mimeType) < sizeof(entry->textMimeType))
+            {
+                strcpy(entry->textMimeType, mimeType);
+                entry->textMimeRank = rank;
+            }
             else if (strcmp(mimeType, "text/uri-list") == 0)
                 _glfw.wl.offers[i].text_uri_list = GLFW_TRUE;
 
@@ -2063,8 +2097,12 @@ static void dataDeviceHandleSelection(void* userData,
     {
         if (_glfw.wl.offers[i].offer == offer)
         {
-            if (_glfw.wl.offers[i].text_plain_utf8)
+            if (_glfw.wl.offers[i].textMimeRank)
+            {
                 _glfw.wl.selectionOffer = offer;
+                strcpy(_glfw.wl.selectionMimeType,
+                       _glfw.wl.offers[i].textMimeType);
+            }
             else
                 wl_data_offer_destroy(offer);
 
@@ -3054,7 +3092,7 @@ const char* _glfwPlatformGetClipboardString(void)
 
     free(_glfw.wl.clipboardString);
     _glfw.wl.clipboardString =
-        readDataOfferAsString(_glfw.wl.selectionOffer, "text/plain;charset=utf-8");
+        readDataOfferAsString(_glfw.wl.selectionOffer, _glfw.wl.selectionMimeType);
     return _glfw.wl.clipboardString;
 }
 

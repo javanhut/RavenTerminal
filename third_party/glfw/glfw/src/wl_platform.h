@@ -283,7 +283,10 @@ typedef struct _GLFWdecorationWayland
 typedef struct _GLFWofferWayland
 {
     struct wl_data_offer*       offer;
-    GLFWbool                    text_plain_utf8;
+    // Best plain-text MIME type the source advertised, exactly as spelled by
+    // the source (receive must echo it), or empty if it offered no text
+    char                        textMimeType[32];
+    int                         textMimeRank;
     GLFWbool                    text_uri_list;
 } _GLFWofferWayland;
 
@@ -381,6 +384,7 @@ typedef struct _GLFWlibraryWayland
     unsigned int                offerCount;
 
     struct wl_data_offer*       selectionOffer;
+    char                        selectionMimeType[32];
     struct wl_data_source*      selectionSource;
 
     struct wl_data_offer*       dragOffer;
