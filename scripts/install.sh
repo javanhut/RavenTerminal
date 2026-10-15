@@ -64,6 +64,25 @@ print_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
 }
 
+# Whether the user being installed for is in a Wayland session. sudo resets
+# the environment, so under a global install (imlazy's `escalate = true`, or a
+# plain `sudo`) XDG_SESSION_TYPE and WAYLAND_DISPLAY are gone and the build
+# silently fell back to X11. Under XWayland the compositor's clipboard and
+# Super-layer handling never reach the window, so look for the invoking user's
+# compositor socket instead of trusting the stripped environment.
+wayland_session() {
+    [ "${XDG_SESSION_TYPE:-}" = "wayland" ] && return 0
+    [ -n "${WAYLAND_DISPLAY:-}" ] && return 0
+    local runtime="${XDG_RUNTIME_DIR:-}"
+    [ -n "${SUDO_UID:-}" ] && runtime="/run/user/$SUDO_UID"
+    [ -n "$runtime" ] || return 1
+    local sock
+    for sock in "$runtime"/wayland-*; do
+        [ -S "$sock" ] && return 0
+    done
+    return 1
+}
+
 warn_path_conflict() {
     local expected_path="$1"
     local found_path=""
@@ -292,7 +311,7 @@ check_dependencies() {
 
     # For the native Wayland backend (auto-selected on Wayland sessions) we also
     # need the Wayland client + xkbcommon dev libraries.
-    if [ "${XDG_SESSION_TYPE:-}" = "wayland" ] && ! pkg-config --exists wayland-client xkbcommon 2>/dev/null; then
+    if wayland_session && ! pkg-config --exists wayland-client xkbcommon 2>/dev/null; then
         print_warning "Wayland session detected but wayland-client/xkbcommon dev libs missing."
         print_warning "Will fall back to the X11 backend (runs via XWayland)."
         echo "  Arch: sudo pacman -S wayland libxkbcommon"
@@ -323,7 +342,7 @@ build_application() {
     local backend="${RAVEN_BACKEND:-auto}"
     if [ "$OS_TYPE" != "Darwin" ]; then
         if [ "$backend" = "auto" ]; then
-            if [ "${XDG_SESSION_TYPE:-}" = "wayland" ] && pkg-config --exists wayland-client xkbcommon 2>/dev/null; then
+            if wayland_session && pkg-config --exists wayland-client xkbcommon 2>/dev/null; then
                 backend="wayland"
             else
                 backend="x11"
