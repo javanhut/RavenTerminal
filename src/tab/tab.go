@@ -3,8 +3,11 @@ package tab
 import (
 	"fmt"
 	"os"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/javanhut/RavenTerminal/src/fingerprint"
 	"github.com/javanhut/RavenTerminal/src/parser"
@@ -68,12 +71,60 @@ type Pane struct {
 	Fingerprint *fingerprint.Watcher
 	pty         *shell.PtySession
 	id          int
-	exited      bool
-	exitedMu    sync.Mutex
 	readerMu    sync.Mutex
-	// respDone stops the query-reply drain goroutine on Close.
-	respDone  chan struct{}
-	closeOnce sync.Once
+
+	exitedMu  sync.Mutex
+	exited    bool
+	exitCode  int
+	hold      bool // keep the pane open after exit until a key is pressed
+	dismissed bool
+
+	cellW, cellH int // cell size in pixels, for the PTY's pixel winsize
+
+	readerDone chan struct{}
+	closed     chan struct{}
+	closeOnce  sync.Once
+	isClosed   atomic.Bool
+
+	dirMu  sync.Mutex
+	dirVal string
+	dirAt  time.Time
+	dirOSC string
+}
+
+// holdOnExit is the --hold setting: panes created while it is set stay open
+// after their process exits, showing the exit status, until a key is pressed.
+var holdOnExit atomic.Bool
+
+// SetHoldOnExit sets whether panes created from now on are held after exit.
+func SetHoldOnExit(hold bool) {
+	holdOnExit.Store(hold)
+}
+
+// dirCacheTTL bounds how often a pane's cwd is re-read for tab labels.
+const dirCacheTTL = 500 * time.Millisecond
+
+var (
+	nowFunc = time.Now
+	paneCwd = func(p *Pane) string {
+		if p.pty == nil {
+			return ""
+		}
+		return p.pty.CurrentDir()
+	}
+)
+
+func recoverLog(where string) {
+	if r := recover(); r != nil {
+		fmt.Fprintf(os.Stderr, "raven: recovered panic in %s: %v\n", where, r)
+	}
+}
+
+// wake asks the main loop for a frame, coalesced with pending wakes.
+func wake() {
+	if f := wakeNotifier.Load(); f != nil && wakePending.CompareAndSwap(false, true) {
+		(*f)()
+	}
 }
 
 // clipboardOut is a thread-safe mailbox for OSC 52 clipboard writes. The PTY reader
@@ -88,7 +139,7 @@ var clipboardOut struct {
 
 // wakeNotifier, if set, is called by PTY reader goroutines after processing output
 // so the main loop can re-render promptly instead of waiting out its idle timeout.
-var wakeNotifier func()
+var wakeNotifier atomic.Pointer[func()]
 
 // wakePending coalesces wake notifications: while true, a wake has been posted
 // but not yet consumed by the main loop, so further chunks skip posting. One
@@ -98,7 +149,11 @@ var wakePending atomic.Bool
 // SetWakeNotifier registers a callback invoked whenever a pane produces new output.
 // It must be safe to call from any goroutine (e.g. glfw.PostEmptyEvent).
 func SetWakeNotifier(f func()) {
-	wakeNotifier = f
+	if f == nil {
+		wakeNotifier.Store(nil)
+		return
+	}
+	wakeNotifier.Store(&f)
 }
 
 // ClearWakePending marks the posted wake as consumed by the main loop. Call it
@@ -130,13 +185,14 @@ func DrainClipboard() (string, bool) {
 
 // NewPane creates a new terminal pane
 func NewPane(id int, cols, rows uint16, startDir string) (*Pane, error) {
-	return newPaneCommand(id, cols, rows, startDir, nil)
+	return newPaneCommand(id, cols, rows, 0, 0, startDir, nil)
 }
 
 // newPaneCommand creates a pane running `command` instead of a shell when
-// command is non-empty (the `-e` path).
-func newPaneCommand(id int, cols, rows uint16, startDir string, command []string) (*Pane, error) {
-	pty, err := shell.NewPtySessionCommand(cols, rows, startDir, command)
+// command is non-empty (the `-e` path). cellW/cellH give the PTY its pixel
+// size from the first byte the child reads.
+func newPaneCommand(id int, cols, rows uint16, cellW, cellH int, startDir string, command []string) (*Pane, error) {
+	pty, err := shell.NewPtySessionSized(cols, rows, int(cols)*cellW, int(rows)*cellH, startDir, command)
 	if err != nil {
 		return nil, err
 	}
@@ -146,45 +202,36 @@ func newPaneCommand(id int, cols, rows uint16, startDir string, command []string
 		Fingerprint: fingerprint.New(),
 		pty:         pty,
 		id:          id,
-		exited:      false,
+		hold:        holdOnExit.Load(),
+		cellW:       cellW,
+		cellH:       cellH,
+		readerDone:  make(chan struct{}),
+		closed:      make(chan struct{}),
+	}
+	if cellW > 0 && cellH > 0 {
+		pane.Terminal.SetCellPixelSize(cellW, cellH)
 	}
 	// Query replies (DA1, DSR, XTGETTCAP, ...) are emitted while the parser
-	// holds Terminal.mu, and pty.Write can block indefinitely if the child
-	// stops reading its input — which would wedge the render thread too (it
-	// takes Terminal.mu to snapshot). Route replies through a bounded channel
-	// drained by one goroutine: ordering is preserved, the parser never
-	// blocks, and overflow is dropped (a child ignoring its own query replies
-	// has already wedged itself).
-	pane.respDone = make(chan struct{})
-	responses := make(chan []byte, 256)
-	go func() {
-		for {
-			select {
-			case data := <-responses:
-				_, _ = pty.Write(data)
-			case <-pane.respDone:
-				return
-			}
-		}
-	}()
+	// holds Terminal.mu; PtySession.Write only queues, so the parser never
+	// blocks on a child that stopped reading.
 	pane.Terminal.SetResponseWriter(func(data []byte) {
-		select {
-		case responses <- data:
-		default: // full: drop rather than block the parser
-		}
+		_, _ = pty.Write(data)
 	})
 	// OSC 52 clipboard writes originate on the PTY reader goroutine; GLFW clipboard
 	// calls must run on the main thread, so queue them for the render loop to drain.
 	pane.Terminal.SetClipboardWriter(QueueClipboard)
+	pane.Terminal.SetPrimaryWriter(QueuePrimary)
 
-	// Start reader goroutine
 	go pane.readLoop()
+	go pane.watchExit()
 
 	return pane, nil
 }
 
 // readLoop continuously reads from the PTY and processes output
 func (p *Pane) readLoop() {
+	defer close(p.readerDone)
+	defer recoverLog("pty reader")
 	var tap *os.File
 	if path := os.Getenv("RAVEN_PTY_TAP"); path != "" {
 		tap, _ = os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
@@ -196,9 +243,6 @@ func (p *Pane) readLoop() {
 	for {
 		n, err := p.pty.Read(buf)
 		if err != nil || n == 0 {
-			p.exitedMu.Lock()
-			p.exited = true
-			p.exitedMu.Unlock()
 			return
 		}
 
@@ -210,10 +254,55 @@ func (p *Pane) readLoop() {
 
 		// Wake the main loop so this output renders without waiting for the idle
 		// timeout. Coalesced: skip posting while a wake is still outstanding.
-		if wakeNotifier != nil && wakePending.CompareAndSwap(false, true) {
-			wakeNotifier()
-		}
+		wake()
 	}
+}
+
+// watchExit marks the pane exited once its process is gone (or its PTY hit
+// EOF), after letting the reader drain the final output, and wakes the main
+// loop so the pane is dealt with immediately.
+func (p *Pane) watchExit() {
+	defer recoverLog("pane exit watcher")
+	select {
+	case <-p.pty.Exited():
+	case <-p.readerDone:
+	case <-p.closed:
+		return
+	}
+	deadline := time.Now().Add(250 * time.Millisecond)
+	waitUntil(p.readerDone, deadline)
+	waitUntil(p.pty.Exited(), deadline)
+	select {
+	case <-p.closed:
+		return
+	default:
+	}
+	p.markExited(p.pty.ExitCode())
+}
+
+func waitUntil(ch <-chan struct{}, deadline time.Time) {
+	t := time.NewTimer(max(0, time.Until(deadline)))
+	defer t.Stop()
+	select {
+	case <-ch:
+	case <-t.C:
+	}
+}
+
+func (p *Pane) markExited(code int) {
+	p.exitedMu.Lock()
+	if p.exited {
+		p.exitedMu.Unlock()
+		return
+	}
+	p.exited = true
+	p.exitCode = code
+	hold := p.hold
+	p.exitedMu.Unlock()
+	if hold {
+		p.processChunk(fmt.Appendf(nil, "\x1b[0m\r\n[Process exited with status %d \u2014 press any key to close]", code))
+	}
+	wake()
 }
 
 // processChunk feeds one chunk of PTY output to the parser under the reader
@@ -231,17 +320,64 @@ func (p *Pane) processChunk(data []byte) {
 	p.Terminal.Process(data)
 }
 
-// Write writes data to the PTY
+// Write sends input to the pane's process without blocking. On a held dead
+// pane, a key press dismisses it instead.
 func (p *Pane) Write(data []byte) error {
+	p.exitedMu.Lock()
+	if p.exited {
+		if p.hold && isKeyInput(data) {
+			p.dismissed = true
+			p.exitedMu.Unlock()
+			wake()
+			return nil
+		}
+		p.exitedMu.Unlock()
+		return shell.ErrExited
+	}
+	p.exitedMu.Unlock()
+	if p.pty == nil {
+		return nil
+	}
 	_, err := p.pty.Write(data)
 	return err
 }
 
-// HasExited returns true if the shell has exited
+// isKeyInput reports whether data is user input rather than a focus or
+// mouse report the terminal generates on its own.
+func isKeyInput(data []byte) bool {
+	s := string(data)
+	switch {
+	case s == "\x1b[I", s == "\x1b[O":
+		return false
+	case strings.HasPrefix(s, "\x1b[M"), strings.HasPrefix(s, "\x1b[<"):
+		return false
+	}
+	return len(data) > 0
+}
+
+// HasExited reports whether the pane's process has exited.
 func (p *Pane) HasExited() bool {
 	p.exitedMu.Lock()
 	defer p.exitedMu.Unlock()
-	return p.exited || p.pty.HasExited()
+	return p.exited
+}
+
+// ExitCode is the exited process's status, or -1 while it runs.
+func (p *Pane) ExitCode() int {
+	p.exitedMu.Lock()
+	defer p.exitedMu.Unlock()
+	if !p.exited {
+		return -1
+	}
+	return p.exitCode
+}
+
+// Dead reports whether the pane should be removed: its process exited and,
+// when held, the user has dismissed it.
+func (p *Pane) Dead() bool {
+	p.exitedMu.Lock()
+	defer p.exitedMu.Unlock()
+	return p.exited && (!p.hold || p.dismissed)
 }
 
 // Resize resizes the pane
@@ -249,25 +385,71 @@ func (p *Pane) Resize(cols, rows uint16) {
 	p.readerMu.Lock()
 	defer p.readerMu.Unlock()
 	p.Terminal.Resize(int(cols), int(rows))
-	p.pty.Resize(cols, rows)
+	if p.pty != nil {
+		_ = p.pty.Resize(int(cols), int(rows), int(cols)*p.cellW, int(rows)*p.cellH)
+	}
 }
 
-// Close closes the pane
+// setCellPixelSize records the cell size and pushes the new pixel winsize.
+func (p *Pane) setCellPixelSize(w, h int) {
+	p.readerMu.Lock()
+	defer p.readerMu.Unlock()
+	p.cellW, p.cellH = w, h
+	p.Terminal.SetCellPixelSize(w, h)
+	if p.pty != nil {
+		if cols, rows, _, _, err := p.pty.Size(); err == nil {
+			_ = p.pty.Resize(cols, rows, cols*w, rows*h)
+		}
+	}
+}
+
+// Close hangs up the pane's process (SIGKILL follows if it lingers) and
+// stops its goroutines. It never blocks.
 func (p *Pane) Close() {
 	p.closeOnce.Do(func() {
-		if p.respDone != nil {
-			close(p.respDone)
+		p.isClosed.Store(true)
+		if p.closed != nil {
+			close(p.closed)
+		}
+		if p.pty != nil {
+			p.pty.Close()
 		}
 	})
-	p.pty.Close()
 }
 
-// CurrentDir returns the pane working directory when available.
+// Closed reports whether Close has been called.
+func (p *Pane) Closed() bool { return p.isClosed.Load() }
+
+// CurrentDir returns the pane's working directory, re-read at most every
+// dirCacheTTL or when the shell reports a new one via OSC 7, so tab labels
+// can ask every frame.
 func (p *Pane) CurrentDir() string {
-	if p == nil || p.pty == nil {
+	if p == nil {
 		return ""
 	}
-	if dir := p.pty.CurrentDir(); dir != "" {
+	osc := ""
+	if p.Terminal != nil {
+		osc = p.Terminal.WorkingDir()
+	}
+	now := nowFunc()
+	p.dirMu.Lock()
+	defer p.dirMu.Unlock()
+	if p.dirAt.IsZero() || now.Sub(p.dirAt) >= dirCacheTTL || osc != p.dirOSC {
+		dir := paneCwd(p)
+		if dir == "" {
+			dir = osc
+		}
+		p.dirVal, p.dirAt, p.dirOSC = dir, now, osc
+	}
+	return p.dirVal
+}
+
+// freshDir bypasses the cache, for spawning a new shell where this one is.
+func (p *Pane) freshDir() string {
+	if p == nil {
+		return ""
+	}
+	if dir := paneCwd(p); dir != "" {
 		return dir
 	}
 	if p.Terminal == nil {
@@ -309,6 +491,11 @@ type Tab struct {
 	nextPaneID int
 	cols       uint16
 	rows       uint16
+	cellW      int
+	cellH      int
+	zoomed     bool   // active pane fills the tab (zoom.go)
+	broadcast  bool   // Write goes to every pane
+	title      string // set by IPC; overrides the OSC title
 	mu         sync.Mutex
 }
 
@@ -321,7 +508,11 @@ func NewTab(id int, cols, rows uint16, startDir string) (*Tab, error) {
 // shell when command is non-empty.
 func newTabCommand(id int, cols, rows uint16, startDir string, command []string) (*Tab, error) {
 	// Create the first pane
-	pane, err := newPaneCommand(1, cols, rows, startDir, command)
+	return newTabSized(id, cols, rows, 0, 0, startDir, command)
+}
+
+func newTabSized(id int, cols, rows uint16, cellW, cellH int, startDir string, command []string) (*Tab, error) {
+	pane, err := newPaneCommand(1, cols, rows, cellW, cellH, startDir, command)
 	if err != nil {
 		return nil, err
 	}
@@ -340,6 +531,8 @@ func newTabCommand(id int, cols, rows uint16, startDir string, command []string)
 		nextPaneID: 2,
 		cols:       cols,
 		rows:       rows,
+		cellW:      cellW,
+		cellH:      cellH,
 	}
 
 	return tab, nil
@@ -394,49 +587,29 @@ func (t *Tab) splitActivePane(dir SplitDirection) error {
 		return nil
 	}
 
-	// Create new pane
-	startDir := t.activeNode.Pane.CurrentDir()
-	newPane, err := NewPane(t.nextPaneID, t.cols/2, t.rows/2, startDir)
+	startDir := t.activeNode.Pane.freshDir()
+	newPane, err := newPaneCommand(t.nextPaneID, max(t.cols/2, 1), max(t.rows/2, 1), t.cellW, t.cellH, startDir, nil)
 	if err != nil {
 		return err
 	}
+	t.insertSplit(dir, newPane)
+	return nil
+}
+
+// insertSplit turns the active leaf into a split of its pane and newPane,
+// which becomes active. Caller holds t.mu.
+func (t *Tab) insertSplit(dir SplitDirection, newPane *Pane) {
+	t.zoomed = false
 	t.nextPaneID++
-
-	// Create new leaf node for the new pane
-	newLeaf := &SplitNode{
-		Pane:  newPane,
-		Ratio: 0.5,
-	}
-
-	// Get the current pane from active node
-	currentPane := t.activeNode.Pane
-
-	// Convert the active node from a leaf to a container
+	newLeaf := &SplitNode{Pane: newPane, Ratio: 0.5, Parent: t.activeNode}
+	existingLeaf := &SplitNode{Pane: t.activeNode.Pane, Ratio: 0.5, Parent: t.activeNode}
 	t.activeNode.Pane = nil
 	t.activeNode.SplitDir = dir
 	t.activeNode.Ratio = 0.5
-
-	// Create a leaf node for the existing pane
-	existingLeaf := &SplitNode{
-		Pane:   currentPane,
-		Ratio:  0.5,
-		Parent: t.activeNode,
-	}
-
-	// Set parent for new leaf
-	newLeaf.Parent = t.activeNode
-
-	// Add children (existing pane first, then new pane)
 	t.activeNode.Children = []*SplitNode{existingLeaf, newLeaf}
-
-	// Move active to the new pane
 	t.activeNode = newLeaf
 	t.updateTerminalRef()
-
-	// Recalculate sizes
 	t.resizeNode(t.root, 0, 0, 1.0, 1.0)
-
-	return nil
 }
 
 // ClosePane closes the current pane
@@ -458,49 +631,63 @@ func (t *Tab) ClosePane() {
 		return // Can't close root
 	}
 
-	// Close the pane
-	t.activeNode.Pane.Close()
+	t.removeLeaf(t.activeNode)
+}
 
-	// Find sibling
-	var sibling *SplitNode
-	for _, child := range parent.Children {
-		if child != t.activeNode {
-			sibling = child
-			break
-		}
-	}
-
-	if sibling == nil {
+// removeLeaf closes node's pane and takes it out of the tree, collapsing a
+// split left with one child. Removing the root leaves the tab empty. Caller
+// holds t.mu.
+func (t *Tab) removeLeaf(node *SplitNode) {
+	t.zoomed = false
+	node.Pane.Close()
+	parent := node.Parent
+	if parent == nil {
+		t.root, t.activeNode = nil, nil
 		return
 	}
-
-	// Replace parent with sibling
-	if parent.Parent == nil {
-		// Parent is root
-		t.root = sibling
-		sibling.Parent = nil
+	idx := slices.Index(parent.Children, node)
+	parent.Children = slices.Delete(parent.Children, idx, idx+1)
+	next := parent
+	if len(parent.Children) == 1 {
+		only := parent.Children[0]
+		only.Parent = parent.Parent
+		only.Ratio = parent.Ratio
+		if parent.Parent == nil {
+			t.root = only
+		} else {
+			gp := parent.Parent
+			gp.Children[slices.Index(gp.Children, parent)] = only
+		}
+		next = only
 	} else {
-		// Replace parent with sibling in grandparent's children
-		grandparent := parent.Parent
-		for i, child := range grandparent.Children {
-			if child == parent {
-				grandparent.Children[i] = sibling
-				sibling.Parent = grandparent
-				break
-			}
+		next = parent.Children[min(idx, len(parent.Children)-1)]
+	}
+	if t.activeNode == node || t.activeNode == parent {
+		t.activeNode = t.findFirstLeaf(next)
+	}
+	t.updateTerminalRef()
+	t.resizeNode(t.root, 0, 0, 1.0, 1.0)
+}
+
+// pruneDead removes every dead pane, reporting whether the tab is now empty.
+func (t *Tab) pruneDead() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var leaves []*SplitNode
+	t.collectLeaves(t.root, &leaves)
+	for _, leaf := range leaves {
+		if leaf.Pane.Dead() {
+			t.removeLeaf(leaf)
 		}
 	}
-
-	// Set active to sibling (or first leaf in sibling if it's a container)
-	t.activeNode = t.findFirstLeaf(sibling)
-	t.updateTerminalRef()
-
-	// Recalculate sizes
-	t.resizeNode(t.root, 0, 0, 1.0, 1.0)
+	return t.root == nil
 }
 
 // findFirstLeaf finds the first leaf node in a subtree
 func (t *Tab) findFirstLeaf(node *SplitNode) *SplitNode {
+	if node == nil {
+		return nil
+	}
 	if node.IsLeaf() {
 		return node
 	}
@@ -549,6 +736,7 @@ func (t *Tab) NextPane() {
 	nextIdx := (currentIdx + 1) % len(leaves)
 	t.activeNode = leaves[nextIdx]
 	t.updateTerminalRef()
+	t.refitZoom()
 }
 
 // PrevPane switches to the previous pane
@@ -576,6 +764,7 @@ func (t *Tab) PrevPane() {
 	prevIdx := (currentIdx - 1 + len(leaves)) % len(leaves)
 	t.activeNode = leaves[prevIdx]
 	t.updateTerminalRef()
+	t.refitZoom()
 }
 
 // ResizeActivePane expands the active pane toward the given direction when possible.
@@ -651,6 +840,12 @@ func (t *Tab) resizeNode(node *SplitNode, x, y, width, height float32) {
 	if node == nil {
 		return
 	}
+	if node == t.root {
+		if leaf := t.zoomedLeaf(); leaf != nil {
+			leaf.Pane.Resize(max(t.cols, 1), max(t.rows, 1))
+			return
+		}
+	}
 
 	if node.IsLeaf() {
 		// Calculate actual pixel dimensions
@@ -717,6 +912,9 @@ func (t *Tab) GetPaneLayouts() []PaneLayout {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	if leaf := t.zoomedLeaf(); leaf != nil {
+		return []PaneLayout{{Pane: leaf.Pane, Width: 1, Height: 1}}
+	}
 	var layouts []PaneLayout
 	t.collectLayouts(t.root, 0, 0, 1.0, 1.0, &layouts)
 	return layouts
@@ -813,6 +1011,7 @@ func (t *Tab) SetActivePane(pane *Pane) bool {
 	t.activeNode = target
 	t.Terminal = target.Pane.Terminal
 	t.pty = target.Pane.pty
+	t.refitZoom()
 	return true
 }
 
@@ -839,10 +1038,32 @@ func (t *Tab) Write(data []byte) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	if t.broadcast {
+		return t.broadcastLocked(data)
+	}
 	if t.activeNode != nil && t.activeNode.IsLeaf() && t.activeNode.Pane != nil {
 		return t.activeNode.Pane.Write(data)
 	}
 	return nil
+}
+
+// WriteFocus sends a focus report (CSI I / CSI O) to the active pane alone,
+// even while broadcasting, when its application enabled ?1004.
+func (t *Tab) WriteFocus(focused bool) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.activeNode == nil || !t.activeNode.IsLeaf() || t.activeNode.Pane == nil {
+		return false
+	}
+	p := t.activeNode.Pane
+	if p.Terminal == nil || !p.Terminal.FocusReportingEnabled() {
+		return false
+	}
+	seq := "\x1b[O"
+	if focused {
+		seq = "\x1b[I"
+	}
+	return p.Write([]byte(seq)) == nil
 }
 
 // ShellName returns the shell basename of the active pane (e.g. "bash",
@@ -870,7 +1091,7 @@ func (t *Tab) hasExitedNode(node *SplitNode) bool {
 		return true
 	}
 	if node.IsLeaf() {
-		return node.Pane.HasExited()
+		return node.Pane.Dead()
 	}
 	for _, child := range node.Children {
 		if !t.hasExitedNode(child) {
@@ -974,6 +1195,7 @@ func (t *Tab) GetSplitDirection() SplitDirection {
 }
 
 // ActiveDir returns the active pane working directory when available.
+// Cached (see Pane.CurrentDir), so it is cheap enough for every frame.
 func (t *Tab) ActiveDir() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -984,12 +1206,48 @@ func (t *Tab) ActiveDir() string {
 	return t.activeNode.Pane.CurrentDir()
 }
 
+// Title returns the active pane's OSC 0/2 title, or "" when none is set.
+func (t *Tab) Title() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.title != "" {
+		return t.title
+	}
+	if t.activeNode == nil || t.activeNode.Pane == nil || t.activeNode.Pane.Terminal == nil {
+		return ""
+	}
+	return t.activeNode.Pane.Terminal.Title()
+}
+
+func (t *Tab) freshActiveDir() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.activeNode == nil || t.activeNode.Pane == nil {
+		return ""
+	}
+	return t.activeNode.Pane.freshDir()
+}
+
+// setCellPixelSize applies a new cell pixel size to every pane.
+func (t *Tab) setCellPixelSize(w, h int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.cellW, t.cellH = w, h
+	var panes []*Pane
+	t.collectPanes(t.root, &panes)
+	for _, p := range panes {
+		p.setCellPixelSize(w, h)
+	}
+}
+
 // TabManager manages multiple terminal tabs
 type TabManager struct {
 	tabs        []*Tab
 	activeIndex int
 	cols        uint16
 	rows        uint16
+	cellW       int
+	cellH       int
 	mu          sync.RWMutex
 }
 
@@ -1048,10 +1306,10 @@ func (tm *TabManager) NewTab() error {
 
 	startDir := ""
 	if len(tm.tabs) > 0 && tm.activeIndex >= 0 && tm.activeIndex < len(tm.tabs) {
-		startDir = tm.tabs[tm.activeIndex].ActiveDir()
+		startDir = tm.tabs[tm.activeIndex].freshActiveDir()
 	}
 
-	tab, err := NewTab(newID, tm.cols, tm.rows, startDir)
+	tab, err := newTabSized(newID, tm.cols, tm.rows, tm.cellW, tm.cellH, startDir, nil)
 	if err != nil {
 		return err
 	}
@@ -1192,6 +1450,9 @@ func (tm *TabManager) AdoptTab(t *Tab) {
 	if len(tm.tabs) >= MaxTabs {
 		return
 	}
+	if tm.cellW > 0 && tm.cellH > 0 {
+		t.setCellPixelSize(tm.cellW, tm.cellH)
+	}
 	t.Resize(tm.cols, tm.rows)
 	tm.tabs = append(tm.tabs, t)
 	tm.activeIndex = len(tm.tabs) - 1
@@ -1222,38 +1483,52 @@ func (tm *TabManager) ResizeAll(cols, rows uint16) {
 	}
 }
 
-// CleanupExited removes exited tabs
+// SetCellPixelSize sets the cell size in pixels for every pane, present and
+// future: it feeds the PTY pixel winsize and the terminal's pixel reports.
+func (tm *TabManager) SetCellPixelSize(w, h int) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if w == tm.cellW && h == tm.cellH {
+		return
+	}
+	tm.cellW, tm.cellH = w, h
+	for _, t := range tm.tabs {
+		t.setCellPixelSize(w, h)
+	}
+}
+
+// CleanupExited removes dead panes, collapsing their splits, and closes tabs
+// left without panes.
 func (tm *TabManager) CleanupExited() {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
-	var activeTabs []*Tab
-	for _, tab := range tm.tabs {
-		if !tab.HasExited() {
-			activeTabs = append(activeTabs, tab)
-		} else {
-			tab.Close()
-		}
+	var active *Tab
+	if tm.activeIndex >= 0 && tm.activeIndex < len(tm.tabs) {
+		active = tm.tabs[tm.activeIndex]
 	}
-
-	if len(activeTabs) > 0 {
-		tm.tabs = activeTabs
-		if tm.activeIndex >= len(tm.tabs) {
-			tm.activeIndex = len(tm.tabs) - 1
+	kept := tm.tabs[:0]
+	for _, t := range tm.tabs {
+		if t.pruneDead() {
+			t.Close()
+			continue
 		}
-		// Renumber remaining tabs to keep IDs sequential
-		tm.renumberTabs()
+		kept = append(kept, t)
 	}
+	clear(tm.tabs[len(kept):])
+	tm.tabs = kept
+	if i := slices.Index(tm.tabs, active); i >= 0 {
+		tm.activeIndex = i
+	} else {
+		tm.activeIndex = max(0, min(tm.activeIndex, len(tm.tabs)-1))
+	}
+	tm.renumberTabs()
 }
 
-// AllExited returns true if all tabs have exited
+// AllExited returns true if every tab is gone or dead
 func (tm *TabManager) AllExited() bool {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
-
-	if len(tm.tabs) == 0 {
-		return true
-	}
 
 	for _, tab := range tm.tabs {
 		if !tab.HasExited() {
@@ -1261,6 +1536,18 @@ func (tm *TabManager) AllExited() bool {
 		}
 	}
 	return true
+}
+
+// CloseAll closes every tab (hanging up their processes) and empties the
+// manager. Used when the window closes; it never blocks.
+func (tm *TabManager) CloseAll() {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	for _, t := range tm.tabs {
+		t.Close()
+	}
+	tm.tabs = nil
+	tm.activeIndex = 0
 }
 
 // TabCount returns the number of tabs

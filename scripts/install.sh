@@ -582,6 +582,28 @@ install_macos() {
     print_success "Installed app bundle to: ${app_bundle}"
 }
 
+# install_terminfo compiles terminfo/xterm-raven.ti into DIR (with sudo when
+# the second argument is true). The terminal sets TERM=xterm-raven once the
+# entry resolves, and falls back to xterm-256color without it.
+install_terminfo() {
+    local dir="$1"
+    local use_sudo="$2"
+    local src="$REPO_DIR/terminfo/xterm-raven.ti"
+    if [ ! -f "$src" ]; then
+        return 0
+    fi
+    if ! command -v tic &> /dev/null; then
+        print_warning "tic not found; skipping xterm-raven terminfo (TERM stays xterm-256color)"
+        return 0
+    fi
+    if [ "$use_sudo" = true ]; then
+        sudo mkdir -p "$dir" && sudo tic -x -o "$dir" "$src"
+    else
+        mkdir -p "$dir" && tic -x -o "$dir" "$src"
+    fi && print_success "Terminfo xterm-raven installed to $dir" \
+       || print_warning "Could not compile xterm-raven terminfo into $dir"
+}
+
 install_user() {
     print_info "Installing for current user..."
     
@@ -604,6 +626,8 @@ install_user() {
     cp "$SCRIPT_DIR/raven-terminal-wrapper.sh" "$USER_BIN_DIR/raven-terminal-launcher"
     chmod +x "$USER_BIN_DIR/raven-terminal-launcher"
     print_success "Launcher wrapper installed"
+
+    install_terminfo "$HOME/.terminfo" false
     
     # Install icon
     if [ -f "$REPO_DIR/src/assets/raven_terminal_icon.svg" ]; then
@@ -675,6 +699,8 @@ install_global() {
     sudo cp "$SCRIPT_DIR/raven-terminal-wrapper.sh" "$GLOBAL_BIN_DIR/raven-terminal-launcher"
     sudo chmod +x "$GLOBAL_BIN_DIR/raven-terminal-launcher"
     print_success "Launcher wrapper installed"
+
+    install_terminfo /usr/share/terminfo true
     
     # Install icon
     if [ -f "$REPO_DIR/src/assets/raven_terminal_icon.svg" ]; then

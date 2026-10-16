@@ -4,9 +4,6 @@ import (
 	"os/exec"
 	"testing"
 
-	"golang.org/x/image/font"
-	"golang.org/x/image/font/opentype"
-
 	"github.com/javanhut/RavenTerminal/src/assets/fonts"
 )
 
@@ -14,30 +11,7 @@ import (
 // but no GL resources, for testing the glyph-resolution logic.
 func newTestRenderer(t *testing.T) *Renderer {
 	t.Helper()
-	r := &Renderer{
-		fontSize:    15,
-		currentFont: fonts.DefaultFontName(),
-		glyphs:      make(map[rune]Glyph),
-		glyphMisses: make(map[rune]bool),
-	}
-	parsed, err := opentype.Parse(fonts.DefaultFont())
-	if err != nil {
-		t.Fatalf("parse default font: %v", err)
-	}
-	face, err := opentype.NewFace(parsed, &opentype.FaceOptions{
-		Size: float64(r.fontSize), DPI: 96, Hinting: font.HintingFull,
-	})
-	if err != nil {
-		t.Fatalf("create face: %v", err)
-	}
-	r.face = face
-	metrics := face.Metrics()
-	r.cellHeight = float32((metrics.Ascent + metrics.Descent).Ceil())
-	advance, _ := face.GlyphAdvance('M')
-	r.cellWidth = float32(advance.Ceil())
-	r.atlasAscent = metrics.Ascent.Ceil()
-	r.rebuildFallbackFaces()
-	return r
+	return newFontRenderer(t, fonts.DefaultFontName())
 }
 
 // The nvim-tree symlink arrow (U+279B) is not in JetBrains Mono but is in the
@@ -223,9 +197,9 @@ func TestFontconfigFallbackCaching(t *testing.T) {
 	r = newTestRenderer(t)
 	r.systemFallbacksLoaded = true
 	stubFontconfig(t, "/usr/share/fonts/noto/NotoColorEmoji.ttf", nil)
-	n := len(r.fallbackFaces)
+	n := len(r.fallbackSrcs)
 	r.faceFor(missing)
-	if len(r.fallbackFaces) != n {
+	if len(r.fallbackSrcs) != n || len(r.fallbackFaces) != n {
 		t.Errorf("a color emoji font was added to the monochrome chain")
 	}
 }

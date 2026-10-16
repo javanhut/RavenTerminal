@@ -96,7 +96,7 @@ func TestCSIOverflowBounded(t *testing.T) {
 
 func TestDCSOverflowBounded(t *testing.T) {
 	term := NewTerminal(10, 1)
-	term.Process([]byte("\x1bPq"))
+	term.Process([]byte("\x1bP+q"))
 	term.Process(bytes.Repeat([]byte{'B'}, maxDCSLen+1024))
 	if len(term.dcsParams) > maxDCSLen {
 		t.Fatalf("dcsParams grew past cap: %d", len(term.dcsParams))

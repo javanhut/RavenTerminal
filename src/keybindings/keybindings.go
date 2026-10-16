@@ -2,6 +2,8 @@ package keybindings
 
 import (
 	"runtime"
+	"strconv"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/go-gl/glfw/v3.3/glfw"
@@ -53,6 +55,15 @@ const (
 	ActionToggleResizeMode
 	ActionSelectTab
 	ActionFindInScrollback
+	ActionPrevPrompt
+	ActionNextPrompt
+	ActionCopyLastOutput
+	ActionHints
+	ActionCopyMode
+	ActionCommandPalette
+	ActionTogglePaneZoom
+	ActionToggleBroadcast
+	ActionScrollbackPager
 )
 
 // KeyResult contains the result of processing a key
@@ -62,304 +73,459 @@ type KeyResult struct {
 	Num    int // payload for actions that need a number (e.g. ActionSelectTab -> 1-based tab)
 }
 
-// TranslateKey translates a GLFW key event to terminal input
-func TranslateKey(key glfw.Key, mods glfw.ModifierKey, appCursorMode bool) KeyResult {
-	ctrl := mods&glfw.ModControl != 0
-	shift := mods&glfw.ModShift != 0
-	alt := mods&glfw.ModAlt != 0
-	super := mods&glfw.ModSuper != 0
-
-	// primary is the app-shortcut leader. The Super (Cmd) layer is identical
-	// on every platform so muscle memory transfers between macOS and Linux;
-	// Linux additionally accepts the conventional Ctrl+Shift chords. Keeping
-	// plain Ctrl out of it leaves the Control key free for terminal control
-	// characters (Ctrl+C, Ctrl+D, ...), matching iTerm2/Terminal.app.
-	primary := super || (!isMacOS && ctrl && shift)
-
-	// Super+Ctrl is the compositor's layer on Linux. Huginn (RavenGUI) puts
-	// every window-management chord there — Super+Ctrl+T opens a terminal,
-	// Super+Ctrl+Q closes a window, Super+Ctrl+Shift+1..9 sends one to a
-	// workspace — and never forwards them, so under Huginn these never
-	// arrive. Under another compositor they would, and `primary` would read
-	// Super+Ctrl+T as "new tab": a chord the desktop documents as the
-	// compositor's must not do something else the moment the compositor is
-	// not there to take it. Swallowed rather than sent to the shell, since no
-	// control character was meant. See docs/keybindings.md, "Reserved".
-	if !isMacOS && super && ctrl {
-		return KeyResult{Action: ActionNone}
-	}
-
-	// Exit: Ctrl+Q everywhere, plus Super+Q (Cmd+Q-style) on both platforms.
-	if (ctrl && key == glfw.KeyQ) || (super && key == glfw.KeyQ) {
-		return KeyResult{Action: ActionExit}
-	}
-
-	// Quick tab access: primary + 1..9 (Cmd+1..9 on macOS, Ctrl+Shift+1..9 elsewhere).
-	if primary {
-		if n := digitForKey(key); n != 0 {
-			return KeyResult{Action: ActionSelectTab, Num: n}
-		}
-	}
-
-	// Copy follows the primary modifier on both platforms (Cmd+C / Ctrl+Shift+C).
-	if primary && key == glfw.KeyC {
-		return KeyResult{Action: ActionCopy}
-	}
-	// Paste: Super+V on both platforms (Cmd+V-style), plus the legacy
-	// Ctrl+Shift+P on Linux.
-	if (super && key == glfw.KeyV) || (!isMacOS && ctrl && shift && key == glfw.KeyP) {
-		return KeyResult{Action: ActionPaste}
-	}
-
-	if primary && key == glfw.KeyT {
-		return KeyResult{Action: ActionNewTab}
-	}
-
-	if primary && key == glfw.KeyX {
-		return KeyResult{Action: ActionCloseTab}
-	}
-
-	if primary && key == glfw.KeyW {
-		return KeyResult{Action: ActionClosePane}
-	}
-
-	// Splits: iTerm-style Super+D / Super+Shift+D on both platforms (Super+V
-	// is paste, so splits can't use V there); Linux also keeps the
-	// conventional Ctrl+Shift+V / Ctrl+Shift+H.
-	if (super && !shift && key == glfw.KeyD) || (!isMacOS && ctrl && shift && key == glfw.KeyV) {
-		return KeyResult{Action: ActionSplitVertical}
-	}
-	if (super && shift && key == glfw.KeyD) || (!isMacOS && ctrl && shift && key == glfw.KeyH) {
-		return KeyResult{Action: ActionSplitHorizontal}
-	}
-
-	if primary && key == glfw.KeyK {
-		return KeyResult{Action: ActionShowHelp}
-	}
-
-	// Tab cycling with brackets: Super+Shift+] / Super+Shift+[ on both
-	// platforms (the Safari / Terminal.app convention; Cmd+Tab can't be used
-	// — macOS reserves it for the app switcher). Checked before the pane
-	// bindings so Shift selects tabs over panes.
-	if super && shift && key == glfw.KeyRightBracket {
-		return KeyResult{Action: ActionNextTab}
-	}
-	if super && shift && key == glfw.KeyLeftBracket {
-		return KeyResult{Action: ActionPrevTab}
-	}
-
-	// Pane cycling: Super+] / Super+[ on both platforms (no Shift); Linux
-	// also keeps Ctrl+Shift+] / [.
-	if (super && !shift && key == glfw.KeyRightBracket) || (!isMacOS && ctrl && shift && key == glfw.KeyRightBracket) {
-		return KeyResult{Action: ActionNextPane}
-	}
-	if (super && !shift && key == glfw.KeyLeftBracket) || (!isMacOS && ctrl && shift && key == glfw.KeyLeftBracket) {
-		return KeyResult{Action: ActionPrevPane}
-	}
-
-	// Zoom controls: primary + (= / - / 0).
-	if primary && key == glfw.KeyEqual {
-		return KeyResult{Action: ActionZoomIn}
-	}
-
-	if primary && key == glfw.KeyMinus {
-		return KeyResult{Action: ActionZoomOut}
-	}
-
-	if primary && key == glfw.Key0 {
-		return KeyResult{Action: ActionZoomReset}
-	}
-
-	if primary && key == glfw.KeyS {
-		return KeyResult{Action: ActionOpenMenu}
-	}
-	// Find in scrollback: Super+Shift+F on every platform. It has to live on
-	// the Super layer rather than follow `primary`: on Linux primary already
-	// means Ctrl+Shift, so Ctrl+Shift+F is the web-search panel below and
-	// cannot also mean find. Checked first so Cmd+Shift+F on macOS reaches
-	// find instead of falling into the shift-agnostic panel binding.
-	if super && shift && key == glfw.KeyF {
-		return KeyResult{Action: ActionFindInScrollback}
-	}
-	if primary && key == glfw.KeyF {
-		return KeyResult{Action: ActionToggleSearchPanel}
-	}
-	if primary && key == glfw.KeyA {
-		return KeyResult{Action: ActionToggleAIPanel}
-	}
-
-	// Resize mode: Ctrl+R everywhere, plus Super+R on both platforms.
-	if (ctrl && !shift && key == glfw.KeyR) || (super && !shift && key == glfw.KeyR) {
-		return KeyResult{Action: ActionToggleResizeMode}
-	}
-
-	// Cycle tabs with Ctrl+Tab / Ctrl+Shift+Tab (works on all platforms; Ctrl here is
-	// the physical Control key, distinct from Cmd on macOS).
-	if ctrl && key == glfw.KeyTab {
-		if shift {
-			return KeyResult{Action: ActionPrevTab}
-		}
-		return KeyResult{Action: ActionNextTab}
-	}
-
-	if shift && key == glfw.KeyPageUp {
-		return KeyResult{Action: ActionScrollUp}
-	}
-
-	if shift && key == glfw.KeyPageDown {
-		return KeyResult{Action: ActionScrollDown}
-	}
-
-	// Shift+Arrow for single line scrolling
-	if shift && key == glfw.KeyUp {
-		return KeyResult{Action: ActionScrollUpLine}
-	}
-
-	if shift && key == glfw.KeyDown {
-		return KeyResult{Action: ActionScrollDownLine}
-	}
-
-	// Arrow keys
-	if key == glfw.KeyUp {
-		if appCursorMode {
-			return KeyResult{Action: ActionInput, Data: []byte("\x1bOA")}
-		}
-		return KeyResult{Action: ActionInput, Data: []byte("\x1b[A")}
-	}
-	if key == glfw.KeyDown {
-		if appCursorMode {
-			return KeyResult{Action: ActionInput, Data: []byte("\x1bOB")}
-		}
-		return KeyResult{Action: ActionInput, Data: []byte("\x1b[B")}
-	}
-	if key == glfw.KeyRight {
-		if appCursorMode {
-			return KeyResult{Action: ActionInput, Data: []byte("\x1bOC")}
-		}
-		return KeyResult{Action: ActionInput, Data: []byte("\x1b[C")}
-	}
-	if key == glfw.KeyLeft {
-		if appCursorMode {
-			return KeyResult{Action: ActionInput, Data: []byte("\x1bOD")}
-		}
-		return KeyResult{Action: ActionInput, Data: []byte("\x1b[D")}
-	}
-
-	// Home/End
-	if key == glfw.KeyHome {
-		return KeyResult{Action: ActionInput, Data: []byte("\x1b[H")}
-	}
-	if key == glfw.KeyEnd {
-		return KeyResult{Action: ActionInput, Data: []byte("\x1b[F")}
-	}
-
-	// Page Up/Down (without shift)
-	if key == glfw.KeyPageUp {
-		return KeyResult{Action: ActionInput, Data: []byte("\x1b[5~")}
-	}
-	if key == glfw.KeyPageDown {
-		return KeyResult{Action: ActionInput, Data: []byte("\x1b[6~")}
-	}
-
-	// Insert/Delete
-	if key == glfw.KeyInsert {
-		return KeyResult{Action: ActionInput, Data: []byte("\x1b[2~")}
-	}
-	if key == glfw.KeyDelete {
-		return KeyResult{Action: ActionInput, Data: []byte("\x1b[3~")}
-	}
-
-	// Function keys
-	fKeySeqs := map[glfw.Key][]byte{
-		glfw.KeyF1:  []byte("\x1bOP"),
-		glfw.KeyF2:  []byte("\x1bOQ"),
-		glfw.KeyF3:  []byte("\x1bOR"),
-		glfw.KeyF4:  []byte("\x1bOS"),
-		glfw.KeyF5:  []byte("\x1b[15~"),
-		glfw.KeyF6:  []byte("\x1b[17~"),
-		glfw.KeyF7:  []byte("\x1b[18~"),
-		glfw.KeyF8:  []byte("\x1b[19~"),
-		glfw.KeyF9:  []byte("\x1b[20~"),
-		glfw.KeyF10: []byte("\x1b[21~"),
-		glfw.KeyF11: []byte("\x1b[23~"),
-		glfw.KeyF12: []byte("\x1b[24~"),
-	}
-	if seq, ok := fKeySeqs[key]; ok {
-		return KeyResult{Action: ActionInput, Data: seq}
-	}
-
-	// Backspace
-	if key == glfw.KeyBackspace {
-		return KeyResult{Action: ActionInput, Data: []byte{0x7f}}
-	}
-
-	// Shift+Enter for fullscreen toggle
-	if shift && (key == glfw.KeyEnter || key == glfw.KeyKPEnter) {
-		return KeyResult{Action: ActionToggleFullscreen}
-	}
-
-	// Enter
-	if key == glfw.KeyEnter || key == glfw.KeyKPEnter {
-		return KeyResult{Action: ActionInput, Data: []byte{'\r'}}
-	}
-
-	// Tab
-	if key == glfw.KeyTab {
-		// Pane cycling: Cmd+Shift+Tab on macOS, Super+Shift+Tab on Linux —
-		// the same physical chord everywhere. (macOS reserves Cmd+Shift+Tab
-		// for the app switcher unless remapped, and tiling WMs often grab
-		// Super; the leader+]/[ bindings always cycle panes as well.)
-		if super && shift {
-			return KeyResult{Action: ActionNextPane}
-		}
-		if shift && !ctrl && !super {
-			// Plain Shift+Tab belongs to the running app: it's back-tab
-			// (CSI Z) in nvim, Claude Code's mode cycling, form navigation
-			// in TUIs, etc.
-			return KeyResult{Action: ActionInput, Data: []byte("\x1b[Z")}
-		}
-		if !ctrl && !shift {
-			return KeyResult{Action: ActionInput, Data: []byte{'\t'}}
-		}
-	}
-
-	// Escape
-	if key == glfw.KeyEscape {
-		return KeyResult{Action: ActionInput, Data: []byte{0x1b}}
-	}
-
-	// Control + letter combinations
-	if ctrl && key >= glfw.KeyA && key <= glfw.KeyZ {
-		// Ctrl+A = 1, Ctrl+B = 2, etc.
-		return KeyResult{Action: ActionInput, Data: []byte{byte(key - glfw.KeyA + 1)}}
-	}
-
-	// Space - only handle Ctrl+Space here; normal space is handled by char callback
-	if key == glfw.KeySpace {
-		if ctrl {
-			return KeyResult{Action: ActionInput, Data: []byte{0}}
-		}
-		// Let the char callback handle normal space to avoid double input
-		return KeyResult{Action: ActionNone}
-	}
-
-	// Alt + key sends ESC prefix
-	if alt && key >= glfw.KeyA && key <= glfw.KeyZ {
-		c := byte(key - glfw.KeyA + 'a')
-		if shift {
-			c = byte(key - glfw.KeyA + 'A')
-		}
-		return KeyResult{Action: ActionInput, Data: []byte{0x1b, c}}
-	}
-
-	return KeyResult{Action: ActionNone}
+// Event is one key event from the window system.
+type Event struct {
+	Key    glfw.Key
+	Mods   glfw.ModifierKey
+	Action glfw.Action
+	// Rune is the unshifted character the key produces in the active layout
+	// (glfw.GetKeyName); 0 when unknown.
+	Rune rune
 }
 
-// TranslateChar translates a character input to terminal bytes
-func TranslateChar(char rune, mods glfw.ModifierKey) []byte {
-	if mods&glfw.ModAlt != 0 {
-		// Alt sends ESC prefix
-		return utf8.AppendRune([]byte{0x1b}, char)
+// Mode is the terminal state that shapes how keys are encoded.
+type Mode struct {
+	AppCursor       bool // DECCKM
+	AppKeypad       bool // DECKPAM
+	AltScreen       bool
+	MouseReporting  bool
+	ModifyOtherKeys int
+	KittyFlags      uint8
+	// AltNoEscape: the program turned off both ?1036 and ?1039, so Alt
+	// does not prefix ESC.
+	AltNoEscape bool
+}
+
+const (
+	modShift = glfw.ModShift
+	modCtrl  = glfw.ModControl
+	modAlt   = glfw.ModAlt
+	modSuper = glfw.ModSuper
+	modReal  = modShift | modCtrl | modAlt | modSuper
+)
+
+// TranslateKey translates a key press with only DECCKM known. Overlays use it
+// to recognise app shortcuts.
+func TranslateKey(key glfw.Key, mods glfw.ModifierKey, appCursorMode bool) KeyResult {
+	return Translate(Event{Key: key, Mods: mods, Action: glfw.Press}, Mode{AppCursor: appCursorMode})
+}
+
+// Translate maps a key event to an app shortcut or to the bytes the
+// terminal application should receive. Printable keys that the legacy
+// encoding leaves alone return ActionNone: their text arrives through the
+// char callback (TranslateChar), which knows the layout's exact character.
+func Translate(ev Event, m Mode) KeyResult {
+	if ev.Action != glfw.Release {
+		if res, ok := shortcut(ev.Key, ev.Mods, m); ok {
+			return res
+		}
+	}
+	var data []byte
+	if m.KittyFlags&(kittyDisambiguate|kittyAllKeys) != 0 {
+		data = encodeKitty(ev, m)
+	} else if ev.Action != glfw.Release {
+		data = encodeLegacy(ev, m)
+	}
+	if len(data) == 0 {
+		return KeyResult{}
+	}
+	return KeyResult{Action: ActionInput, Data: data}
+}
+
+// TranslateChar translates text from the char callback. Alt prefixes ESC,
+// or with ?1036/?1039 off sets the eighth bit of ASCII like xterm.
+func TranslateChar(char rune, mods glfw.ModifierKey, m Mode) []byte {
+	if mods&modAlt != 0 {
+		if !m.AltNoEscape {
+			return utf8.AppendRune([]byte{0x1b}, char)
+		}
+		if char < 0x80 {
+			char |= 0x80
+		}
 	}
 	return utf8.AppendRune(nil, char)
+}
+
+func shortcut(key glfw.Key, mods glfw.ModifierKey, m Mode) (KeyResult, bool) {
+	ctrl := mods&modCtrl != 0
+	shift := mods&modShift != 0
+	super := mods&modSuper != 0
+	linux := !isMacOS
+
+	// The leader is Super (Cmd) on every platform, plus Ctrl+Shift on Linux.
+	// Plain Ctrl and Alt chords always belong to the running program.
+	leader := super || (linux && ctrl && shift)
+
+	// Super+Ctrl is the compositor's layer on Linux (Huginn puts window
+	// management there). Swallowed so it neither acts here nor reaches the
+	// shell when another compositor forwards it. See docs/keybindings.md.
+	if linux && super && ctrl {
+		return KeyResult{}, true
+	}
+	act := func(a KeyAction) (KeyResult, bool) { return KeyResult{Action: a}, true }
+
+	// Leader+Shift: Super+Shift, or Ctrl+Shift+Alt for the Ctrl+Shift leader.
+	if (super && shift) || (linux && ctrl && shift && mods&modAlt != 0) {
+		switch key {
+		case glfw.KeyC:
+			return act(ActionCopyLastOutput)
+		case glfw.KeyH:
+			return act(ActionScrollbackPager)
+		case glfw.KeyV:
+			return act(ActionCopyMode)
+		case glfw.KeyP:
+			return act(ActionCommandPalette)
+		case glfw.KeyD:
+			return act(ActionSplitHorizontal)
+		case glfw.KeyTab:
+			return act(ActionPrevTab)
+		}
+	}
+
+	if leader {
+		if n := digitForKey(key); n != 0 {
+			return KeyResult{Action: ActionSelectTab, Num: n}, true
+		}
+		switch key {
+		case glfw.KeyQ:
+			return act(ActionExit)
+		case glfw.KeyC:
+			return act(ActionCopy)
+		case glfw.KeyT:
+			return act(ActionNewTab)
+		case glfw.KeyX:
+			return act(ActionCloseTab)
+		case glfw.KeyW:
+			return act(ActionClosePane)
+		case glfw.KeyK:
+			return act(ActionShowHelp)
+		case glfw.KeyEqual:
+			return act(ActionZoomIn)
+		case glfw.KeyMinus:
+			return act(ActionZoomOut)
+		case glfw.Key0:
+			return act(ActionZoomReset)
+		case glfw.KeyS:
+			return act(ActionOpenMenu)
+		case glfw.KeyA:
+			return act(ActionToggleAIPanel)
+		case glfw.KeyR:
+			return act(ActionToggleResizeMode)
+		case glfw.KeyUp:
+			return act(ActionPrevPrompt)
+		case glfw.KeyDown:
+			return act(ActionNextPrompt)
+		case glfw.KeyE, glfw.KeyH:
+			return act(ActionHints)
+		case glfw.KeyP:
+			return act(ActionCommandPalette)
+		case glfw.KeyV:
+			return act(ActionPaste)
+		case glfw.KeyD:
+			return act(ActionSplitVertical)
+		case glfw.KeyTab:
+			return act(ActionNextTab)
+		case glfw.KeySpace:
+			return act(ActionCopyMode)
+		case glfw.KeyZ:
+			return act(ActionTogglePaneZoom)
+		case glfw.KeyB:
+			return act(ActionToggleBroadcast)
+		case glfw.KeyEnter, glfw.KeyKPEnter:
+			return act(ActionToggleFullscreen)
+		case glfw.KeyF:
+			// Find lives on Super+Shift+F: on Linux the leader is Ctrl+Shift,
+			// so Ctrl+Shift+F must stay the web-search panel.
+			if super && shift {
+				return act(ActionFindInScrollback)
+			}
+			return act(ActionToggleSearchPanel)
+		}
+	}
+
+	// Super+Shift+]/[ cycle tabs; Super+]/[ (and Ctrl+Shift+]/[ on Linux) cycle panes.
+	if super && shift && key == glfw.KeyRightBracket {
+		return act(ActionNextTab)
+	}
+	if super && shift && key == glfw.KeyLeftBracket {
+		return act(ActionPrevTab)
+	}
+	if leader && key == glfw.KeyRightBracket {
+		return act(ActionNextPane)
+	}
+	if leader && key == glfw.KeyLeftBracket {
+		return act(ActionPrevPane)
+	}
+	if key == glfw.KeyF11 && mods&modReal == 0 {
+		return act(ActionToggleFullscreen)
+	}
+
+	// Shift scrolling is the terminal's only on the main screen while the
+	// program has not claimed the mouse or the kitty keyboard; otherwise the
+	// keys belong to the program.
+	if mods&modReal == modShift && !m.AltScreen && !m.MouseReporting && m.KittyFlags == 0 {
+		switch key {
+		case glfw.KeyPageUp:
+			return act(ActionScrollUp)
+		case glfw.KeyPageDown:
+			return act(ActionScrollDown)
+		case glfw.KeyUp:
+			return act(ActionScrollUpLine)
+		case glfw.KeyDown:
+			return act(ActionScrollDownLine)
+		}
+	}
+	return KeyResult{}, false
+}
+
+// xtermMod is the xterm modifier parameter: 1 + shift|alt<<1|ctrl<<2|super<<3.
+func xtermMod(mods glfw.ModifierKey) int {
+	m := 1
+	if mods&modShift != 0 {
+		m += 1
+	}
+	if mods&modAlt != 0 {
+		m += 2
+	}
+	if mods&modCtrl != 0 {
+		m += 4
+	}
+	if mods&modSuper != 0 {
+		m += 8
+	}
+	return m
+}
+
+var (
+	cursorFinal = map[glfw.Key]byte{
+		glfw.KeyUp: 'A', glfw.KeyDown: 'B', glfw.KeyRight: 'C', glfw.KeyLeft: 'D',
+		glfw.KeyHome: 'H', glfw.KeyEnd: 'F',
+	}
+	ss3Final = map[glfw.Key]byte{glfw.KeyF1: 'P', glfw.KeyF2: 'Q', glfw.KeyF3: 'R', glfw.KeyF4: 'S'}
+	tildeNum = map[glfw.Key]int{
+		glfw.KeyInsert: 2, glfw.KeyDelete: 3, glfw.KeyPageUp: 5, glfw.KeyPageDown: 6,
+		glfw.KeyF5: 15, glfw.KeyF6: 17, glfw.KeyF7: 18, glfw.KeyF8: 19,
+		glfw.KeyF9: 20, glfw.KeyF10: 21, glfw.KeyF11: 23, glfw.KeyF12: 24,
+	}
+	kpApp = map[glfw.Key]byte{
+		glfw.KeyKP0: 'p', glfw.KeyKP1: 'q', glfw.KeyKP2: 'r', glfw.KeyKP3: 's', glfw.KeyKP4: 't',
+		glfw.KeyKP5: 'u', glfw.KeyKP6: 'v', glfw.KeyKP7: 'w', glfw.KeyKP8: 'x', glfw.KeyKP9: 'y',
+		glfw.KeyKPDecimal: 'n', glfw.KeyKPDivide: 'o', glfw.KeyKPMultiply: 'j',
+		glfw.KeyKPSubtract: 'm', glfw.KeyKPAdd: 'k', glfw.KeyKPEnter: 'M', glfw.KeyKPEqual: 'X',
+	}
+	// Keypad keys with Num Lock off act as the navigation keys printed on them.
+	kpNav = map[glfw.Key]glfw.Key{
+		glfw.KeyKP0: glfw.KeyInsert, glfw.KeyKP1: glfw.KeyEnd, glfw.KeyKP2: glfw.KeyDown,
+		glfw.KeyKP3: glfw.KeyPageDown, glfw.KeyKP4: glfw.KeyLeft, glfw.KeyKP6: glfw.KeyRight,
+		glfw.KeyKP7: glfw.KeyHome, glfw.KeyKP8: glfw.KeyUp, glfw.KeyKP9: glfw.KeyPageUp,
+		glfw.KeyKPDecimal: glfw.KeyDelete,
+	}
+)
+
+func isKPNumeric(key glfw.Key) bool {
+	return (key >= glfw.KeyKP0 && key <= glfw.KeyKP9) || key == glfw.KeyKPDecimal
+}
+
+func csiParams(final byte, params ...int) []byte {
+	b := []byte{0x1b, '['}
+	for i, p := range params {
+		if i > 0 {
+			b = append(b, ';')
+		}
+		b = strconv.AppendInt(b, int64(p), 10)
+	}
+	return append(b, final)
+}
+
+func modifyOther(mod int, code rune) []byte {
+	return csiParams('~', 27, mod, int(code))
+}
+
+func encodeLegacy(ev Event, m Mode) []byte {
+	key, mods := ev.Key, ev.Mods
+	mod := xtermMod(mods)
+
+	if key >= glfw.KeyF13 && key <= glfw.KeyF24 {
+		ev.Key, ev.Mods = key-12, mods|modShift
+		return encodeLegacy(ev, m)
+	}
+	if f, ok := cursorFinal[key]; ok {
+		if mod > 1 {
+			return csiParams(f, 1, mod)
+		}
+		if m.AppCursor {
+			return []byte{0x1b, 'O', f}
+		}
+		return []byte{0x1b, '[', f}
+	}
+	if f, ok := ss3Final[key]; ok {
+		if mod > 1 {
+			return csiParams(f, 1, mod)
+		}
+		return []byte{0x1b, 'O', f}
+	}
+	if n, ok := tildeNum[key]; ok {
+		if mod > 1 {
+			return csiParams('~', n, mod)
+		}
+		return csiParams('~', n)
+	}
+	if code, ok := kpApp[key]; ok {
+		if isKPNumeric(key) && mods&glfw.ModNumLock == 0 {
+			if key == glfw.KeyKP5 {
+				if mod > 1 {
+					return csiParams('E', 1, mod)
+				}
+				return []byte("\x1b[E")
+			}
+			ev.Key = kpNav[key]
+			return encodeLegacy(ev, m)
+		}
+		if m.AppKeypad && mods&(modCtrl|modAlt|modSuper) == 0 {
+			return []byte{0x1b, 'O', code}
+		}
+		if key != glfw.KeyKPEnter {
+			return nil // text arrives via the char callback
+		}
+		key = glfw.KeyEnter
+	}
+
+	switch key {
+	case glfw.KeyEnter:
+		return legacySpecial(13, []byte{'\r'}, mods, m)
+	case glfw.KeyTab:
+		return legacySpecial(9, []byte{'\t'}, mods, m)
+	case glfw.KeyBackspace:
+		return legacySpecial(127, []byte{0x7f}, mods, m)
+	case glfw.KeyEscape:
+		return legacySpecial(27, []byte{0x1b}, mods, m)
+	}
+	return legacyText(ev, m)
+}
+
+// legacySpecial encodes Enter/Tab/Backspace/Escape.
+func legacySpecial(code rune, base []byte, mods glfw.ModifierKey, m Mode) []byte {
+	real := mods & modReal
+	if real == 0 {
+		return base
+	}
+	mod := xtermMod(mods)
+	if m.ModifyOtherKeys >= 2 && !(code == 9 && real == modShift) {
+		return modifyOther(mod, code)
+	}
+	if m.ModifyOtherKeys >= 1 && (code == 13 || code == 27) && real&(modShift|modCtrl) != 0 {
+		return modifyOther(mod, code)
+	}
+	out := base
+	switch {
+	case code == 9 && real&modShift != 0:
+		out = []byte("\x1b[Z")
+	case code == 127 && real&modCtrl != 0:
+		out = []byte{0x08}
+	}
+	if real&modAlt != 0 && !m.AltNoEscape {
+		out = append([]byte{0x1b}, out...)
+	}
+	return out
+}
+
+// legacyText encodes Ctrl (and modifyOtherKeys) chords on printable keys.
+// Plain, Shift and Alt chords are left to the char callback.
+func legacyText(ev Event, m Mode) []byte {
+	us := usRune(ev.Key)
+	c := ev.Rune
+	if c == 0 {
+		c = us
+	}
+	if c == 0 {
+		return nil
+	}
+	mods := ev.Mods
+	ctrl, alt, shift := mods&modCtrl != 0, mods&modAlt != 0, mods&modShift != 0
+	if !ctrl && !(alt && m.ModifyOtherKeys >= 2) {
+		return nil
+	}
+	code := c
+	if shift && unicode.IsLetter(c) {
+		code = unicode.ToUpper(c)
+	}
+	mod := xtermMod(mods)
+	if m.ModifyOtherKeys >= 2 {
+		return modifyOther(mod, code)
+	}
+	// Non-Latin layouts: control characters come from the physical key.
+	cc := c
+	if cc >= 0x80 && us != 0 {
+		cc = us
+	}
+	if b, ok := ctrlByte(cc); ok && !(m.ModifyOtherKeys >= 1 && shift) {
+		if alt && !m.AltNoEscape {
+			return []byte{0x1b, b}
+		}
+		return []byte{b}
+	}
+	if m.ModifyOtherKeys >= 1 {
+		return modifyOther(mod, code)
+	}
+	return nil
+}
+
+// ctrlByte is the control character xterm sends for Ctrl+c.
+func ctrlByte(c rune) (byte, bool) {
+	switch {
+	case c >= 'a' && c <= 'z':
+		return byte(c) & 0x1f, true
+	case c >= '@' && c <= '_':
+		return byte(c) & 0x1f, true
+	}
+	switch c {
+	case ' ', '2':
+		return 0, true
+	case '3':
+		return 0x1b, true
+	case '4':
+		return 0x1c, true
+	case '5':
+		return 0x1d, true
+	case '6', '~':
+		return 0x1e, true
+	case '7', '/':
+		return 0x1f, true
+	case '8', '?':
+		return 0x7f, true
+	}
+	return 0, false
+}
+
+// usRune is the character a key produces on a US layout without Shift (the
+// kitty "base layout key"), 0 for non-text keys.
+func usRune(key glfw.Key) rune {
+	switch {
+	case key >= glfw.KeyA && key <= glfw.KeyZ:
+		return rune('a' + (key - glfw.KeyA))
+	case key >= glfw.Key0 && key <= glfw.Key9, key == glfw.KeySpace, key == glfw.KeyApostrophe,
+		key >= glfw.KeyComma && key <= glfw.KeySlash, key == glfw.KeySemicolon, key == glfw.KeyEqual,
+		key >= glfw.KeyLeftBracket && key <= glfw.KeyRightBracket, key == glfw.KeyGraveAccent:
+		return rune(key)
+	}
+	return 0
+}
+
+var usShifted = map[rune]rune{
+	'1': '!', '2': '@', '3': '#', '4': '$', '5': '%', '6': '^', '7': '&', '8': '*', '9': '(', '0': ')',
+	'-': '_', '=': '+', '[': '{', ']': '}', '\\': '|', ';': ':', '\'': '"', ',': '<', '.': '>',
+	'/': '?', '`': '~',
+}
+
+// shiftedRune is the best known Shift variant of c on the active layout.
+func shiftedRune(c, us rune) rune {
+	if unicode.IsLetter(c) {
+		return unicode.ToUpper(c)
+	}
+	if c == us {
+		if s, ok := usShifted[c]; ok {
+			return s
+		}
+	}
+	return c
 }

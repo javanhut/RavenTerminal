@@ -49,7 +49,7 @@ func layoutOf(n *SplitNode) Layout {
 		return Layout{}
 	}
 	if n.IsLeaf() {
-		return Layout{Dir: n.Pane.CurrentDir()}
+		return Layout{Dir: n.Pane.freshDir()}
 	}
 	split := "v"
 	if n.SplitDir == SplitHorizontal {

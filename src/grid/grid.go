@@ -11,7 +11,7 @@ const (
 )
 
 // CellFlags represents text attributes
-type CellFlags uint8
+type CellFlags uint16
 
 const (
 	FlagBold CellFlags = 1 << iota
@@ -21,6 +21,8 @@ const (
 	FlagInverse
 	FlagHidden
 	FlagStrikethrough
+	FlagOverline
+	FlagBlink
 )
 
 // ColorType identifies the type of color
@@ -107,7 +109,10 @@ type Grid struct {
 	history      []*Row // scrollback (oldest first), a window into histBuf
 	histBuf      []*Row // backing store for history; see pushHistory
 	maxScroll    int    // history cap in rows (0 = no scrollback, e.g. alt screen)
-	freeRows     []*Row // recycled row allocations, all at current width
+	freeRows     []*Row // recycled row structs (cells reused when the width matches)
+	freeCells    [][]storedCell
+	arena        []storedCell // carve space for compacted scrollback rows
+	noReflow     bool         // alternate screen: resize clamps instead of reflowing
 	styles       *styleSet
 	Cols         int
 	Rows         int
@@ -126,15 +131,17 @@ type Grid struct {
 	lastStyle Style
 	lastLink  uint16
 
-	// OSC 8 hyperlink interning: url <-> compact id stored on cells
-	links      map[string]uint16
-	linkURLs   map[uint16]string
-	nextLinkID uint16
+	// OSC 8 hyperlink interning (shared with the terminal's other screen)
+	linkTable *LinkTable
 
 	// Grapheme interning: cluster (base + combining/ZWJ) <-> compact id.
 	// Append-only; index 0 = none. Combining clusters are rare so this stays small.
-	graphemes   [][]rune
-	graphemeMap map[string]uint32
+	graphemes    [][]rune
+	graphemeMap  map[string]uint32
+	graphemeGCAt int
+	graphemeOff  bool // mode 2027 reset: legacy per-codepoint widths
+	clusterBuf   []rune
+	clusterBytes []byte
 
 	// Selection state. Anchors are stored in ABSOLUTE buffer coordinates:
 	// absRow = scrolledOut + index into the history+screen continuum, the same
@@ -151,6 +158,7 @@ type Grid struct {
 	selAnchorCol    int
 	selEndAbsRow    int // current drag end (may precede the anchor)
 	selEndCol       int
+	selBlock        bool // rectangular selection
 
 	// Auto-wrap mode (DECAWM ?7) - default true
 	autoWrap bool
@@ -195,7 +203,9 @@ func NewGrid(cols, rows int) *Grid {
 
 // NewAltGrid creates a grid with no scrollback, for the alternate screen.
 func NewAltGrid(cols, rows int) *Grid {
-	return newGrid(cols, rows, 0)
+	g := newGrid(cols, rows, 0)
+	g.noReflow = true
+	return g
 }
 
 func newGrid(cols, rows, maxScroll int) *Grid {
@@ -260,23 +270,14 @@ func (g *Grid) InternLink(url string) uint16 {
 // InternLinkLocked is InternLink without locking; the caller must hold g.mu
 // (see LockBatch).
 func (g *Grid) InternLinkLocked(url string) uint16 {
-	if url == "" {
-		return 0
+	lt := g.links()
+	id, ok := lt.Intern("", url)
+	if !ok {
+		live := map[uint16]bool{}
+		g.MarkLiveLinksLocked(live)
+		lt.Sweep(live)
+		id, _ = lt.Intern("", url)
 	}
-	if g.links == nil {
-		g.links = make(map[string]uint16)
-		g.linkURLs = make(map[uint16]string)
-	}
-	if id, ok := g.links[url]; ok {
-		return id
-	}
-	g.nextLinkID++
-	if g.nextLinkID == 0 { // wrap-around guard: 0 is reserved for "no link"
-		g.nextLinkID = 1
-	}
-	id := g.nextLinkID
-	g.links[url] = id
-	g.linkURLs[id] = url
 	return id
 }
 
@@ -286,8 +287,12 @@ func (g *Grid) LinkURL(id uint16) string {
 		return ""
 	}
 	g.mu.RLock()
-	defer g.mu.RUnlock()
-	return g.linkURLs[id]
+	lt := g.linkTable
+	g.mu.RUnlock()
+	if lt == nil {
+		return ""
+	}
+	return lt.URL(id)
 }
 
 // LockBatch acquires g.mu (write) for a multi-operation batch, letting the
@@ -355,6 +360,17 @@ func (g *Grid) WriteRunesLocked(rs []rune, fg, bg Color, flags CellFlags, link u
 // style handle it owns (see styleSet.ref). Each cell written takes its own
 // reference from sr; the caller releases the handle when its run is done.
 func (g *Grid) writeCharLocked(c rune, sr *styleRef, link uint16) {
+	// Get character width. Printable ASCII (0x20-0x7e, the overwhelming
+	// majority of terminal output) is always one cell and never extends a
+	// grapheme cluster; everything else may join the previous cell's cluster.
+	charWidth := 1
+	if c < 0x20 || c >= 0x7f {
+		charWidth = RuneWidth(c)
+		if g.joinCluster(c, charWidth) || charWidth == 0 {
+			return
+		}
+	}
+
 	if g.wrapPending {
 		if g.autoWrap {
 			// The line we're leaving continued because it filled the last
@@ -375,21 +391,6 @@ func (g *Grid) writeCharLocked(c rune, sr *styleRef, link uint16) {
 		}
 	}
 
-	// Get character width. Printable ASCII (0x20-0x7e, the overwhelming
-	// majority of terminal output) is always one cell; short-circuit it here
-	// because RuneWidth can't inline (its fallback calls uniseg). Everything
-	// else — controls, DEL, non-ASCII — goes through RuneWidth as before.
-	charWidth := 1
-	if c < 0x20 || c >= 0x7f {
-		charWidth = RuneWidth(c)
-		if charWidth == 0 {
-			// Zero-width codepoint (combining mark / ZWJ continuation): attach
-			// it to the most recently written cell instead of dropping it.
-			g.appendCombining(c)
-			return
-		}
-	}
-
 	// Check if wide character fits on current line
 	if charWidth == 2 && g.CursorCol >= g.Cols-1 {
 		if g.autoWrap {
@@ -398,10 +399,12 @@ func (g *Grid) writeCharLocked(c rune, sr *styleRef, link uint16) {
 			// g.lastStyle would give) so its background matches the cell it
 			// stands in for; otherwise full-screen redraws leave stale
 			// colors at the right edge.
-			g.putCellStyledRow(g.rows[g.CursorRow], g.CursorCol, ' ', sr.take(), CellWidthNormal, link)
+			pr := g.rows[g.CursorRow]
+			g.clearOrphans(pr, g.CursorCol, 1)
+			g.putCellStyledRow(pr, g.CursorCol, ' ', sr.take(), CellWidthNormal, link)
 			// The line continues onto the next row: mark it soft-wrapped so
-			// reflow can rejoin it on resize.
-			g.rows[g.CursorRow].flags |= RowSoftWrapped
+			// reflow can rejoin it on resize (dropping the pad).
+			pr.flags |= RowSoftWrapped | RowWidePad
 			g.cursorNewline()
 		} else {
 			// No auto-wrap: treat wide char as single width at last column
@@ -413,6 +416,10 @@ func (g *Grid) writeCharLocked(c rune, sr *styleRef, link uint16) {
 	// so index the row's cell slice directly (as fillSpan does) instead of
 	// decoding a linear index with per-cell div/mod in cellAt/putCellStyled.
 	row := g.rows[g.CursorRow]
+	if row.cells[g.CursorCol].Width != CellWidthNormal ||
+		(charWidth == 2 && g.CursorCol+1 < g.Cols && row.cells[g.CursorCol+1].Width != CellWidthNormal) {
+		g.clearOrphans(row, g.CursorCol, charWidth)
+	}
 	g.putCellStyledRow(row, g.CursorCol, c, sr.take(), uint8(charWidth), link)
 	g.CursorCol++
 
@@ -477,6 +484,9 @@ func (g *Grid) writeByteLocked(b byte, sr *styleRef, link uint16) {
 	}
 
 	row := g.rows[g.CursorRow]
+	if row.cells[g.CursorCol].Width != CellWidthNormal {
+		g.clearOrphans(row, g.CursorCol, 1)
+	}
 	g.putCellStyledRow(row, g.CursorCol, rune(b), sr.take(), CellWidthNormal, link)
 	g.CursorCol++
 
@@ -492,34 +502,6 @@ func (g *Grid) writeByteLocked(b byte, sr *styleRef, link uint16) {
 	g.lastChar = rune(b)
 	g.lastStyle = sr.style
 	g.lastLink = link
-}
-
-// appendCombining attaches a zero-width codepoint to the most recently written
-// cell (the base of the current grapheme cluster). Must be called under g.mu.
-func (g *Grid) appendCombining(r rune) {
-	row := g.CursorRow
-	var col int
-	if g.wrapPending {
-		col = g.Cols - 1
-	} else if g.CursorCol > 0 {
-		col = g.CursorCol - 1
-	} else {
-		return // nothing to attach to
-	}
-	// Step back over a continuation cell to the wide-char base.
-	if col > 0 && g.rows[row].cells[col].Width == CellWidthContinuation {
-		col--
-	}
-	p := &g.rows[row].cells[col]
-	var cluster []rune
-	if p.Grapheme != 0 && int(p.Grapheme) < len(g.graphemes) {
-		cluster = append(cluster, g.graphemes[p.Grapheme]...)
-	} else {
-		cluster = append(cluster, p.Char)
-	}
-	cluster = append(cluster, r)
-	p.Grapheme = g.internGrapheme(cluster)
-	g.rows[row].flags |= RowDirty
 }
 
 // cursorNewline moves cursor to next line (internal, no lock)
@@ -628,13 +610,6 @@ func (g *Grid) BackspaceLocked() {
 	g.wrapPending = false
 	if g.CursorCol > 0 {
 		g.CursorCol--
-		// If we landed on a continuation cell, move back one more
-		if g.CursorCol > 0 {
-			idx := g.index(g.CursorCol, g.CursorRow)
-			if g.cellAt(idx).Width == CellWidthContinuation {
-				g.CursorCol--
-			}
-		}
 	}
 }
 
@@ -661,13 +636,6 @@ func (g *Grid) TabLocked() {
 		next = g.Cols - 1
 	}
 	g.CursorCol = next
-	// Check if we landed on a continuation cell
-	if g.CursorCol > 0 {
-		idx := g.index(g.CursorCol, g.CursorRow)
-		if g.cellAt(idx).Width == CellWidthContinuation {
-			g.CursorCol--
-		}
-	}
 }
 
 // MoveCursor moves the cursor by the given delta, handling wide cells
@@ -682,33 +650,9 @@ func (g *Grid) MoveCursor(dCol, dRow int) {
 func (g *Grid) MoveCursorLocked(dCol, dRow int) {
 	g.wrapPending = false
 
-	// Handle horizontal movement with wide cell awareness
-	if dCol < 0 {
-		// Moving left - skip continuation cells
-		for i := 0; i > dCol && g.CursorCol > 0; i-- {
-			g.CursorCol--
-			// If we landed on a continuation cell, move back one more
-			if g.CursorCol > 0 {
-				idx := g.index(g.CursorCol, g.CursorRow)
-				if g.cellAt(idx).Width == CellWidthContinuation {
-					g.CursorCol--
-				}
-			}
-		}
-	} else if dCol > 0 {
-		// Moving right - skip over wide characters properly
-		for i := 0; i < dCol && g.CursorCol < g.Cols-1; i++ {
-			idx := g.index(g.CursorCol, g.CursorRow)
-			if g.cellAt(idx).Width == CellWidthWide {
-				// Wide char - move by 2
-				g.CursorCol += 2
-			} else {
-				g.CursorCol++
-			}
-		}
-	}
-
-	// Handle vertical movement
+	// Columns, not characters (xterm): a move may land on a wide character's
+	// continuation cell.
+	g.CursorCol += dCol
 	g.CursorRow += dRow
 
 	// Clamp to bounds
@@ -753,15 +697,6 @@ func (g *Grid) SetCursorPosLocked(col, row int) {
 	if g.CursorRow >= g.Rows {
 		g.CursorRow = g.Rows - 1
 	}
-
-	// After clamping, check if we landed on a continuation cell
-	// If so, move left to the wide character start
-	if g.CursorCol > 0 {
-		idx := g.index(g.CursorCol, g.CursorRow)
-		if g.cellAt(idx).Width == CellWidthContinuation {
-			g.CursorCol--
-		}
-	}
 }
 
 // scrollUpInternal scrolls the grid up by one line (internal, no lock)
@@ -786,7 +721,7 @@ func (g *Grid) scrollUpInternalWithBg(bg Color) {
 func (g *Grid) ScrollUp(n int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for range n {
+	for range g.clampScroll(n) {
 		g.scrollUpRegion()
 	}
 }
@@ -801,9 +736,15 @@ func (g *Grid) ScrollUpWithBg(n int, bg Color) {
 // ScrollUpWithBgLocked is ScrollUpWithBg without locking; the caller must hold g.mu
 // (see LockBatch).
 func (g *Grid) ScrollUpWithBgLocked(n int, bg Color) {
-	for range n {
+	for range g.clampScroll(n) {
 		g.scrollUpRegionWithBg(bg)
 	}
+}
+
+// clampScroll bounds a scroll count to the region height: scrolling further
+// only blanks the region, which that many steps already do.
+func (g *Grid) clampScroll(n int) int {
+	return min(n, g.scrollBottom-g.scrollTop+1)
 }
 
 // scrollDownInternal scrolls the entire grid down by one line (internal, no lock)
@@ -855,7 +796,7 @@ func (g *Grid) scrollDownRegionWithBg(bg Color) {
 func (g *Grid) ScrollDown(n int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for range n {
+	for range g.clampScroll(n) {
 		g.scrollDownRegion()
 	}
 }
@@ -870,7 +811,7 @@ func (g *Grid) ScrollDownWithBg(n int, bg Color) {
 // ScrollDownWithBgLocked is ScrollDownWithBg without locking; the caller must hold g.mu
 // (see LockBatch).
 func (g *Grid) ScrollDownWithBgLocked(n int, bg Color) {
-	for range n {
+	for range g.clampScroll(n) {
 		g.scrollDownRegionWithBg(bg)
 	}
 }
@@ -948,6 +889,9 @@ func (g *Grid) displayCellLocked(col, row int) Cell {
 		r := g.history[histRow]
 		if col >= 0 && col < len(r.cells) {
 			return g.inflate(r.cells[col])
+		}
+		if col >= 0 && col < g.Cols {
+			return NewCell() // trimmed tail of a compacted scrollback row
 		}
 		return NewCellWithBg(g.eraseBg)
 	}
@@ -1030,10 +974,16 @@ func (g *Grid) selectionViewLocked() (active bool, sCol, sRow, eCol, eRow int) {
 		return false, 0, 0, 0, 0
 	}
 	sAbs, sC, eAbs, eC := g.normalizedSelectionLocked()
+	if g.selBlock {
+		sAbs, sC, eAbs, eC = blockBounds(sAbs, sC, eAbs, eC)
+	}
 	viewTop := g.viewTopAbsLocked()
 	sR, eR := sAbs-viewTop, eAbs-viewTop
 	if eR < 0 || sR >= g.Rows {
 		return false, 0, 0, 0, 0
+	}
+	if g.selBlock {
+		return true, sC, max(sR, 0), eC, min(eR, g.Rows-1)
 	}
 	if sR < 0 {
 		sR, sC = 0, 0
@@ -1061,7 +1011,7 @@ func (g *Grid) StartSelection(col, row int) {
 	col = clampInt(col, 0, g.Cols-1)
 	row = clampInt(row, 0, g.Rows-1)
 	abs := g.viewTopAbsLocked() + row
-	g.selectionActive = true
+	g.selectionActive, g.selBlock = true, false
 	g.selAnchorAbsRow, g.selAnchorCol = abs, col
 	g.selEndAbsRow, g.selEndCol = abs, col
 }
@@ -1095,7 +1045,7 @@ func (g *Grid) SetSelection(startCol, startRow, endCol, endRow int) {
 	endRow = clampInt(endRow, 0, g.Rows-1)
 
 	viewTop := g.viewTopAbsLocked()
-	g.selectionActive = true
+	g.selectionActive, g.selBlock = true, false
 	g.selAnchorAbsRow, g.selAnchorCol = viewTop+startRow, startCol
 	g.selEndAbsRow, g.selEndCol = viewTop+endRow, endCol
 }
@@ -1121,11 +1071,15 @@ func (g *Grid) SelectWordAt(col, row int) {
 	row = clampInt(row, 0, g.Rows-1)
 	abs := g.viewTopAbsLocked() + row
 	r := g.rowAtAbsLocked(abs)
-	if r == nil || len(r.cells) == 0 {
+	if r == nil {
 		return
 	}
 	if col >= len(r.cells) {
-		col = len(r.cells) - 1
+		// Past the content of a compacted scrollback row: a lone blank.
+		g.selectionActive, g.selBlock = true, false
+		g.selAnchorAbsRow, g.selAnchorCol = abs, col
+		g.selEndAbsRow, g.selEndCol = abs, col
+		return
 	}
 	// charAt resolves a column to its rune, mapping a continuation cell to its
 	// wide-char base.
@@ -1155,7 +1109,7 @@ func (g *Grid) SelectWordAt(col, row int) {
 	if r.cells[end].Width == CellWidthWide && end+1 < len(r.cells) {
 		end++
 	}
-	g.selectionActive = true
+	g.selectionActive, g.selBlock = true, false
 	g.selAnchorAbsRow, g.selAnchorCol = abs, start
 	g.selEndAbsRow, g.selEndCol = abs, end
 }
@@ -1189,7 +1143,7 @@ func (g *Grid) SelectLineAt(col, row int) {
 		}
 		last++
 	}
-	g.selectionActive = true
+	g.selectionActive, g.selBlock = true, false
 	g.selAnchorAbsRow, g.selAnchorCol = first, 0
 	g.selEndAbsRow, g.selEndCol = last, g.Cols-1
 }
@@ -1222,6 +1176,10 @@ func (g *Grid) isSelectedLocked(col, row int) bool {
 	}
 	sRow, sCol, eRow, eCol := g.normalizedSelectionLocked()
 	abs := g.viewTopAbsLocked() + row
+	if g.selBlock {
+		sRow, sCol, eRow, eCol = blockBounds(sRow, sCol, eRow, eCol)
+		return abs >= sRow && abs <= eRow && col >= sCol && col <= eCol
+	}
 	if abs < sRow || abs > eRow {
 		return false
 	}
@@ -1249,47 +1207,10 @@ func (g *Grid) SelectedText() string {
 		return ""
 	}
 	sRow, sCol, eRow, eCol := g.normalizedSelectionLocked()
-
-	var out strings.Builder
-	var line strings.Builder
-	for abs := sRow; abs <= eRow; abs++ {
-		r := g.rowAtAbsLocked(abs)
-		if r == nil {
-			continue
-		}
-		colStart := 0
-		colEnd := len(r.cells) - 1
-		if abs == sRow {
-			colStart = clampInt(sCol, 0, len(r.cells)-1)
-		}
-		if abs == eRow {
-			colEnd = clampInt(eCol, 0, len(r.cells)-1)
-		}
-		for col := colStart; col <= colEnd; col++ {
-			if r.cells[col].Width == CellWidthContinuation {
-				continue
-			}
-			cell := g.inflate(r.cells[col])
-			ch := cell.Char
-			if ch == 0 {
-				ch = ' '
-			}
-			line.WriteRune(ch)
-			for _, cm := range cell.Combining {
-				line.WriteRune(cm)
-			}
-		}
-		softWrapped := r.flags&RowSoftWrapped != 0 && abs < eRow
-		if !softWrapped {
-			// Hard line end (or end of selection): trim padding, flush.
-			out.WriteString(strings.TrimRight(line.String(), " "))
-			line.Reset()
-			if abs < eRow {
-				out.WriteByte('\n')
-			}
-		}
+	if g.selBlock {
+		return g.blockTextLocked(sRow, sCol, eRow, eCol)
 	}
-	return strings.TrimRight(out.String(), "\n")
+	return g.linearTextLocked(sRow, sCol, eRow, eCol)
 }
 
 func clampInt(value, min, max int) int {
@@ -1545,11 +1466,9 @@ func (g *Grid) InsertCharsLocked(n int) {
 		}
 	}
 
-	// Check if shifting would break a wide character at the end
-	// If the last cell that would be kept is a wide char start, it would lose its continuation
-	if g.Cols-n >= 0 && g.Cols-n < g.Cols {
-		idx := g.index(g.Cols-n, g.CursorRow)
-		if idx >= 0 && idx < g.Cols*g.Rows && g.cellAt(idx).Width == CellWidthWide {
+	// A wide start shifted into the last column would lose its continuation.
+	if last := g.Cols - n - 1; last >= g.CursorCol {
+		if idx := g.index(last, g.CursorRow); g.cellAt(idx).Width == CellWidthWide {
 			g.putCell(idx, NewCellWithBg(g.eraseBg))
 		}
 	}
@@ -1597,7 +1516,7 @@ func (g *Grid) DeleteLinesWithBgLocked(n int, bg Color) {
 		for col := 0; col < g.Cols; col++ {
 			g.moveCell(g.index(col, row), g.index(col, row+n))
 		}
-		g.rows[row].flags = g.rows[row].flags&^RowSoftWrapped | g.rows[row+n].flags&RowSoftWrapped
+		g.rows[row].flags = g.rows[row].flags&^rowWrapFlags | g.rows[row+n].flags&rowWrapFlags
 	}
 
 	// Clear bottom n lines of the scroll region with background color
@@ -1641,7 +1560,7 @@ func (g *Grid) InsertLinesWithBgLocked(n int, bg Color) {
 		for col := 0; col < g.Cols; col++ {
 			g.moveCell(g.index(col, row), g.index(col, row-n))
 		}
-		g.rows[row].flags = g.rows[row].flags&^RowSoftWrapped | g.rows[row-n].flags&RowSoftWrapped
+		g.rows[row].flags = g.rows[row].flags&^rowWrapFlags | g.rows[row-n].flags&rowWrapFlags
 	}
 
 	// Clear n lines at cursor position with background color
@@ -1652,21 +1571,39 @@ func (g *Grid) InsertLinesWithBgLocked(n int, bg Color) {
 
 // Resize resizes the grid
 func (g *Grid) Resize(cols, rows int) {
+	g.ResizeTracking(cols, rows)
+}
+
+// Point is an active-screen position (0-based), e.g. a saved cursor.
+type Point struct{ Col, Row int }
+
+// ResizeTracking is Resize that also remaps pts (active-screen positions such
+// as DECSC / 1049 saved cursors) so each keeps pointing at the same content
+// after reflow, exactly as the live cursor does.
+func (g *Grid) ResizeTracking(cols, rows int, pts ...*Point) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if cols == g.Cols && rows == g.Rows {
+	if cols < 1 || rows < 1 || (cols == g.Cols && rows == g.Rows) {
 		return
 	}
-	g.wrapPending = false
-	// Reflow rebuilds the history+screen continuum, invalidating absolute
-	// selection anchors; clearing on resize is the documented rule.
-	g.selectionActive = false
-
-	// The main screen reflows wrapped lines to the new width; the alternate
-	// screen (no scrollback) clamps/truncates, since TUI apps repaint on resize.
-	if g.maxScroll > 0 {
-		g.reflow(cols, rows)
+	g.freeCells = g.freeCells[:0]
+	if !g.noReflow {
+		if cols == g.Cols {
+			g.resizeRows(rows, pts)
+			return
+		}
+		// Reflow rebuilds the history+screen continuum, invalidating absolute
+		// selection anchors; clearing on resize is the documented rule.
+		g.selectionActive = false
+		g.reflow(cols, rows, pts)
 		return
+	}
+	// The alternate screen clamps/truncates, since TUI apps repaint on resize.
+	g.wrapPending = false
+	g.selectionActive = false
+	for _, p := range pts {
+		p.Col = clampInt(p.Col, 0, cols-1)
+		p.Row = clampInt(p.Row, 0, rows-1)
 	}
 
 	// Track if scroll region was full-screen before resize
@@ -1710,7 +1647,7 @@ func (g *Grid) Resize(cols, rows int) {
 	oldRows := g.Rows
 	g.Cols = cols
 	g.Rows = rows
-	g.tabStops = nil // rebuilt lazily at the new width
+	g.resizeTabStops(cols)
 
 	// Smart scroll region handling
 	if wasFullScreen {
@@ -1815,6 +1752,9 @@ func (g *Grid) EraseCharsLocked(n int) {
 	g.fillSpan(g.CursorRow, startCol, endCol, g.eraseBg)
 }
 
+// maxRepeat caps REP like xterm.
+const maxRepeat = 65535
+
 // RepeatChar repeats the last written character n times. Reuses the normal
 // write path so wide chars get their continuation cells and wrap/soft-wrap
 // behave exactly as if the app had re-sent the character.
@@ -1828,7 +1768,7 @@ func (g *Grid) RepeatChar(n int) {
 // (see LockBatch).
 func (g *Grid) RepeatCharLocked(n int) {
 	sr := g.styles.ref(g.lastStyle)
-	for range n {
+	for range min(n, maxRepeat, g.Rows*g.Cols) {
 		g.writeCharLocked(g.lastChar, &sr, g.lastLink)
 	}
 	g.styles.done(sr)

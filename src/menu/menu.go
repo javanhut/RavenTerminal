@@ -69,6 +69,9 @@ const (
 	InputPanelWidth
 	// Shell PATH directory input state
 	InputShellPath
+	InputScrollback
+	InputOpacity
+	InputNotifyAfter
 )
 
 // MenuItem represents a menu item
@@ -294,6 +297,9 @@ func (m *Menu) buildBasicMenu() {
 		{Label: "Restore Session", IsToggle: true, Toggled: m.Config.RestoreSession},
 		{Label: "Show sudo fingerprint modal", IsToggle: true, Toggled: m.Config.FingerprintSudo},
 		{Label: "  sudo asks for a finger only when Settings > Security > Approve sudo is on", Disabled: true},
+		{Label: "Bell: " + m.Config.BellMode()},
+		{Label: "Desktop Notifications", IsToggle: true, Toggled: m.Config.Notifications},
+		{Label: "Notify Commands After: " + itoa(m.Config.NotifyCommandAfter) + "s"},
 		{Label: "Scripts..."},
 		{Label: "Commands (" + itoa(len(m.Config.Commands)) + ")..."},
 		{Label: "Aliases (" + itoa(len(m.Config.Aliases)) + ")..."},
@@ -324,6 +330,11 @@ func (m *Menu) buildAppearanceMenu() {
 		{Label: "Font Size: " + formatFloat(m.Config.FontSize)},
 		{Label: "Cursor Style: " + cursorStyle},
 		{Label: "Cursor Blink", IsToggle: true, Toggled: m.Config.Appearance.CursorBlink},
+		{Label: "Ligatures", IsToggle: true, Toggled: m.Config.Appearance.Ligatures},
+		{Label: "Prompt Marks Gutter", IsToggle: true, Toggled: m.Config.Appearance.MarksGutter},
+		{Label: "Reduced Motion", IsToggle: true, Toggled: m.Config.Appearance.ReducedMotion},
+		{Label: "Scrollback Lines: " + itoa(m.Config.Scrollback())},
+		{Label: "Background Opacity: " + itoa(int(m.Config.Opacity()*100+0.5)) + "%"},
 		{Label: "Panel Width: " + formatFloat(panelWidth) + "%"},
 		{Label: "Prompt Style: " + promptStyle},
 		{Label: "Prompt Options..."},
@@ -834,6 +845,33 @@ func (m *Menu) handleMainSelect() {
 		m.Config.Appearance.CursorBlink = !m.Config.Appearance.CursorBlink
 		m.rebuildCurrent()
 		m.StatusMessage = "Updated (save to persist)"
+	case label == "Ligatures":
+		m.Config.Appearance.Ligatures = !m.Config.Appearance.Ligatures
+		m.rebuildCurrent()
+		m.StatusMessage = "Updated (save to persist)"
+	case label == "Prompt Marks Gutter":
+		m.Config.Appearance.MarksGutter = !m.Config.Appearance.MarksGutter
+		m.rebuildCurrent()
+		m.StatusMessage = "Updated (save to persist)"
+	case label == "Reduced Motion":
+		m.Config.Appearance.ReducedMotion = !m.Config.Appearance.ReducedMotion
+		m.rebuildCurrent()
+		m.StatusMessage = "Updated (save to persist)"
+	case strings.HasPrefix(label, "Scrollback Lines:"):
+		m.startInputWithValue(InputScrollback, "Scrollback lines (0-1000000):", itoa(m.Config.Scrollback()))
+	case strings.HasPrefix(label, "Background Opacity:"):
+		m.startInputWithValue(InputOpacity, "Background opacity (10-100%):", itoa(int(m.Config.Opacity()*100+0.5)))
+	case strings.HasPrefix(label, "Bell:"):
+		next := map[string]string{"visual": "attention", "attention": "none", "none": "visual"}
+		m.Config.Bell = next[m.Config.BellMode()]
+		m.rebuildCurrent()
+		m.StatusMessage = "Updated (save to persist)"
+	case label == "Desktop Notifications":
+		m.Config.Notifications = !m.Config.Notifications
+		m.rebuildCurrent()
+		m.StatusMessage = "Updated (save to persist)"
+	case strings.HasPrefix(label, "Notify Commands After:"):
+		m.startInputWithValue(InputNotifyAfter, "Notify when a command runs at least (seconds, 0 = never):", itoa(m.Config.NotifyCommandAfter))
 	case label == "Restore Session":
 		m.Config.RestoreSession = !m.Config.RestoreSession
 		m.rebuildCurrent()
@@ -1452,6 +1490,24 @@ func (m *Menu) HandleEnter() bool {
 		m.Config.Appearance.PanelWidthPercent = pw
 		m.StatusMessage = "Panel width updated (save to persist)"
 		m.rebuildCurrent()
+
+	case InputScrollback, InputOpacity, InputNotifyAfter:
+		n, err := strconv.Atoi(strings.TrimSuffix(strings.TrimSpace(value), "%"))
+		if err != nil {
+			m.StatusMessage = "Invalid number"
+			m.rebuildCurrent()
+			break
+		}
+		switch m.InputState {
+		case InputScrollback:
+			m.Config.ScrollbackLines = min(max(n, 0), 1_000_000)
+		case InputOpacity:
+			m.Config.Appearance.BackgroundOpacity = float32(min(max(n, 10), 100)) / 100
+		case InputNotifyAfter:
+			m.Config.NotifyCommandAfter = max(n, 0)
+		}
+		m.StatusMessage = "Updated (save to persist)"
+		m.rebuildCurrent()
 	}
 
 	if !m.InputActive {
@@ -1940,6 +1996,12 @@ func (m *Menu) inputStateName() string {
 		return "font_size"
 	case InputPanelWidth:
 		return "panel_width"
+	case InputScrollback:
+		return "scrollback"
+	case InputOpacity:
+		return "opacity"
+	case InputNotifyAfter:
+		return "notify_after"
 	default:
 		return "unknown"
 	}

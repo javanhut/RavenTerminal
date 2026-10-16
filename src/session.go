@@ -25,36 +25,68 @@ func sessionPath() string {
 // file just means "no session to restore" — never an error the user has to
 // deal with, since the fallback (one fresh tab) is always fine.
 func loadSession() session {
-	data, err := os.ReadFile(sessionPath())
+	s, err := readSession(sessionPath())
 	if err != nil {
-		return session{}
-	}
-	var s session
-	if err := json.Unmarshal(data, &s); err != nil {
 		return session{}
 	}
 	return s
 }
 
+func readSession(path string) (session, error) {
+	var s session
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return s, err
+	}
+	err = json.Unmarshal(data, &s)
+	return s, err
+}
+
+// writeSession replaces path atomically: a unique temp file in the same
+// directory is written, synced and renamed over it, so a crash or a
+// concurrent save never leaves a truncated or interleaved session.
+func writeSession(path string, s session) error {
+	data, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".session-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	_, err = f.Write(data)
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		os.Remove(tmp)
+	}
+	return err
+}
+
 // saveSession persists the current tab layout, best-effort. Directories that
 // no longer exist are dropped at restore time, not here, so a temporarily
-// unmounted path still comes back if it returns.
-//
-// ponytail: written once, on clean exit. A kill -9 loses the session; move
-// this to the tab add/remove paths if that turns out to matter.
+// unmounted path still comes back if it returns. It runs on every clean
+// shutdown, including SIGTERM/SIGHUP/SIGINT.
 func (a *App) saveSession() {
 	layouts := a.tabManager.Layouts()
 	if len(layouts) == 0 {
 		return
 	}
-	data, err := json.MarshalIndent(session{
+	_ = writeSession(sessionPath(), session{
 		Tabs:        layouts,
 		ActiveIndex: a.tabManager.ActiveIndex(),
-	}, "", "  ")
-	if err != nil {
-		return
-	}
-	_ = config.WriteFileAtomic(sessionPath(), data)
+	})
 }
 
 // restoredTabManager builds the tab manager, reopening the previous session

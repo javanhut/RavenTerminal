@@ -10,16 +10,15 @@ Each tab can contain up to 16 panes arranged in a tree structure. Panes can be s
 
 | Keybinding | Action |
 |------------|--------|
-| Ctrl+Shift+V | Split current pane vertically (side by side) |
-| Ctrl+Shift+H | Split current pane horizontally (stacked) |
+| Leader+D (Ctrl+Shift+D / Super+D) | Split current pane vertically (side by side) |
+| Leader+Shift+D (Ctrl+Shift+Alt+D / Super+Shift+D) | Split current pane horizontally (stacked) |
 | Ctrl+Shift+W | Close current pane |
-| Shift+Tab | Cycle to next pane |
 | Ctrl+Shift+] | Focus next pane |
 | Ctrl+Shift+[ | Focus previous pane |
 
 ## Split Types
 
-### Vertical Split (Ctrl+Shift+V)
+### Vertical Split (Leader+D)
 
 Creates a new pane to the right of the current pane. The current pane and the new pane share the space equally.
 
@@ -31,7 +30,7 @@ Creates a new pane to the right of the current pane. The current pane and the ne
 +---------------+---------------+
 ```
 
-### Horizontal Split (Ctrl+Shift+H)
+### Horizontal Split (Leader+Shift+D)
 
 Creates a new pane below the current pane. The current pane and the new pane share the space equally.
 
@@ -50,8 +49,8 @@ Raven Terminal supports nested splits, allowing you to create complex layouts. E
 ### Example: Vertical Split Inside Horizontal Split
 
 1. Start with a single pane
-2. Split horizontally (Ctrl+Shift+H) - creates top and bottom panes
-3. With the bottom pane active, split vertically (Ctrl+Shift+V)
+2. Split horizontally (Leader+Shift+D) - creates top and bottom panes
+3. With the bottom pane active, split vertically (Leader+D)
 
 Result:
 ```
@@ -64,9 +63,9 @@ Result:
 
 ### Example: Complex Grid Layout
 
-1. Split vertically (Ctrl+Shift+V) - creates left and right panes
-2. Split the left pane horizontally (Ctrl+Shift+H)
-3. Switch to the right pane and split horizontally (Ctrl+Shift+H)
+1. Split vertically (Leader+D) - creates left and right panes
+2. Split the left pane horizontally (Leader+Shift+D)
+3. Switch to the right pane and split horizontally (Leader+Shift+D)
 
 Result:
 ```
@@ -100,5 +99,5 @@ When you close a pane with Ctrl+Shift+W:
 - Use vertical splits when comparing files or monitoring multiple processes side by side
 - Use horizontal splits when you need wider terminal output (logs, tables)
 - Combine nested splits for dashboard-style layouts
-- Use Shift+Tab to quickly cycle through panes
+- Use Leader+] / Leader+[ to quickly cycle through panes
 - Combine with tabs to organize different workspaces

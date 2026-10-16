@@ -78,7 +78,7 @@ func (c *Config) writeZshInitScript() (string, error) {
 	e.WriteString("    fi\n")
 	e.WriteString("    builtin source " + zshQuote(initPath) + "\n")
 	e.WriteString("fi\n")
-	if err := os.WriteFile(filepath.Join(dir, ".zshenv"), []byte(e.String()), 0644); err != nil {
+	if err := writeIfChanged(filepath.Join(dir, ".zshenv"), []byte(e.String()), 0644); err != nil {
 		return "", err
 	}
 
@@ -92,7 +92,7 @@ func (c *Config) writeZshInitScript() (string, error) {
 	// isolation as init.fish).
 	if strings.TrimSpace(c.Scripts.Init) != "" {
 		userPath := filepath.Join(dir, "raven-user-init.zsh")
-		if err := os.WriteFile(userPath, []byte(c.Scripts.Init+"\n"), 0644); err == nil {
+		if err := writeIfChanged(userPath, []byte(c.Scripts.Init+"\n"), 0644); err == nil {
 			b.WriteString("# User init script (kept in its own file so a syntax error\n")
 			b.WriteString("# cannot break the rest of this script)\n")
 			b.WriteString("builtin source " + zshQuote(userPath) + "\n\n")
@@ -117,6 +117,7 @@ func (c *Config) writeZshInitScript() (string, error) {
 	b.WriteString("    printf '\\033]7;file://%s%s\\a' \"$_host\" \"$PWD\"\n")
 	b.WriteString("}\n\n")
 
+	b.WriteString(posixRavenFunctions)
 	b.WriteString(c.buildZshPromptFunction())
 
 	// Aliases (sorted for deterministic output).
@@ -155,7 +156,7 @@ func (c *Config) writeZshInitScript() (string, error) {
 		b.WriteString("export PATH\n")
 	}
 
-	if err := os.WriteFile(initPath, []byte(b.String()), 0644); err != nil {
+	if err := writeIfChanged(initPath, []byte(b.String()), 0644); err != nil {
 		return "", err
 	}
 	return initPath, nil
@@ -182,6 +183,10 @@ func (c *Config) buildZshPromptFunction() string {
 	b.WriteString("# Prompt (precmd hook; runs before every prompt like the bash version)\n")
 	b.WriteString("__raven_precmd() {\n")
 	b.WriteString("    local _status=$?\n")
+	b.WriteString("    if [[ -n $__raven_osc133_ran ]]; then\n")
+	b.WriteString("        printf '\\033]133;D;%s\\a' \"$_status\"\n")
+	b.WriteString("        __raven_osc133_ran=\n")
+	b.WriteString("    fi\n")
 
 	style := c.Prompt.Style
 	if style == "custom" {
@@ -253,10 +258,21 @@ func (c *Config) buildZshPromptFunction() string {
 		b.WriteString("    PS1=\"${_line1}\"$'\\n'\"${_line2}\"\n")
 	}
 
+	b.WriteString("    if [[ $PS1 != *'133;A'* ]]; then\n")
+	b.WriteString("        PS1=$'%{\\e]133;A\\a%}'\"$PS1\"$'%{\\e]133;B\\a%}'\n")
+	b.WriteString("    fi\n")
 	b.WriteString("    __raven_emit_osc7\n")
 	b.WriteString("}\n")
 	b.WriteString("if [[ -z ${precmd_functions[(r)__raven_precmd]} ]]; then\n")
 	b.WriteString("    precmd_functions+=(__raven_precmd)\n")
+	b.WriteString("fi\n")
+	b.WriteString("# OSC 133 C: the command line is about to run\n")
+	b.WriteString("__raven_osc133_preexec() {\n")
+	b.WriteString("    __raven_osc133_ran=1\n")
+	b.WriteString("    printf '\\033]133;C\\a'\n")
+	b.WriteString("}\n")
+	b.WriteString("if [[ -z ${preexec_functions[(r)__raven_osc133_preexec]} ]]; then\n")
+	b.WriteString("    preexec_functions+=(__raven_osc133_preexec)\n")
 	b.WriteString("fi\n")
 	return b.String()
 }

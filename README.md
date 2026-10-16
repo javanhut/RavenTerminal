@@ -8,11 +8,12 @@ implemented in-tree — there is no external terminal backend. Runs on Linux
 ## Features
 
 **Rendering**
-- OpenGL 4.1 GPU-accelerated text rendering with glyph atlases
-- Embedded Nerd Fonts, switchable at runtime: FiraCode, Hack, JetBrains Mono, Ubuntu Mono
-- Color emoji and system-font fallback for missing glyphs
-- 256-color and 24-bit true-color support
-- Built-in themes: `raven-blue`, `crow-black`, `magpie-black-white-grey`, `catppuccin-mocha`
+- OpenGL 4.1 GPU-accelerated text rendering with glyph atlases; redraws only when something changed
+- Embedded Nerd Fonts with real bold/italic faces, switchable at runtime: JetBrains Mono, Fira Code, Hack, Ubuntu Mono
+- Programming ligatures, grapheme clusters (ZWJ emoji, flags, combining marks, mode 2027), color emoji and system-font fallback
+- 256-color and 24-bit color, curly/dotted/dashed and colored underlines, overline, blink, reverse video (DECSCNM)
+- Themes, including `raven` (follows the RavenLinux desktop); translucent background (`background_opacity`)
+- Visual bell, OSC 9;4 progress bars and OSC 133 prompt marks drawn per pane, with a reduced-motion option
 
 **Window management**
 - Tabs with a left-side tab bar and per-tab shell processes
@@ -23,21 +24,33 @@ implemented in-tree — there is no external terminal backend. Runs on Linux
 - Optional session restore: reopen the previous run's tabs, splits, and working directories
 - Fullscreen toggle and font zoom
 - Leader-key shortcuts: Cmd on macOS, Super or Ctrl+Shift on Linux — plain Ctrl stays free for shell control characters, and Super+Ctrl is left to the compositor
+- Pane zoom, broadcast input to every pane, and a command palette over every action, theme and font
+- Remote control over a Unix socket: `raven-terminal @ ls | new-tab | split | focus-pane | send-text | get-text ...`
+- CLI: `-e CMD`, `--hold`, `-d DIR`, `-T TITLE`, `--class`/`--app-id`; the window title follows OSC 0/2
 
 **Terminal**
-- Scrollback buffer with mouse-wheel and keyboard scrolling
+- Scrollback with reflow on resize, mouse-wheel and keyboard scrolling
 - Find in scrollback (Cmd/Super+Shift+F) with smart-case matching across soft-wrapped lines
-- Mouse: drag to select-and-copy, right-click to paste, Ctrl+right-click to open URLs
+- Hints mode (URLs, paths, `file:line`, hashes, IPs), vi copy mode with block selection, scrollback in a pager
+- Mouse: drag to select-and-copy (also the primary selection), Alt+drag block selection, middle-click paste, Ctrl+right-click to open URLs
+- Mouse reporting for applications: X10/normal/button/any-motion, SGR, SGR-pixels (1016), urxvt and UTF-8 encodings, horizontal wheel
 - Clickable OSC 8 hyperlinks, underlined on hover
-- Kitty keyboard protocol
-- Inline images via Kitty graphics and Sixel, anchored to scrollback so they scroll with content
+- Keyboard: kitty keyboard protocol (all flags), modifyOtherKeys, xterm modified keys, IME composition (preedit) at the cursor
+- Inline images via Kitty graphics (source rectangles, offsets, relative and Unicode-placeholder placements) and Sixel, anchored to scrollback
+- Synchronized output (2026), in-band resize (2048), color-scheme reports (2031), left/right margins (DECSLRM), bracketed paste, focus reports
+- Queries answered truthfully: DA1/DA2/DA3, XTVERSION, DECRQM, DECRQSS, XTGETTCAP (matching the bundled `xterm-raven` terminfo), OSC 4/10/11/12 colors, OSC 22 pointer shapes
+- OSC 52 clipboard and primary selection (reading is opt-in), OSC 7 working directory, OSC 1337 SetUserVar
+- Desktop notifications (OSC 9, 99, 777) and a notification when a long command finishes in the background
+- Drag and drop files onto a pane to paste their shell-quoted paths
 - RavenLinux sudo fingerprint prompt shown as a modal (Settings > Basic > Show sudo fingerprint modal; Esc, × or Use Password falls back to the password; Authentication Settings opens the settings menu). The terminal only presents the prompt: sudo asks for a finger when RavenLinux's Settings > Security > Approve sudo is on
 
 **Shell integration**
 - In-terminal settings menu persisted to TOML
 - Customizable prompt (minimal / simple / full / custom) with language and VCS detection
 - Custom commands, shell aliases, and init / pre-prompt scripts
-- Built-in commands: `keybindings`, `list-fonts`, `change-font <name>`
+- Shell integration for bash, zsh, fish and ravenshell with OSC 133 marks: jump between prompts, copy the last command's output, select a command's output with Leader+click
+- Shell commands: `keybindings`, `list-fonts`, `change-font <name>` (also `raven-terminal --keybindings` / `--list-fonts`)
+- `config.toml` reloads live
 
 **Web search panel** (optional, off by default)
 - DuckDuckGo search with in-terminal page previews
@@ -96,7 +109,9 @@ including remote uninstallation.
 
 Launch `raven-terminal` from your application menu or the command line.
 
-App shortcuts use a leader key — Cmd on macOS, Super or Ctrl+Shift on Linux:
+App shortcuts use a leader key — Cmd on macOS, Super or Ctrl+Shift on Linux —
+so plain Ctrl, Alt and Shift chords always reach the running program.
+Leader+Shift is Super+Shift, or Ctrl+Shift+Alt with the Ctrl+Shift leader:
 
 | Shortcut | Action |
 | --- | --- |
@@ -105,9 +120,23 @@ App shortcuts use a leader key — Cmd on macOS, Super or Ctrl+Shift on Linux:
 | Leader+T / Leader+X | New / close tab |
 | Leader+D / Leader+Shift+D | Split pane vertically / horizontally |
 | Leader+W | Close pane |
+| Leader+] / Leader+[ | Next / previous pane |
+| Leader+Tab / Leader+Shift+Tab | Next / previous tab |
+| Leader+C / Leader+V | Copy / paste |
+| Leader+P | Command palette (actions, settings, themes, fonts) |
+| Leader+H | Hints: pick a URL, path or hash on screen |
+| Leader+Space | Copy mode (vi keys over the scrollback) |
+| Leader+Up / Leader+Down | Previous / next shell prompt |
+| Leader+Shift+C | Copy the last command's output |
+| Leader+Z / Leader+B | Zoom pane / broadcast input to all panes |
+| Leader+Shift+H | Scrollback in a pager |
+| Middle-click / Alt+drag | Paste PRIMARY / block selection |
+| Leader+click on output | Select a command's whole output |
 | Leader+F | Toggle web search panel (when enabled) |
 | Leader+A | Toggle AI chat panel (when enabled) |
-| Shift+Enter | Toggle fullscreen |
+| Leader+Enter / F11 | Toggle fullscreen |
+| Leader+R | Pane resize mode |
+| Leader+Q | Quit |
 | Leader+= / Leader+- / Leader+0 | Zoom in / out / reset |
 
 The full reference is in [docs/keybindings.md](docs/keybindings.md).

@@ -18,8 +18,8 @@ func TestDeviceAttributes(t *testing.T) {
 	term := NewTerminal(10, 1)
 	out := captureResponses(term)
 	term.Process([]byte("\x1b[c"))
-	if string(*out) != "\x1b[?62;22c" {
-		t.Fatalf("DA reply = %q, want %q", string(*out), "\x1b[?62;22c")
+	if string(*out) != "\x1b[?62;4;22c" {
+		t.Fatalf("DA reply = %q, want %q", string(*out), "\x1b[?62;4;22c")
 	}
 }
 

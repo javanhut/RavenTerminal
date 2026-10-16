@@ -14,6 +14,7 @@ type Snapshot struct {
 
 	// Normalized selection bounds (start <= end). Valid only when SelActive.
 	SelActive                          bool
+	selBlock                           bool
 	selSCol, selSRow, selECol, selERow int
 
 	// Dirty reports whether anything changed versus the previous snapshot
@@ -30,6 +31,9 @@ func (s *Snapshot) Selected(col, row int) bool {
 	}
 	if row < s.selSRow || row > s.selERow {
 		return false
+	}
+	if s.selBlock {
+		return col >= s.selSCol && col <= s.selECol
 	}
 	if s.selSRow == s.selERow {
 		return col >= s.selSCol && col <= s.selECol
@@ -121,6 +125,7 @@ func (g *Grid) Snapshot(prev *Snapshot) *Snapshot {
 		dirty = true
 	}
 	s.SelActive = selActive
+	s.selBlock = g.selBlock
 	s.selSCol, s.selSRow, s.selECol, s.selERow = sSCol, sSRow, sECol, sERow
 
 	s.Dirty = dirty
@@ -140,6 +145,14 @@ func (g *Grid) Snapshot(prev *Snapshot) *Snapshot {
 		sSCol:        sSCol, sSRow: sSRow, sECol: sECol, sERow: sERow,
 	}
 	return s
+}
+
+// MarkScreenDirtyLocked flags every on-screen row as changed, for state drawn
+// over the grid (images) that cell writes do not track. Caller holds g.mu.
+func (g *Grid) MarkScreenDirtyLocked() {
+	for _, r := range g.rows {
+		r.flags |= RowDirty
+	}
 }
 
 // RedrawNeeded reports whether the visible state (content, cursor, scroll

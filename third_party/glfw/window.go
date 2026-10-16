@@ -185,6 +185,7 @@ type Window struct {
 	fCharHolder        func(w *Window, char rune)
 	fCharModsHolder    func(w *Window, char rune, mods ModifierKey)
 	fDropHolder        func(w *Window, names []string)
+	fPreeditHolder     func(w *Window, text string, cursorBytes int)
 }
 
 // Handle returns a *C.GLFWwindow reference (i.e. the GLFW window itself).

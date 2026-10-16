@@ -10,7 +10,17 @@ const (
 	RowSoftWrapped RowFlags = 1 << iota
 	// RowDirty marks a row whose contents changed since the last snapshot.
 	RowDirty
+	// RowWidePad marks a soft-wrapped row whose last cell is padding left by a
+	// wide character that did not fit; reflow drops it instead of keeping it
+	// as content.
+	RowWidePad
+	// RowHasCluster marks a row that may hold multi-rune grapheme clusters, so
+	// the grapheme table sweep can skip every other row.
+	RowHasCluster
 )
+
+// rowWrapFlags are the flags that describe how a row's content continues.
+const rowWrapFlags = RowSoftWrapped | RowWidePad
 
 // rowPoolMax bounds the recycled-row pool. Scrolling needs one row at a time
 // and ScrollUp(n) a handful, so a small cap keeps the pool useful without
@@ -24,6 +34,8 @@ const rowPoolMax = 64
 type Row struct {
 	cells []storedCell
 	flags RowFlags
+	mark  MarkKind // OSC 133 marks (marks.go)
+	exit  int32
 }
 
 // newRow allocates a blank row of the given width (default style).
@@ -43,18 +55,29 @@ func (g *Grid) blankRow(bg Color) *Row { return g.blankRowN(g.Cols, bg) }
 // style. Use this (not blankRow) when g.Cols may not yet match the target width,
 // e.g. mid-resize before g.Cols is updated.
 func (g *Grid) blankRowN(cols int, bg Color) *Row {
+	var r *Row
 	if n := len(g.freeRows); n > 0 {
-		r := g.freeRows[n-1]
-		if len(r.cells) == cols {
-			g.freeRows = g.freeRows[:n-1]
-			g.fillRow(r, bg) // refs already released by recycleRow
-			return r
-		}
-		// A resize changed the width, so every pooled row is the wrong size.
-		g.freeRows = g.freeRows[:0]
+		r = g.freeRows[n-1]
+		g.freeRows = g.freeRows[:n-1]
+	} else {
+		r = &Row{}
 	}
-	r := &Row{cells: make([]storedCell, cols)}
-	g.fillRow(r, bg)
+	if len(r.cells) != cols {
+		r.cells = nil
+		if n := len(g.freeCells); n > 0 {
+			if len(g.freeCells[n-1]) == cols {
+				r.cells = g.freeCells[n-1]
+				g.freeCells = g.freeCells[:n-1]
+			} else {
+				// A resize changed the width: every pooled array is the wrong size.
+				g.freeCells = g.freeCells[:0]
+			}
+		}
+		if r.cells == nil {
+			r.cells = make([]storedCell, cols)
+		}
+	}
+	g.fillRow(r, bg) // refs already released by recycleRow
 	return r
 }
 
@@ -69,6 +92,7 @@ func (g *Grid) fillRow(r *Row, bg Color) {
 	}
 	g.styles.release(id) // drop owner ref; cells hold len(cells) refs
 	r.flags = RowDirty
+	r.mark, r.exit = 0, 0
 }
 
 // fillSpan blanks cells [col0, col1) of a row at the given background (BCE).
@@ -95,7 +119,7 @@ func (g *Grid) fillSpan(row, col0, col1 int, bg Color) {
 	// on the no-op fast path below, since a stale mark makes SelectedText and
 	// reflow glue this row to its successor.
 	if col1 == g.Cols {
-		g.rows[row].flags &^= RowSoftWrapped
+		g.rows[row].flags &^= rowWrapFlags
 	}
 	cells := g.rows[row].cells
 	st := styleOf(NewCellWithBg(bg))
@@ -153,6 +177,42 @@ func (g *Grid) recycleRow(r *Row) {
 	}
 }
 
+// historyArenaChunk is how many cells compacted scrollback rows carve from one
+// allocation.
+const historyArenaChunk = 1 << 14
+
+// compactForHistory trims a hard-ended row's trailing default blanks as it
+// enters scrollback, moving the content into a right-sized slice carved from a
+// shared arena and returning the full-width array to the pool. Short lines
+// then cost their length, not the terminal width, which is what makes a large
+// scrollback affordable. Soft-wrapped rows stay full width.
+func (g *Grid) compactForHistory(r *Row) {
+	if r.flags&RowSoftWrapped != 0 {
+		return
+	}
+	n := len(r.cells)
+	for n > 0 && r.cells[n-1] == blankStored {
+		n--
+	}
+	if n == len(r.cells) {
+		return
+	}
+	full := r.cells
+	if n == 0 {
+		r.cells = nil
+	} else {
+		if len(g.arena) < n {
+			g.arena = make([]storedCell, max(historyArenaChunk, n))
+		}
+		r.cells = g.arena[:n:n]
+		g.arena = g.arena[n:]
+		copy(r.cells, full)
+	}
+	if len(full) == g.Cols && len(g.freeCells) < rowPoolMax {
+		g.freeCells = append(g.freeCells, full)
+	}
+}
+
 // releaseRow releases all style references held by a row (used when a row is
 // dropped from history). The row itself becomes garbage. Adjacent cells sharing
 // one style id are released as a single run — a uniformly-styled row (the
@@ -176,6 +236,7 @@ func (g *Grid) releaseRow(r *Row) {
 func (g *Grid) pushHistory(r *Row) {
 	if g.maxScroll <= 0 {
 		g.recycleRow(r)
+		g.scrolledOut++
 		return
 	}
 	for len(g.history) >= g.maxScroll {
@@ -184,6 +245,7 @@ func (g *Grid) pushHistory(r *Row) {
 		g.history = g.history[1:]
 		g.scrolledOut++ // a row left the top of history (for image anchoring)
 	}
+	g.compactForHistory(r)
 
 	// Trimming reslices the window forward, so it walks toward the end of its
 	// backing array; once it arrives, append allocates a fresh array and copies
@@ -192,9 +254,11 @@ func (g *Grid) pushHistory(r *Row) {
 	// than the scrolling itself. Slide the window back to the front of a
 	// double-width buffer instead: same one memmove, but the array is reused
 	// forever, so steady-state scrolling allocates nothing.
+	// The buffer grows geometrically up to that double width, so a large
+	// configured scrollback costs nothing until it is actually used.
 	if len(g.history) == cap(g.history) {
-		if cap(g.histBuf) < 2*g.maxScroll {
-			g.histBuf = make([]*Row, 2*g.maxScroll)
+		if want := min(max(2*len(g.history), 64), 2*g.maxScroll); cap(g.histBuf) < want {
+			g.histBuf = make([]*Row, want)
 		}
 		g.histBuf = g.histBuf[:cap(g.histBuf)]
 		n := copy(g.histBuf, g.history)

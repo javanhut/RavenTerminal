@@ -79,3 +79,18 @@ func TestTruncateToCellsRespectsBudget(t *testing.T) {
 		}
 	}
 }
+
+func TestHelpPanelListsOverlayBindings(t *testing.T) {
+	want := []string{"Jump to previous / next prompt", "Copy last command output", "Hints", "Copy mode", "Command palette", "Zoom focused pane", "Broadcast input to all panes", "Scrollback in pager"}
+	have := map[string]bool{}
+	for _, s := range buildHelpSections() {
+		for _, b := range s.bindings {
+			have[b[1]] = true
+		}
+	}
+	for _, w := range want {
+		if !have[w] {
+			t.Errorf("help panel lacks %q", w)
+		}
+	}
+}

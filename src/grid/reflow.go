@@ -3,30 +3,74 @@ package grid
 // Reflow rewraps soft-wrapped lines when the terminal is resized, so wrapped
 // output reflows to the new width instead of being truncated. Driven by the
 // per-row RowSoftWrapped flag (set at auto-wrap time in WriteChar).
+//
+// Stored cells move from the old rows into the new ones as-is, carrying their
+// style references with them: nothing is inflated or re-interned, and rows and
+// cells are carved from a few large slabs, so a resize is O(cells) with O(1)
+// allocations.
 
-// logicalLine is a wrapped paragraph: the concatenation of one or more rows
-// where every row except the last was soft-wrapped.
-type logicalLine struct {
-	cells   []Cell // inflated content
-	hardEnd bool   // true if the line ended on a hard newline (not a wrap)
+// reflowTracker follows one position (cursor, history boundary, saved point)
+// through a reflow.
+type reflowTracker struct {
+	abs, col       int  // old absolute row (index into seq) and column
+	pend           bool // cursor with a pending wrap: sits one past col
+	off            int  // offset within its logical line
+	newAbs, newCol int
+	found          bool
+	newPend        bool
+}
+
+// reflowAlloc carves rows and cells for a reflow out of shared slabs.
+type reflowAlloc struct {
+	rows  []Row
+	cells []storedCell
+}
+
+func (a *reflowAlloc) row(n int) *Row {
+	if len(a.rows) == 0 {
+		a.rows = make([]Row, 1024)
+	}
+	r := &a.rows[0]
+	a.rows = a.rows[1:]
+	if n > 0 {
+		if len(a.cells) < n {
+			a.cells = make([]storedCell, max(1<<16, n))
+		}
+		r.cells = a.cells[:n:n]
+		a.cells = a.cells[n:]
+	}
+	return r
+}
+
+func isBlankStored(sc storedCell) bool {
+	return sc.Style == 0 && sc.Grapheme == 0 && sc.Link == 0 &&
+		(sc.Char == ' ' || sc.Char == 0) && sc.Width == CellWidthNormal
+}
+
+// effLen is the number of content cells in a source row (a wide-char pad at
+// the end of a soft-wrapped row is not content).
+func effLen(r *Row) int {
+	n := len(r.cells)
+	if r.flags&RowSoftWrapped != 0 && r.flags&RowWidePad != 0 && n > 0 {
+		n--
+	}
+	return n
 }
 
 // reflow rebuilds the grid at (newCols,newRows), rewrapping soft-wrapped lines.
 // Caller holds g.mu. Used for the main screen; the alternate screen clamps.
-func (g *Grid) reflow(newCols, newRows int) {
+func (g *Grid) reflow(newCols, newRows int, pts []*Point) {
 	// 0. Trim fully-blank rows below the cursor. They are the unused area under
 	//    the shell prompt, not content: treating them as content pushes the real
 	//    content into scrollback on shrink and leaves a duplicated, stale copy
 	//    visible at the top after the next grow. Never trim a row that continues
 	//    a soft-wrapped line.
-	cursorAbsRow := len(g.history) + g.CursorRow
+	cursorAbs := len(g.history) + g.CursorRow
 	seq := make([]*Row, 0, len(g.history)+len(g.rows))
 	seq = append(seq, g.history...)
 	seq = append(seq, g.rows...)
 	keep := len(seq)
-	for keep-1 > cursorAbsRow &&
-		g.rowIsBlank(seq[keep-1]) &&
-		seq[keep-2].flags&RowSoftWrapped == 0 {
+	for keep-1 > cursorAbs && g.rowIsBlank(seq[keep-1]) && seq[keep-2].flags&RowSoftWrapped == 0 {
 		keep--
 	}
 	for _, r := range seq[keep:] {
@@ -34,154 +78,74 @@ func (g *Grid) reflow(newCols, newRows int) {
 	}
 	seq = seq[:keep]
 
-	// 1. Gather logical lines from history + active rows, tracking the cursor's
-	//    logical position AND the history/active boundary so both can be
-	//    restored afterward.
-	var lines []logicalLine
-	cur := logicalLine{}
-	cursorLine, cursorOffset := -1, 0
-	boundaryAbsRow := len(g.history) // first active row
-	boundaryLine, boundaryOffset := 0, 0
-
-	for absRow, r := range seq {
-		offsetInLine := len(cur.cells)
-		for _, sc := range r.cells {
-			cur.cells = append(cur.cells, g.inflate(sc))
-		}
-		if absRow == cursorAbsRow {
-			cursorLine = len(lines)
-			cursorOffset = offsetInLine + g.CursorCol
-		}
-		if absRow == boundaryAbsRow {
-			boundaryLine = len(lines)
-			boundaryOffset = offsetInLine
-		}
-		if r.flags&RowSoftWrapped == 0 {
-			cur.hardEnd = true
-			lines = append(lines, cur)
-			cur = logicalLine{}
-		}
-	}
-	if len(cur.cells) > 0 || cur.hardEnd {
-		lines = append(lines, cur)
+	trk := make([]reflowTracker, 2, 2+len(pts))
+	trk[0] = reflowTracker{abs: cursorAbs, col: g.CursorCol, pend: g.wrapPending && g.CursorCol == g.Cols-1}
+	trk[1] = reflowTracker{abs: len(g.history)}
+	for _, p := range pts {
+		trk = append(trk, reflowTracker{abs: len(g.history) + p.Row, col: p.Col})
 	}
 
-	// 2. Release all old style references; we rebuild fresh rows below.
-	for _, r := range seq {
-		g.releaseRow(r)
+	var alloc reflowAlloc
+	out := make([]*Row, 0, len(seq)+len(seq)/2+newRows)
+	for i := 0; i < len(seq); {
+		j := i
+		for j < len(seq)-1 && seq[j].flags&RowSoftWrapped != 0 {
+			j++
+		}
+		out = g.reflowLine(seq[i:j+1], i, newCols, trk, &alloc, out)
+		i = j + 1
+	}
+	// Positions on rows that were trimmed away (or never existed) land just
+	// past the content.
+	for k := range trk {
+		if !trk[k].found {
+			trk[k].newAbs, trk[k].newCol = len(out), min(trk[k].col, newCols-1)
+		}
 	}
 
-	// 3. Re-wrap each logical line into rows of newCols (wide chars never split).
-	var newSeq []*Row
-	var cursorNewAbsRow, cursorNewCol int
-	cursorFound := false
-	boundaryNewAbsRow := 0
-	boundaryFound := false
-	for li, ln := range lines {
-		trimLogicalTrailingBlanks(&ln)
-		segments := wrapCells(ln.cells, newCols)
-		for si, seg := range segments {
-			r := newRow(newCols)
-			for i, c := range seg {
-				g.putRowCell(r, i, c)
+	// Choose the active window. Keep the old history/active boundary where
+	// possible so resizing doesn't shuffle content between the screen and
+	// scrollback (a prompt at the top of the screen stays at the top); the
+	// boundary is only forced down when the rewrapped content needs more rows
+	// than the new screen has.
+	activeStart := max(trk[1].newAbs, len(out)-newRows, 0)
+	for len(out) < activeStart+newRows {
+		out = append(out, alloc.row(0))
+	}
+	active := make([]*Row, newRows)
+	for k := range newRows {
+		r := out[activeStart+k]
+		if len(r.cells) != newCols {
+			full := alloc.row(newCols).cells
+			n := copy(full, r.cells)
+			for c := n; c < newCols; c++ {
+				full[c] = blankStored
 			}
-			// Mark soft-wrapped unless this is the final segment of the line.
-			if si < len(segments)-1 {
-				r.flags |= RowSoftWrapped
-			}
-			// Locate the history/active boundary's new row.
-			if li == boundaryLine && !boundaryFound {
-				start := si * newCols
-				if boundaryOffset >= start && boundaryOffset < start+newCols || si == len(segments)-1 {
-					boundaryNewAbsRow = len(newSeq)
-					boundaryFound = true
-				}
-			}
-			// Locate the cursor's new row/col.
-			if li == cursorLine && !cursorFound {
-				start := si * newCols
-				if cursorOffset >= start && cursorOffset < start+newCols || si == len(segments)-1 {
-					cursorNewAbsRow = len(newSeq)
-					cursorNewCol = max(cursorOffset-start, 0)
-					if cursorNewCol >= newCols {
-						cursorNewCol = newCols - 1
-					}
-					cursorFound = true
-				}
-			}
-			newSeq = append(newSeq, r)
+			r.cells = full
 		}
-		// An empty hard line still occupies one row.
-		if len(segments) == 0 {
-			r := newRow(newCols)
-			if li == boundaryLine && !boundaryFound {
-				boundaryNewAbsRow = len(newSeq)
-				boundaryFound = true
-			}
-			if li == cursorLine && !cursorFound {
-				cursorNewAbsRow = len(newSeq)
-				cursorNewCol = 0
-				cursorFound = true
-			}
-			newSeq = append(newSeq, r)
+		r.flags |= RowDirty
+		active[k] = r
+	}
+	hist := out[:activeStart]
+	if drop := len(hist) - g.maxScroll; drop > 0 {
+		for k := range drop {
+			g.releaseRow(hist[k])
+			hist[k] = nil
 		}
+		hist = hist[drop:]
 	}
-
-	// 4. Choose the active window. Keep the old history/active boundary where
-	//    possible so resizing doesn't shuffle content between the screen and
-	//    scrollback (a prompt at the top of the screen stays at the top); the
-	//    boundary is only forced down when the rewrapped content needs more
-	//    rows than the new screen has. activeStart is the PRE-TRIM boundary:
-	//    front-trimming history below never moves it, so cursor math against
-	//    it is invariant to trimming.
-	activeStart := boundaryNewAbsRow
-	if !boundaryFound {
-		activeStart = len(newSeq) - newRows
-	}
-	if floor := len(newSeq) - newRows; activeStart < floor {
-		activeStart = floor
-	}
-	if activeStart < 0 {
-		activeStart = 0
-	}
-	// Pad with blank rows so the active region is exactly newRows tall.
-	for len(newSeq) < activeStart+newRows {
-		newSeq = append(newSeq, newRow(newCols))
-	}
-
-	// Compute the cursor's row within the active region now, using the pre-trim
-	// boundary. The found case anchors to its content row; the not-found
-	// fallback parks the cursor on the last active row.
-	cursorInActive := newRows - 1
-	if cursorFound {
-		cursorInActive = cursorNewAbsRow - activeStart
-	}
-
-	// Capture the active region as its own slice BEFORE trimming history, so the
-	// in-place front-trim below cannot alias or clobber the active rows.
-	active := append([]*Row(nil), newSeq[activeStart:activeStart+newRows]...)
-	histRows := newSeq[:activeStart]
-
-	// Trim history beyond the cap (releasing the dropped front rows).
-	if len(histRows) > g.maxScroll {
-		drop := len(histRows) - g.maxScroll
-		for i := range drop {
-			g.releaseRow(histRows[i])
-		}
-		histRows = histRows[drop:]
-	}
-
-	g.history = append([]*Row(nil), histRows...)
+	g.history = hist[:len(hist):len(hist)]
+	g.histBuf = nil
 	g.rows = active
 
-	// 5. Restore cursor (clamped to the active area).
-	g.CursorRow = max(cursorInActive, 0)
-	if g.CursorRow >= newRows {
-		g.CursorRow = newRows - 1
-	}
-	g.CursorCol = max(cursorNewCol, 0)
-	if g.CursorCol >= newCols {
-		g.CursorCol = newCols - 1
+	c := trk[0]
+	g.CursorRow = clampInt(c.newAbs-activeStart, 0, newRows-1)
+	g.CursorCol = clampInt(c.newCol, 0, newCols-1)
+	g.wrapPending = c.newPend && g.CursorRow == c.newAbs-activeStart
+	for k, p := range pts {
+		t := trk[2+k]
+		p.Row = clampInt(t.newAbs-activeStart, 0, newRows-1)
+		p.Col = clampInt(t.newCol, 0, newCols-1)
 	}
 
 	g.Cols = newCols
@@ -189,83 +153,150 @@ func (g *Grid) reflow(newCols, newRows int) {
 	g.scrollTop = 1
 	g.scrollBottom = newRows
 	g.scrollOffset = 0
-	g.tabStops = nil
-	g.wrapPending = false
-	// Rows were rebuilt from scratch; the next snapshot must re-copy fully.
+	g.resizeTabStops(newCols)
+	g.freeCells = g.freeCells[:0]
+	// Rows were rebuilt; the next snapshot must re-copy fully.
 	g.snapInvalid = true
 }
 
-// putRowCell writes an inflated Cell into a freshly-allocated row, interning its
-// style (the row's blank style at i is released first).
-func (g *Grid) putRowCell(r *Row, i int, c Cell) {
-	old := r.cells[i].Style
-	var gid uint32
-	if len(c.Combining) > 0 {
-		cl := append([]rune{c.Char}, c.Combining...)
-		gid = g.internGrapheme(cl)
-	}
-	r.cells[i] = storedCell{
-		Style:    g.styles.intern(styleOf(c)),
-		Grapheme: gid,
-		Char:     c.Char,
-		Width:    c.Width,
-		Link:     c.Link,
-	}
-	g.styles.release(old)
-}
-
-// wrapCells splits a logical line's cells into segments of at most cols,
-// never splitting a wide character across the boundary.
-func wrapCells(cells []Cell, cols int) [][]Cell {
-	if len(cells) == 0 {
-		return nil
-	}
-	var segs [][]Cell
-	i := 0
-	for i < len(cells) {
-		end := min(i+cols, len(cells))
-		// Don't split a wide char: if the last kept cell is a wide-char start,
-		// drop it to the next segment.
-		if end < len(cells) && end > i && cells[end-1].Width == CellWidthWide {
-			end--
+// reflowLine rewraps one logical line (src rows, the first at absolute index
+// base) into rows of newCols appended to out, mapping trackers on the way.
+func (g *Grid) reflowLine(src []*Row, base, newCols int, trk []reflowTracker, alloc *reflowAlloc, out []*Row) []*Row {
+	var mark MarkKind
+	var exit int32
+	var flags RowFlags
+	L := 0
+	for k, r := range src {
+		mark |= r.mark
+		if r.mark&markHasExit != 0 {
+			exit = r.exit
 		}
-		if end == i { // pathological (cols too small); force progress
-			end = i + 1
+		flags |= r.flags & RowHasCluster
+		for t := range trk {
+			if trk[t].abs == base+k {
+				trk[t].off = L + trk[t].col
+				if trk[t].pend {
+					trk[t].off++
+				}
+			}
 		}
-		seg := make([]Cell, end-i)
-		copy(seg, cells[i:end])
-		segs = append(segs, seg)
-		i = end
+		n := effLen(r)
+		if n < len(r.cells) {
+			g.styles.release(r.cells[n].Style) // dropped wide-char pad
+		}
+		L += n
 	}
-	return segs
-}
+	last := src[len(src)-1]
+	if last.flags&RowSoftWrapped == 0 {
+		// Trim trailing blanks of a hard-ended line (padding, not content), but
+		// never below the cursor: its cell stays so it reflows to the right row.
+		minL := 0
+		if c := trk[0]; c.abs >= base && c.abs < base+len(src) {
+			minL = c.off
+			if !c.pend {
+				minL++
+			}
+		}
+		for k := len(src) - 1; k >= 0 && L > minL; k-- {
+			r := src[k]
+			n := effLen(r)
+			blank := 0
+			for blank < n && L-blank > minL && isBlankStored(r.cells[n-1-blank]) {
+				blank++
+			}
+			L -= blank
+			if blank < n {
+				break
+			}
+		}
+		if L < minL {
+			L = minL // cursor past the stored cells: pad with blanks below
+		}
+	}
 
-// trimLogicalTrailingBlanks removes trailing default-blank cells from a hard
-// line (padding); soft-wrapped interior is already full-width content.
-func trimLogicalTrailingBlanks(ln *logicalLine) {
-	if !ln.hardEnd {
-		return
+	// at returns the virtual cell x of the line.
+	k, kStart := 0, 0
+	at := func(x int) storedCell {
+		kk, ks := k, kStart
+		for kk < len(src) && x >= ks+effLen(src[kk]) {
+			ks += effLen(src[kk])
+			kk++
+		}
+		if kk >= len(src) || x-ks >= len(src[kk].cells) {
+			return blankStored
+		}
+		return src[kk].cells[x-ks]
 	}
-	n := len(ln.cells)
-	for n > 0 && isBlankCell(ln.cells[n-1]) {
-		n--
+
+	pos := 0
+	for first := true; first || pos < L; first = false {
+		end := min(pos+newCols, L)
+		if end < L && end-pos > 1 && at(end-1).Width == CellWidthWide {
+			end-- // a wide char never splits: push it to the next row
+		}
+		soft := end < L
+		w := end - pos
+		if soft {
+			w = newCols
+		}
+		r := alloc.row(w)
+		// Copy [pos,end) across source rows.
+		for x := pos; x < end; {
+			for k < len(src) && x >= kStart+effLen(src[k]) {
+				kStart += effLen(src[k])
+				k++
+			}
+			if k >= len(src) {
+				for ; x < end; x++ {
+					r.cells[x-pos] = blankStored
+				}
+				break
+			}
+			sr := src[k]
+			m := min(end, kStart+effLen(sr)) - x
+			copy(r.cells[x-pos:], sr.cells[x-kStart:x-kStart+m])
+			x += m
+		}
+		for c := end - pos; c < len(r.cells); c++ {
+			r.cells[c] = blankStored
+		}
+		r.flags = RowDirty | flags
+		if soft {
+			r.flags |= RowSoftWrapped
+			if end-pos < newCols {
+				r.flags |= RowWidePad
+			}
+		}
+		if first {
+			r.mark, r.exit = mark, exit
+		}
+		for t := range trk {
+			tt := &trk[t]
+			if tt.found || tt.abs < base || tt.abs >= base+len(src) {
+				continue
+			}
+			if tt.off >= pos && (tt.off < end || !soft) {
+				tt.found = true
+				tt.newAbs = len(out)
+				tt.newCol = tt.off - pos
+				if tt.newCol >= newCols {
+					tt.newCol = newCols - 1
+					tt.newPend = tt.pend
+				}
+			}
+		}
+		out = append(out, r)
+		pos = end
 	}
-	ln.cells = ln.cells[:n]
+	return out
 }
 
 // rowIsBlank reports whether every cell in a row is an unstyled, link-free blank.
 func (g *Grid) rowIsBlank(r *Row) bool {
 	for _, sc := range r.cells {
-		c := g.inflate(sc)
-		if !isBlankCell(c) || c.Link != 0 {
+		if !isBlankStored(sc) {
 			return false
 		}
 	}
 	return true
-}
-
-func isBlankCell(c Cell) bool {
-	return (c.Char == ' ' || c.Char == 0) &&
-		c.Fg.Type == ColorDefault && c.Bg.Type == ColorDefault &&
-		c.Flags == 0 && len(c.Combining) == 0
 }

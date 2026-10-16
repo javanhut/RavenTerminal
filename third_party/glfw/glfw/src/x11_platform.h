@@ -85,6 +85,7 @@ typedef int (* PFN_XRRUpdateConfiguration)(XEvent*);
 typedef XcursorImage* (* PFN_XcursorImageCreate)(int,int);
 typedef void (* PFN_XcursorImageDestroy)(XcursorImage*);
 typedef Cursor (* PFN_XcursorImageLoadCursor)(Display*,const XcursorImage*);
+typedef Cursor (* PFN_XcursorLibraryLoadCursor)(Display*,const char*);
 #define XcursorImageCreate _glfw.x11.xcursor.ImageCreate
 #define XcursorImageDestroy _glfw.x11.xcursor.ImageDestroy
 #define XcursorImageLoadCursor _glfw.x11.xcursor.ImageLoadCursor
@@ -202,6 +203,11 @@ typedef struct _GLFWwindowX11
     // The time of the last KeyPress event per keycode, for discarding
     // duplicate key events generated for some keys by ibus
     Time            keyPressTimes[256];
+
+    // On-the-spot (XIMPreeditCallbacks) composition text and caret
+    uint32_t*       preedit;
+    int             preeditLength;
+    int             preeditCaret;
 } _GLFWwindowX11;
 
 // X11-specific global data
@@ -220,8 +226,9 @@ typedef struct _GLFWlibraryX11
     Cursor          hiddenCursorHandle;
     // Context for mapping window XIDs to _GLFWwindow pointers
     XContext        context;
-    // XIM input method
+    // XIM input method and the input style chosen for it
     XIM             im;
+    XIMStyle        imStyle;
     // The previous X error handler, to be restored later
     XErrorHandler   errorHandler;
     // Most recent error code received by X error handler
@@ -356,6 +363,7 @@ typedef struct _GLFWlibraryX11
         PFN_XcursorImageCreate ImageCreate;
         PFN_XcursorImageDestroy ImageDestroy;
         PFN_XcursorImageLoadCursor ImageLoadCursor;
+        PFN_XcursorLibraryLoadCursor LibraryLoadCursor;
     } xcursor;
 
     struct {

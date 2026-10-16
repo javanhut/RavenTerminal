@@ -1,7 +1,6 @@
 package config
 
 import (
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -54,7 +53,7 @@ func writeRavenDetectScript(name, body string) string {
 	script := "#!/bin/bash\n" +
 		"# Raven Terminal detect helper - Auto-generated, do not edit\n" +
 		"__raven_fn() {\n" + body + "\n}\n__raven_fn\n"
-	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
+	if err := writeIfChanged(path, []byte(script), 0755); err != nil {
 		return ""
 	}
 	return path
@@ -115,8 +114,12 @@ func (c *Config) writeRavenInitScript() (string, error) {
 
 	b.WriteString(c.buildRavenPromptFunction())
 
-	// rsh has no alias mechanism, and PATH additions come in through the PTY
-	// environment (shell/pty.go), so neither section is emitted here.
+	b.WriteString("\n# Raven Terminal commands\n")
+	b.WriteString("raven-alias list-fonts raven-terminal --list-fonts\n")
+	b.WriteString("raven-alias keybindings raven-terminal --keybindings\n")
+	b.WriteString("raven-alias change-font sh -c " + rshChangeFont + " change-font\n")
+
+	// PATH additions come in through the PTY environment (shell/pty.go).
 
 	// Exports.
 	if len(c.Exports) > 0 {
@@ -129,11 +132,15 @@ func (c *Config) writeRavenInitScript() (string, error) {
 		}
 	}
 
-	if err := os.WriteFile(path, []byte(b.String()), 0644); err != nil {
+	if err := writeIfChanged(path, []byte(b.String()), 0644); err != nil {
 		return "", err
 	}
 	return path, nil
 }
+
+// rshChangeFont is the sh body behind the change-font alias (rsh strings
+// have no escapes, so the OSC 7771 request is printed by sh's printf).
+const rshChangeFont = `'if [ $# -eq 0 ]; then exec raven-terminal --list-fonts; fi; printf "\033]7771;change-font=%s\033\\\\" "$*"'`
 
 // sortedKeys returns the map's keys sorted for deterministic output.
 func sortedKeys(m map[string]string) []string {
@@ -196,9 +203,13 @@ func (c *Config) buildRavenPromptFunction() string {
 		fallthrough
 	default:
 		b.WriteString("fn prompt(status) {\n")
-		// RavenShell already emits the OSC 7 cwd report natively (oscWorkingDir
-		// in main.go), so the prompt script only needs the visible line.
+		// RavenShell emits OSC 7 natively, and OSC 133 too when it exports
+		// RAVENSHELL_OSC133; older versions only get the prompt-start mark,
+		// placed in the head line, which their readline does not measure.
 		b.WriteString("    line1 = \"\"\n")
+		b.WriteString("    if $RAVENSHELL_OSC133 != \"1\" {\n")
+		b.WriteString("        line1 = \"" + esc + "]133;A" + bel + "\"\n")
+		b.WriteString("    }\n")
 		first := true
 		if c.Prompt.ShowPath {
 			b.WriteString("    line1 = line1 + \"" + cyan + "\" + __raven_cwd() + \"" + reset + "\"\n")

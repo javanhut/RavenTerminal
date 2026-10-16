@@ -36,11 +36,15 @@ func (b *rectBatch) addRect(x, y, w, h float32, c [4]float32) {
 	)
 }
 
-// glyphBatch accumulates textured glyph quads: 6 vertices/quad, 8 floats/vertex
-// (x, y, u, v, r, g, b, a).
+// glyphBatch accumulates textured glyph quads: 6 vertices/quad,
+// glyphVertFloats floats/vertex (x, y, u, v, r, g, b, a, layer). layer >= 0
+// samples that page of the mono atlas tinted by the color; layer < 0 samples
+// page -layer-1 of the color-emoji atlas untinted.
 type glyphBatch struct {
 	verts []float32
 }
+
+const glyphVertFloats = 9
 
 func (b *glyphBatch) reset() { b.verts = b.verts[:0] }
 
@@ -48,15 +52,20 @@ func (b *glyphBatch) reset() { b.verts = b.verts[:0] }
 // baseline-bottom; the glyph extends upward by its pixel height) with the given
 // atlas UV rect and color. shear slants the top edge (faux italic).
 func (b *glyphBatch) addGlyph(x, y, w, h, tx, ty, tw, th float32, c [4]float32, shear float32) {
+	b.addGlyphL(x, y, w, h, tx, ty, tw, th, c, shear, 0)
+}
+
+// addGlyphL is addGlyph for an explicit atlas layer.
+func (b *glyphBatch) addGlyphL(x, y, w, h, tx, ty, tw, th float32, c [4]float32, shear, l float32) {
 	yTop := y - h
 	x2 := x + w
 	b.verts = append(b.verts,
-		x+shear, yTop, tx, ty, c[0], c[1], c[2], c[3],
-		x2+shear, yTop, tx+tw, ty, c[0], c[1], c[2], c[3],
-		x2, y, tx+tw, ty+th, c[0], c[1], c[2], c[3],
-		x+shear, yTop, tx, ty, c[0], c[1], c[2], c[3],
-		x2, y, tx+tw, ty+th, c[0], c[1], c[2], c[3],
-		x, y, tx, ty+th, c[0], c[1], c[2], c[3],
+		x+shear, yTop, tx, ty, c[0], c[1], c[2], c[3], l,
+		x2+shear, yTop, tx+tw, ty, c[0], c[1], c[2], c[3], l,
+		x2, y, tx+tw, ty+th, c[0], c[1], c[2], c[3], l,
+		x+shear, yTop, tx, ty, c[0], c[1], c[2], c[3], l,
+		x2, y, tx+tw, ty+th, c[0], c[1], c[2], c[3], l,
+		x, y, tx, ty+th, c[0], c[1], c[2], c[3], l,
 	)
 }
 
@@ -134,23 +143,42 @@ func (r *Renderer) initBatches() error {
 		layout (location = 0) in vec2 aPos;
 		layout (location = 1) in vec2 aTex;
 		layout (location = 2) in vec4 aColor;
+		layout (location = 3) in float aLayer;
 		uniform mat4 projection;
 		out vec2 TexCoords;
 		out vec4 vColor;
+		flat out float vLayer;
 		void main() {
 			gl_Position = projection * vec4(aPos, 0.0, 1.0);
 			TexCoords = aTex;
 			vColor = aColor;
+			vLayer = aLayer;
 		}
 	` + "\x00"
+	// Mono coverage gets kitty-style composition: an extra gamma that grows
+	// as the text gets darker than the background it is drawn on (sRGB
+	// blending otherwise thins dark-on-light text), times a contrast factor.
 	glyphFrag := `
 		#version 410 core
 		in vec2 TexCoords;
 		in vec4 vColor;
+		flat in float vLayer;
 		out vec4 FragColor;
-		uniform sampler2D text;
+		uniform sampler2DArray text;
+		uniform sampler2DArray emoji;
+		uniform vec3 bgColor;
+		uniform float textGamma;
+		uniform float textContrast;
+		const vec3 Y = vec3(0.2126, 0.7152, 0.0722);
 		void main() {
-			float a = texture(text, TexCoords).r;
+			if (vLayer < -0.5) {
+				vec4 c = texture(emoji, vec3(TexCoords, -vLayer - 1.0));
+				FragColor = vec4(c.a > 0.0 ? c.rgb / c.a : c.rgb, c.a * vColor.a);
+				return;
+			}
+			float a = texture(text, vec3(TexCoords, vLayer)).r;
+			float t = clamp((1.0 - dot(vColor.rgb, Y) + dot(bgColor, Y)) * 0.5, 0.0, 1.0);
+			a = clamp(mix(a, pow(a, 1.0 / textGamma), t) * textContrast, 0.0, 1.0);
 			FragColor = vec4(vColor.rgb, vColor.a * a);
 		}
 	` + "\x00"
@@ -160,6 +188,10 @@ func (r *Renderer) initBatches() error {
 	}
 	r.glyphBatchProjLoc = gl.GetUniformLocation(r.glyphBatchProgram, gl.Str("projection\x00"))
 	r.glyphBatchTexLoc = gl.GetUniformLocation(r.glyphBatchProgram, gl.Str("text\x00"))
+	r.glyphEmojiLoc = gl.GetUniformLocation(r.glyphBatchProgram, gl.Str("emoji\x00"))
+	r.glyphBgLoc = gl.GetUniformLocation(r.glyphBatchProgram, gl.Str("bgColor\x00"))
+	r.glyphGammaLoc = gl.GetUniformLocation(r.glyphBatchProgram, gl.Str("textGamma\x00"))
+	r.glyphContrastLoc = gl.GetUniformLocation(r.glyphBatchProgram, gl.Str("textContrast\x00"))
 
 	// Rect batch VAO/VBO: vec2 pos + vec4 color, stride 6 floats.
 	gl.GenVertexArrays(1, &r.rectBatchVAO)
@@ -173,17 +205,20 @@ func (r *Renderer) initBatches() error {
 	gl.BindBuffer(gl.ARRAY_BUFFER, 0)
 	gl.BindVertexArray(0)
 
-	// Glyph batch VAO/VBO: vec2 pos + vec2 tex + vec4 color, stride 8 floats.
+	// Glyph batch VAO/VBO: vec2 pos + vec2 tex + vec4 color + float layer.
 	gl.GenVertexArrays(1, &r.glyphBatchVAO)
 	gl.GenBuffers(1, &r.glyphBatchVBO)
 	gl.BindVertexArray(r.glyphBatchVAO)
 	gl.BindBuffer(gl.ARRAY_BUFFER, r.glyphBatchVBO)
+	const stride = glyphVertFloats * 4
 	gl.EnableVertexAttribArray(0)
-	gl.VertexAttribPointerWithOffset(0, 2, gl.FLOAT, false, 8*4, 0)
+	gl.VertexAttribPointerWithOffset(0, 2, gl.FLOAT, false, stride, 0)
 	gl.EnableVertexAttribArray(1)
-	gl.VertexAttribPointerWithOffset(1, 2, gl.FLOAT, false, 8*4, 2*4)
+	gl.VertexAttribPointerWithOffset(1, 2, gl.FLOAT, false, stride, 2*4)
 	gl.EnableVertexAttribArray(2)
-	gl.VertexAttribPointerWithOffset(2, 4, gl.FLOAT, false, 8*4, 4*4)
+	gl.VertexAttribPointerWithOffset(2, 4, gl.FLOAT, false, stride, 4*4)
+	gl.EnableVertexAttribArray(3)
+	gl.VertexAttribPointerWithOffset(3, 1, gl.FLOAT, false, stride, 8*4)
 	gl.BindBuffer(gl.ARRAY_BUFFER, 0)
 	gl.BindVertexArray(0)
 
@@ -220,10 +255,22 @@ func (r *Renderer) uiFlush() {
 		r.flushRects(&r.uiRects, r.uiProj)
 		r.uiRects.reset()
 	case uiKindGlyph:
-		r.flushGlyphs(&r.uiGlyphs, r.uiProj)
+		if r.uiAtlasGen == r.atlasGen {
+			r.flushGlyphs(&r.uiGlyphs, r.uiProj)
+		}
 		r.uiGlyphs.reset()
 	}
 	r.uiKind = uiKindNone
+}
+
+// uploadStream replaces the bound ARRAY_BUFFER's contents, orphaning the old
+// storage first so the driver never stalls on a draw still reading it.
+func uploadStream(verts []float32, capFloats *int) {
+	if len(verts) > *capFloats {
+		*capFloats = len(verts) + len(verts)/2
+	}
+	gl.BufferData(gl.ARRAY_BUFFER, *capFloats*4, nil, gl.STREAM_DRAW)
+	gl.BufferSubData(gl.ARRAY_BUFFER, 0, len(verts)*4, gl.Ptr(verts))
 }
 
 // flushRects uploads and draws all accumulated rectangles in one call.
@@ -235,34 +282,37 @@ func (r *Renderer) flushRects(b *rectBatch, proj [16]float32) {
 	gl.UniformMatrix4fv(r.rectBatchProjLoc, 1, false, &proj[0])
 	gl.BindVertexArray(r.rectBatchVAO)
 	gl.BindBuffer(gl.ARRAY_BUFFER, r.rectBatchVBO)
-	if len(b.verts) > r.rectBatchCap {
-		gl.BufferData(gl.ARRAY_BUFFER, len(b.verts)*4, gl.Ptr(b.verts), gl.DYNAMIC_DRAW)
-		r.rectBatchCap = len(b.verts)
-	} else {
-		gl.BufferSubData(gl.ARRAY_BUFFER, 0, len(b.verts)*4, gl.Ptr(b.verts))
-	}
+	uploadStream(b.verts, &r.rectBatchCap)
 	gl.DrawArrays(gl.TRIANGLES, 0, int32(len(b.verts)/6))
 	gl.BindVertexArray(0)
 }
 
-// flushGlyphs uploads and draws all accumulated glyph quads in one call.
+// flushGlyphs uploads pending atlas pixels, then draws all accumulated glyph
+// quads (text and color emoji) in one call.
 func (r *Renderer) flushGlyphs(b *glyphBatch, proj [16]float32) {
 	if len(b.verts) == 0 {
 		return
 	}
+	mono := r.atlas.sync()
+	emoji := r.colorAtlas.sync()
 	gl.UseProgram(r.glyphBatchProgram)
 	gl.UniformMatrix4fv(r.glyphBatchProjLoc, 1, false, &proj[0])
 	gl.Uniform1i(r.glyphBatchTexLoc, 0)
+	gl.Uniform1i(r.glyphEmojiLoc, 1)
+	bg := r.theme.Background
+	gl.Uniform3f(r.glyphBgLoc, bg[0], bg[1], bg[2])
+	gl.Uniform1f(r.glyphGammaLoc, r.textGamma)
+	gl.Uniform1f(r.glyphContrastLoc, r.textContrast)
+	gl.ActiveTexture(gl.TEXTURE1)
+	gl.BindTexture(gl.TEXTURE_2D_ARRAY, emoji)
 	gl.ActiveTexture(gl.TEXTURE0)
-	gl.BindTexture(gl.TEXTURE_2D, r.fontAtlas)
+	gl.BindTexture(gl.TEXTURE_2D_ARRAY, mono)
 	gl.BindVertexArray(r.glyphBatchVAO)
 	gl.BindBuffer(gl.ARRAY_BUFFER, r.glyphBatchVBO)
-	if len(b.verts) > r.glyphBatchCap {
-		gl.BufferData(gl.ARRAY_BUFFER, len(b.verts)*4, gl.Ptr(b.verts), gl.DYNAMIC_DRAW)
-		r.glyphBatchCap = len(b.verts)
-	} else {
-		gl.BufferSubData(gl.ARRAY_BUFFER, 0, len(b.verts)*4, gl.Ptr(b.verts))
-	}
-	gl.DrawArrays(gl.TRIANGLES, 0, int32(len(b.verts)/8))
+	uploadStream(b.verts, &r.glyphBatchCap)
+	gl.DrawArrays(gl.TRIANGLES, 0, int32(len(b.verts)/glyphVertFloats))
 	gl.BindVertexArray(0)
+	gl.BindTexture(gl.TEXTURE_2D_ARRAY, 0)
+	r.atlas.tick()
+	r.colorAtlas.tick()
 }

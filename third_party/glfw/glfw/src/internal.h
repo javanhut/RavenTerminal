@@ -194,6 +194,8 @@ typedef void (APIENTRY * PFN_vkVoidFunction)(void);
  #error "No supported window creation API selected"
 #endif
 
+#include "raven.h"
+
 // Constructs a version number string from the public header macros
 #define _GLFW_CONCAT_VERSION(m, n, r) #m "." #n "." #r
 #define _GLFW_MAKE_VERSION(m, n, r) _GLFW_CONCAT_VERSION(m, n, r)
@@ -417,7 +419,12 @@ struct _GLFWwindow
         GLFWcharfun               character;
         GLFWcharmodsfun           charmods;
         GLFWdropfun               drop;
+        GLFWpreeditfun            preedit;
     } callbacks;
+
+    struct {
+        int                 x, y, width, height;
+    } imeCursor;
 
     // This is defined in the window API's platform.h
     _GLFW_PLATFORM_WINDOW_STATE;
@@ -626,6 +633,10 @@ GLFWbool _glfwPlatformGetGammaRamp(_GLFWmonitor* monitor, GLFWgammaramp* ramp);
 void _glfwPlatformSetGammaRamp(_GLFWmonitor* monitor, const GLFWgammaramp* ramp);
 
 void _glfwPlatformSetClipboardString(const char* string);
+void _glfwPlatformSetPrimarySelectionString(const char* string);
+const char* _glfwPlatformGetPrimarySelectionString(void);
+void _glfwPlatformSetIMECursorRect(_GLFWwindow* window);
+_GLFWmonitor* _glfwPlatformGetWindowCurrentMonitor(_GLFWwindow* window);
 const char* _glfwPlatformGetClipboardString(void);
 
 int _glfwPlatformPollJoystick(_GLFWjoystick* js, int mode);
@@ -723,6 +734,8 @@ void _glfwInputKey(_GLFWwindow* window,
                    int key, int scancode, int action, int mods);
 void _glfwInputChar(_GLFWwindow* window,
                     uint32_t codepoint, int mods, GLFWbool plain);
+void _glfwInputPreedit(_GLFWwindow* window, const char* text, int cursorBytes);
+void _glfwInputCommitString(_GLFWwindow* window, const char* text, int mods);
 void _glfwInputScroll(_GLFWwindow* window, double xoffset, double yoffset);
 void _glfwInputMouseClick(_GLFWwindow* window, int button, int action, int mods);
 void _glfwInputCursorPos(_GLFWwindow* window, double xpos, double ypos);

@@ -9,7 +9,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/javanhut/RavenTerminal/src/aipanel"
-	"github.com/javanhut/RavenTerminal/src/commands"
 	"github.com/javanhut/RavenTerminal/src/config"
 	"github.com/javanhut/RavenTerminal/src/keybindings"
 	"github.com/javanhut/RavenTerminal/src/parser"
@@ -52,7 +51,8 @@ func (a *App) clampedPaneCell(activeTab *tab.Tab, pane *tab.Pane, x, y float64) 
 // mouse tracking mode is active (and shift is not held). Returns true when
 // the event was consumed.
 func (a *App) reportMousePress(pane *tab.Pane, btn, col, row int, shift bool) bool {
-	act := parser.DecideMouse(mouseCtxFor(pane, shift), parser.MousePress, btn, col, row, -1, false)
+	x, y := a.win.GLFW().GetCursorPos()
+	act := parser.DecideMouse(a.mouseCtxAt(a.tabManager.ActiveTab(), pane, shift, x, y), parser.MousePress, btn, col, row, -1, false)
 	if act.Kind != parser.MouseActionSend {
 		return false
 	}
@@ -93,7 +93,11 @@ func (a *App) onKey(w *glfw.Window, key glfw.Key, scancode int, action glfw.Acti
 			a.refreshLinkHover(activeTab, a.lastCursorX, a.lastCursorY)
 		}
 	}
+	a.suppressChar = false
 	if action == glfw.Release {
+		if !a.uxModal() {
+			a.keyRelease(key, scancode, mods)
+		}
 		return
 	}
 
@@ -105,6 +109,9 @@ func (a *App) onKey(w *glfw.Window, key glfw.Key, scancode int, action glfw.Acti
 
 	// The sudo fingerprint modal sits above everything, so it sees keys first.
 	if a.fingerprintKey(key, mods) {
+		return
+	}
+	if a.uxKey(activeTab, key, mods) {
 		return
 	}
 
@@ -854,41 +861,24 @@ handleTerminalInput:
 		}
 	}
 
-	appCursor := activeTab.Terminal.AppCursorKeys()
-	result := keybindings.TranslateKey(key, mods, appCursor)
+	result := keybindings.Translate(keyEvent(key, scancode, action, mods), keyModeFor(activeTab.Terminal))
+	// The key was consumed here, so the char event GLFW sends right after
+	// it (with the chord's modifiers) must not type it a second time.
+	a.suppressChar = result.Action != keybindings.ActionNone
+	a.runAction(activeTab, result, action)
+}
 
+// runAction performs an app shortcut or sends key input to the active tab.
+func (a *App) runAction(activeTab *tab.Tab, result keybindings.KeyResult, action glfw.Action) {
 	switch result.Action {
 	case keybindings.ActionExit:
 		a.win.SetShouldClose(true)
 	case keybindings.ActionInput:
-		// Don't process input when help is shown (except for closing it)
 		if a.showHelp {
 			return
 		}
-		// Check for Enter key (carriage return)
-		if len(result.Data) == 1 && result.Data[0] == '\r' {
-			line := a.lineBuf.getLine()
-			cmdResult := commands.HandleCommand(line, a.renderer)
-			if cmdResult.Handled {
-				// Echo the command (so it appears in terminal)
-				activeTab.Write([]byte("\r\n"))
-				// Display command output
-				output := strings.ReplaceAll(cmdResult.Output, "\n", "\r\n")
-				activeTab.Terminal.Process([]byte(output))
-				a.lineBuf.clear()
-				return
-			}
-			a.lineBuf.clear()
-		}
-		// Check for backspace
-		if len(result.Data) == 1 && result.Data[0] == 0x7f {
-			a.lineBuf.backspace()
-		}
-		// Check for Ctrl+C or Ctrl+U (line clear)
-		if len(result.Data) == 1 && (result.Data[0] == 0x03 || result.Data[0] == 0x15) {
-			a.lineBuf.clear()
-		}
 		activeTab.Write(result.Data)
+		a.lastInput = time.Now()
 		activeTab.Terminal.GetGrid().ResetScrollOffset()
 	case keybindings.ActionScrollUp:
 		activeTab.Terminal.GetGrid().ScrollViewUp(5)
@@ -900,7 +890,7 @@ handleTerminalInput:
 		activeTab.Terminal.GetGrid().ScrollViewDown(1)
 	case keybindings.ActionToggleFullscreen:
 		if action == glfw.Repeat {
-			// Key repeat would fire this ~30x/second while Shift+Enter is held,
+			// Key repeat would fire this ~30x/second while the chord is held,
 			// flapping the window between states faster than the OS can finish
 			// a transition. Toggling is a discrete action; only the press counts.
 			return
@@ -925,33 +915,24 @@ handleTerminalInput:
 			a.showToast("Pasted from clipboard")
 		}
 	case keybindings.ActionNewTab:
-		a.lineBuf.clear()
 		a.tabManager.NewTab()
 	case keybindings.ActionCloseTab:
 		a.tabManager.CloseCurrentTab()
 	case keybindings.ActionNextTab:
-		a.lineBuf.clear()
 		a.tabManager.NextTab()
 	case keybindings.ActionPrevTab:
-		a.lineBuf.clear()
 		a.tabManager.PrevTab()
 	case keybindings.ActionSelectTab:
-		a.lineBuf.clear()
 		a.tabManager.SelectTab(result.Num - 1)
 	case keybindings.ActionSplitVertical:
-		a.lineBuf.clear()
 		activeTab.SplitVertical()
 	case keybindings.ActionSplitHorizontal:
-		a.lineBuf.clear()
 		activeTab.SplitHorizontal()
 	case keybindings.ActionClosePane:
-		a.lineBuf.clear()
 		activeTab.ClosePane()
 	case keybindings.ActionNextPane:
-		a.lineBuf.clear()
 		activeTab.NextPane()
 	case keybindings.ActionPrevPane:
-		a.lineBuf.clear()
 		activeTab.PrevPane()
 	case keybindings.ActionShowHelp:
 		a.showHelp = !a.showHelp
@@ -1009,13 +990,29 @@ handleTerminalInput:
 			a.showHelp = false
 			a.renderer.ResetHelpScroll()
 		}
+	default:
+		a.runUXAction(activeTab, result.Action)
 	}
 }
 
-func (a *App) onChar(w *glfw.Window, char rune) {
-	// Ignore Cmd/Super-modified keys: they are app shortcuts (handled in the key
-	// callback), never text input. Prevents e.g. Cmd+T from also typing "t".
-	if a.currentMods&glfw.ModSuper != 0 {
+// onChar is the char-mods callback: it sees the layout's exact character
+// for every chord, including Alt ones the plain char callback drops.
+func (a *App) onChar(w *glfw.Window, char rune, mods glfw.ModifierKey) {
+	// Super chords are app shortcuts, never text. A char whose key the key
+	// callback already encoded or acted on is dropped too.
+	if mods&glfw.ModSuper != 0 || a.suppressChar {
+		a.suppressChar = false
+		return
+	}
+	if a.uxChar(char) {
+		return
+	}
+	// Overlays only take plain text, as before: Ctrl/Alt chords there are
+	// commands handled in onKey.
+	plain := mods&(glfw.ModControl|glfw.ModAlt) == 0
+	overlay := a.find.open || (a.settingsMenu.IsOpen() && a.settingsMenu.InputMode()) ||
+		(a.aiPanel.Open && a.aiPanel.Focused) || (a.searchPanel.Open && a.searchPanel.Focused)
+	if overlay && !plain {
 		return
 	}
 
@@ -1074,13 +1071,50 @@ func (a *App) onChar(w *glfw.Window, char rune) {
 		return
 	}
 
-	// Add character to line buffer
-	a.lineBuf.addChar(char)
-
-	data := keybindings.TranslateChar(char, a.currentMods)
+	data := keybindings.TranslateChar(char, mods, keyModeFor(activeTab.Terminal))
 	activeTab.Write(data)
 	activeTab.Terminal.GetGrid().ResetScrollOffset()
 	a.lastInput = time.Now() // hold the cursor solid right after typing
+}
+
+// keyEvent pairs a key with the character it carries in the active layout,
+// so Ctrl/Alt chords and kitty key codes follow the user's layout rather
+// than the physical US key.
+func keyEvent(key glfw.Key, scancode int, action glfw.Action, mods glfw.ModifierKey) keybindings.Event {
+	ev := keybindings.Event{Key: key, Mods: mods, Action: action}
+	if name := glfw.GetKeyName(key, scancode); utf8.RuneCountInString(name) == 1 {
+		ev.Rune, _ = utf8.DecodeRuneInString(name)
+	}
+	return ev
+}
+
+// keyModeFor reads the terminal modes that change key encoding.
+func keyModeFor(t *parser.Terminal) keybindings.Mode {
+	mouse, _, altScreen, appCursor := t.MouseState()
+	return keybindings.Mode{
+		AppCursor:       appCursor,
+		AppKeypad:       t.AppKeypad(),
+		AltScreen:       altScreen,
+		MouseReporting:  mouse != 0,
+		ModifyOtherKeys: t.ModifyOtherKeys(),
+		KittyFlags:      t.KittyKeyboardFlags(),
+		AltNoEscape:     !t.MetaSendsEscape() && !t.AltSendsEscape(),
+	}
+}
+
+// keyRelease reports key releases to programs that asked for them (kitty
+// flag 2), only while the terminal itself has the keyboard.
+func (a *App) keyRelease(key glfw.Key, scancode int, mods glfw.ModifierKey) {
+	activeTab := a.tabManager.ActiveTab()
+	if activeTab == nil || a.showHelp || a.resizeMode || a.find.open || a.settingsMenu.IsOpen() ||
+		(a.aiPanel.Open && a.aiPanel.Focused) || (a.searchPanel.Open && a.searchPanel.Focused) ||
+		activeTab.Terminal.KittyKeyboardFlags()&2 == 0 {
+		return
+	}
+	res := keybindings.Translate(keyEvent(key, scancode, glfw.Release, mods), keyModeFor(activeTab.Terminal))
+	if res.Action == keybindings.ActionInput {
+		activeTab.Write(res.Data)
+	}
 }
 
 // onFramebufferSize keeps the grid responsive during a live drag-resize, when
@@ -1210,7 +1244,7 @@ func (a *App) onScroll(w *glfw.Window, xoff, yoff float64) {
 		return
 	}
 
-	if yoff == 0 {
+	if yoff == 0 && xoff == 0 {
 		return
 	}
 
@@ -1220,21 +1254,24 @@ func (a *App) onScroll(w *glfw.Window, xoff, yoff float64) {
 	x, y := w.GetCursorPos()
 	if pane, col, row, ok := a.renderer.HitTestPane(activeTab, x, y, width, height); ok && pane != nil {
 		shift := w.GetKey(glfw.KeyLeftShift) == glfw.Press || w.GetKey(glfw.KeyRightShift) == glfw.Press
-		kind := parser.MouseWheelUp
-		if yoff < 0 {
-			kind = parser.MouseWheelDown
-		}
-		act := parser.DecideMouse(mouseCtxFor(pane, shift), kind, 0, col, row, -1, false)
-		if act.Kind == parser.MouseActionSend {
-			steps := int(math.Abs(yoff))
-			if steps == 0 {
-				steps = 1
+		ctx := a.mouseCtxAt(activeTab, pane, shift, x, y)
+		sent := false
+		for _, st := range wheelSteps(xoff, yoff) {
+			act := parser.DecideMouse(ctx, st.kind, 0, col, row, -1, false)
+			if act.Kind != parser.MouseActionSend {
+				continue
 			}
-			for range steps {
+			sent = true
+			for range st.count {
 				pane.Write(act.Bytes)
 			}
+		}
+		if sent {
 			return
 		}
+	}
+	if yoff == 0 {
+		return
 	}
 
 	if yoff > 0 {
@@ -1272,12 +1309,11 @@ func (a *App) onMouseButton(w *glfw.Window, button glfw.MouseButton, action glfw
 	// release forwarded too, wherever the cursor ended up (shift state at
 	// release is irrelevant: the app saw the press).
 	if action == glfw.Release && a.report.pane != nil && terminalMouseButton(button) == a.report.held {
-		mode, sgr, _, _ := a.report.pane.Terminal.MouseState()
 		col, row := a.report.lastCol, a.report.lastRow
 		if c, r, ok := a.clampedPaneCell(activeTab, a.report.pane, x, y); ok {
 			col, row = c, r
 		}
-		act := parser.DecideMouse(parser.MouseContext{Mode: mode, SGR: sgr}, parser.MouseRelease, a.report.held, col, row, -1, false)
+		act := parser.DecideMouse(a.mouseCtxAt(activeTab, a.report.pane, false, x, y), parser.MouseRelease, a.report.held, col, row, -1, false)
 		if act.Kind == parser.MouseActionSend {
 			a.report.pane.Write(act.Bytes)
 		}
@@ -1350,7 +1386,6 @@ func (a *App) onMouseButton(w *glfw.Window, button glfw.MouseButton, action glfw
 			}
 			// Tab bar: click a chip to switch tabs, or the "+" to open a new one.
 			if idx, newTab, hit := a.renderer.HitTestTabBar(a.tabManager, x, y); hit {
-				a.lineBuf.clear()
 				if newTab {
 					a.tabManager.NewTab()
 				} else {
@@ -1377,6 +1412,12 @@ func (a *App) onMouseButton(w *glfw.Window, button glfw.MouseButton, action glfw
 
 			if a.selection.pane != nil && a.selection.pane != pane {
 				a.selection.pane.Terminal.GetGrid().ClearSelection()
+			}
+
+			// Leader+click on a command's output selects all of it (OSC 133).
+			if leaderClick(mods) && a.selectCommandOutput(pane, row) {
+				activeTab.SetActivePane(pane)
+				return
 			}
 
 			// Ctrl+click on a link opens it even when the application has
@@ -1412,6 +1453,7 @@ func (a *App) onMouseButton(w *glfw.Window, button glfw.MouseButton, action glfw
 				a.selection.pane = pane
 				if text := g.SelectedText(); text != "" {
 					glfw.SetClipboardString(text)
+					glfw.SetPrimarySelectionString(text)
 					a.showToast("Copied to clipboard")
 				}
 			case a.selection.clickCount >= 3: // triple-click: logical line
@@ -1421,6 +1463,7 @@ func (a *App) onMouseButton(w *glfw.Window, button glfw.MouseButton, action glfw
 				a.selection.clickCount = 0
 				if text := g.SelectedText(); text != "" {
 					glfw.SetClipboardString(text)
+					glfw.SetPrimarySelectionString(text)
 					a.showToast("Copied to clipboard")
 				}
 			default:
@@ -1429,6 +1472,7 @@ func (a *App) onMouseButton(w *glfw.Window, button glfw.MouseButton, action glfw
 				a.selection.startCol = col
 				a.selection.startAbsRow = g.AbsRowForViewRow(row)
 				g.StartSelection(col, row)
+				g.SetSelectionBlock(mods&glfw.ModAlt != 0) // Alt+drag: rectangle
 			}
 			activeTab.SetActivePane(pane)
 		case glfw.Release:
@@ -1531,6 +1575,7 @@ func (a *App) onMouseButton(w *glfw.Window, button glfw.MouseButton, action glfw
 			g.ExtendSelection(col, row)
 			if text := g.SelectedText(); text != "" {
 				glfw.SetClipboardString(text)
+				glfw.SetPrimarySelectionString(text)
 				a.showToast("Copied to clipboard")
 			}
 
@@ -1579,6 +1624,11 @@ func (a *App) onMouseButton(w *glfw.Window, button glfw.MouseButton, action glfw
 		if pane, col, row, ok := a.renderer.HitTestPane(activeTab, x, y, width, height); ok && pane != nil {
 			if a.reportMousePress(pane, 1, col, row, mods&glfw.ModShift != 0) {
 				activeTab.SetActivePane(pane)
+			} else if text := glfw.GetPrimarySelectionString(); text != "" {
+				// Middle-click pastes the primary selection, X11 style.
+				activeTab.SetActivePane(pane)
+				writePaste(pane.Terminal, activeTab, text)
+				pane.Terminal.GetGrid().ResetScrollOffset()
 			}
 		}
 	}
@@ -1689,8 +1739,9 @@ func (a *App) onCursorPos(w *glfw.Window, xpos, ypos float64) {
 				// mid-drag doesn't punch a hole in the app's motion stream.
 				shift = false
 			}
+			ctx := a.mouseCtxAt(activeTab, target, shift, xpos, ypos)
 			cellChanged := mcol != a.report.lastCol || mrow != a.report.lastRow
-			act := parser.DecideMouse(mouseCtxFor(target, shift), parser.MouseMotion, 0, mcol, mrow, held, cellChanged)
+			act := parser.DecideMouse(ctx, parser.MouseMotion, 0, mcol, mrow, held, cellChanged)
 			if act.Kind == parser.MouseActionSend {
 				a.report.lastCol, a.report.lastRow = mcol, mrow
 				target.Write(act.Bytes)
@@ -1735,16 +1786,7 @@ func (a *App) refreshLinkHover(activeTab *tab.Tab, x, y float64) {
 // when the window gains/loses focus.
 func (a *App) onFocus(w *glfw.Window, focused bool) {
 	a.windowFocused = focused // drives cursor-blink pausing on focus loss
-	activeTab := a.tabManager.ActiveTab()
-	if activeTab == nil || activeTab.Terminal == nil {
-		return
-	}
-	if !activeTab.Terminal.FocusReportingEnabled() {
-		return
-	}
-	if focused {
-		activeTab.Write([]byte("\x1b[I"))
-	} else {
-		activeTab.Write([]byte("\x1b[O"))
+	if activeTab := a.tabManager.ActiveTab(); activeTab != nil {
+		activeTab.WriteFocus(focused)
 	}
 }

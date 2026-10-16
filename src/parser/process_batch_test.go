@@ -31,7 +31,7 @@ func TestProcessChunkingEquivalence(t *testing.T) {
 	// matters.
 	wantText := map[string]string{
 		"linedraw":     "┌─┐plain",
-		"utf8-invalid": "AZ",
+		"utf8-invalid": "\uFFFDA\uFFFDZ",
 		"insert-mode":  "XYZbc",
 	}
 	for _, s := range streams {

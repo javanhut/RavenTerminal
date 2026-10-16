@@ -49,7 +49,7 @@ done
 
 if [ -z "$BINARY" ]; then
     echo "ERROR: raven-terminal binary not found in any location" >> "$LOG_FILE"
-    notify-send "Raven Terminal" "Binary not found. Please reinstall." 2>/dev/null
+    echo "raven-terminal-launcher: raven-terminal binary not found; reinstall Raven Terminal" >&2
     exit 1
 fi
 

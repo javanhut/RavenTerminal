@@ -676,11 +676,20 @@ static const NSRange kEmptyRange = { NSNotFound, 0 };
         markedText = [[NSMutableAttributedString alloc] initWithAttributedString:string];
     else
         markedText = [[NSMutableAttributedString alloc] initWithString:string];
+
+    NSString* text = [markedText string];
+    const NSUInteger caret = MIN(selectedRange.location, [text length]);
+    const int caretBytes = (int)
+        [[text substringToIndex:caret] lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+    _glfwInputPreedit(window, [text UTF8String], [text length] ? caretBytes : -1);
 }
 
 - (void)unmarkText
 {
+    const BOOL hadText = [markedText length] > 0;
     [[markedText mutableString] setString:@""];
+    if (hadText)
+        _glfwInputPreedit(window, "", -1);
 }
 
 - (NSArray*)validAttributesForMarkedText
@@ -703,6 +712,18 @@ static const NSRange kEmptyRange = { NSNotFound, 0 };
                          actualRange:(NSRangePointer)actualRange
 {
     const NSRect frame = [window->ns.view frame];
+    if (window->imeCursor.width > 0 || window->imeCursor.height > 0)
+    {
+        // imeCursor is top-left based content coordinates; AppKit is bottom-up
+        const NSRect local = NSMakeRect(window->imeCursor.x,
+                                        frame.size.height - window->imeCursor.y -
+                                            window->imeCursor.height,
+                                        window->imeCursor.width,
+                                        window->imeCursor.height);
+        const NSRect inWindow = [window->ns.view convertRect:local toView:nil];
+        return [window->ns.object convertRectToScreen:inWindow];
+    }
+
     return NSMakeRect(frame.origin.x, frame.origin.y, 0.0, 0.0);
 }
 
@@ -737,6 +758,8 @@ static const NSRange kEmptyRange = { NSNotFound, 0 };
             _glfwInputChar(window, codepoint, mods, plain);
         }
     }
+
+    [self unmarkText];
 }
 
 - (void)doCommandBySelector:(SEL)selector
@@ -1746,6 +1769,21 @@ int _glfwPlatformCreateStandardCursor(_GLFWcursor* cursor, int shape)
         cursor->ns.object = [NSCursor resizeLeftRightCursor];
     else if (shape == GLFW_VRESIZE_CURSOR)
         cursor->ns.object = [NSCursor resizeUpDownCursor];
+    else if (shape == GLFW_NOT_ALLOWED_CURSOR)
+        cursor->ns.object = [NSCursor operationNotAllowedCursor];
+    else if (shape == GLFW_RESIZE_ALL_CURSOR)
+        cursor->ns.object = [NSCursor closedHandCursor];
+    else if (shape == GLFW_RESIZE_NWSE_CURSOR || shape == GLFW_RESIZE_NESW_CURSOR)
+    {
+        // AppKit only has these as private class methods
+        SEL selector = shape == GLFW_RESIZE_NWSE_CURSOR ?
+            NSSelectorFromString(@"_windowResizeNorthWestSouthEastCursor") :
+            NSSelectorFromString(@"_windowResizeNorthEastSouthWestCursor");
+        if ([NSCursor respondsToSelector:selector])
+            cursor->ns.object = [NSCursor performSelector:selector];
+        else
+            cursor->ns.object = [NSCursor crosshairCursor];
+    }
 
     if (!cursor->ns.object)
     {

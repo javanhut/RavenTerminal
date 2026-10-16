@@ -62,6 +62,11 @@ typedef VkBool32 (APIENTRY *PFN_vkGetPhysicalDeviceWaylandPresentationSupportKHR
 #include "wayland-relative-pointer-unstable-v1-client-protocol.h"
 #include "wayland-pointer-constraints-unstable-v1-client-protocol.h"
 #include "wayland-idle-inhibit-unstable-v1-client-protocol.h"
+#include "wayland-fractional-scale-v1-client-protocol.h"
+#include "wayland-cursor-shape-v1-client-protocol.h"
+#include "wayland-primary-selection-unstable-v1-client-protocol.h"
+#include "wayland-text-input-unstable-v3-client-protocol.h"
+#include "wayland-xdg-activation-v1-client-protocol.h"
 
 #define _glfw_dlopen(name) dlopen(name, RTLD_LAZY | RTLD_LOCAL)
 #define _glfw_dlclose(handle) dlclose(handle)
@@ -290,6 +295,13 @@ typedef struct _GLFWofferWayland
     GLFWbool                    text_uri_list;
 } _GLFWofferWayland;
 
+typedef struct _GLFWprimaryOfferWayland
+{
+    struct zwp_primary_selection_offer_v1* offer;
+    char                        textMimeType[32];
+    int                         textMimeRank;
+} _GLFWprimaryOfferWayland;
+
 typedef struct _GLFWscaleWayland
 {
     struct wl_output*           output;
@@ -341,8 +353,17 @@ typedef struct _GLFWwindowWayland
     char*                       appId;
 
     // We need to track the monitors the window spans on to calculate the
-    // optimal scaling factor.
+    // optimal scaling factor. Entries stay in the order they were entered.
     int                         contentScale;
+    // wl_surface.preferred_buffer_scale (compositor v6), 0 until received
+    int                         preferredBufferScale;
+    // wp_fractional_scale_v1 preferred scale in 120ths; while fractionalScaling
+    // is set the buffer scale stays 1 and the viewport maps the buffer to the
+    // logical size
+    struct wp_fractional_scale_v1* fractionalScaling;
+    struct wp_viewport*         viewport;
+    int                         fractionalScale;
+    struct xdg_activation_token_v1* activationToken;
     _GLFWscaleWayland*          scales;
     int                         scaleCount;
     int                         scaleSize;
@@ -379,6 +400,31 @@ typedef struct _GLFWlibraryWayland
     struct zwp_relative_pointer_manager_v1* relativePointerManager;
     struct zwp_pointer_constraints_v1*      pointerConstraints;
     struct zwp_idle_inhibit_manager_v1*     idleInhibitManager;
+    struct wp_fractional_scale_manager_v1*  fractionalScaleManager;
+    struct wp_cursor_shape_manager_v1*      cursorShapeManager;
+    struct wp_cursor_shape_device_v1*       cursorShapeDevice;
+    struct xdg_activation_v1*               activationManager;
+    char*                                   activationToken;
+    GLFWbool                                activationWarned;
+
+    struct zwp_primary_selection_device_manager_v1* primarySelectionManager;
+    struct zwp_primary_selection_device_v1* primarySelectionDevice;
+    struct zwp_primary_selection_source_v1* primarySelectionSource;
+    struct zwp_primary_selection_offer_v1*  primarySelectionOffer;
+    char                        primarySelectionMimeType[32];
+    _GLFWprimaryOfferWayland*   primaryOffers;
+    unsigned int                primaryOfferCount;
+    char*                       primarySelectionString;
+
+    struct zwp_text_input_manager_v3*       textInputManager;
+    struct zwp_text_input_v3*   textInput;
+    _GLFWwindow*                textInputFocus;
+    char*                       textInputPreedit;
+    int                         textInputCursor;
+    char*                       textInputCommit;
+    GLFWbool                    textInputHasPreedit;
+
+    int                         emptyEventPipe[2];
 
     _GLFWofferWayland*          offers;
     unsigned int                offerCount;
@@ -529,6 +575,8 @@ typedef struct _GLFWcursorWayland
     int                         width, height;
     int                         xhot, yhot;
     int                         currentImage;
+    // GLFW standard cursor shape, 0 for custom image cursors
+    int                         shape;
 } _GLFWcursorWayland;
 
 void _glfwAddOutputWayland(uint32_t name, uint32_t version);
@@ -536,4 +584,6 @@ void _glfwUpdateContentScaleWayland(_GLFWwindow* window);
 
 void _glfwAddSeatListenerWayland(struct wl_seat* seat);
 void _glfwAddDataDeviceListenerWayland(struct wl_data_device* device);
+void _glfwAddPrimarySelectionListenerWayland(struct zwp_primary_selection_device_v1* device);
+void _glfwAddTextInputListenerWayland(struct zwp_text_input_v3* textInput);
 

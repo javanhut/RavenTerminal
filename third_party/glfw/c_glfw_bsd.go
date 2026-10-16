@@ -13,6 +13,12 @@ package glfw
 	#include "glfw/src/wayland-viewporter-client-protocol.c"
 	#include "glfw/src/wayland-xdg-decoration-unstable-v1-client-protocol.c"
 	#include "glfw/src/wayland-xdg-shell-client-protocol.c"
+	#include "glfw/src/wayland-fractional-scale-v1-client-protocol.c"
+	#include "glfw/src/wayland-cursor-shape-v1-client-protocol.c"
+	#include "glfw/src/wayland-tablet-v2-client-protocol.c"
+	#include "glfw/src/wayland-primary-selection-unstable-v1-client-protocol.c"
+	#include "glfw/src/wayland-text-input-unstable-v3-client-protocol.c"
+	#include "glfw/src/wayland-xdg-activation-v1-client-protocol.c"
 #endif
 #ifdef _GLFW_X11
 	#include "glfw/src/x11_init.c"

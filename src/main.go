@@ -10,9 +10,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/javanhut/RavenTerminal/src/assets/fonts"
+	"github.com/javanhut/RavenTerminal/src/commands"
 	"github.com/javanhut/RavenTerminal/src/grid"
 	"github.com/javanhut/RavenTerminal/src/ollama"
 	"github.com/javanhut/RavenTerminal/src/parser"
+	"github.com/javanhut/RavenTerminal/src/shell"
 	"github.com/javanhut/RavenTerminal/src/tab"
 	"github.com/javanhut/RavenTerminal/src/websearch"
 	"github.com/javanhut/RavenTerminal/src/window"
@@ -24,14 +27,23 @@ import (
 // goroutines to the main thread (GLFW clipboard access is main-thread only),
 // mirroring the DrainClipboard pattern used for writes. Buffer of 1: a second
 // concurrent query simply gets an empty reply.
-var clipboardReadReq = make(chan chan string, 1)
+var clipboardReadReq = make(chan clipboardRead, 1)
+
+type clipboardRead struct {
+	primary bool
+	reply   chan string
+}
 
 // requestClipboardRead asks the main loop for the system clipboard contents.
 // Called on PTY reader goroutines by the parser (OSC 52 query).
-func requestClipboardRead() string {
+func requestClipboardRead() string { return requestSelectionRead(false) }
+
+func requestPrimaryRead() string { return requestSelectionRead(true) }
+
+func requestSelectionRead(primary bool) string {
 	reply := make(chan string, 1)
 	select {
-	case clipboardReadReq <- reply:
+	case clipboardReadReq <- clipboardRead{primary, reply}:
 	default:
 		return ""
 	}
@@ -53,40 +65,11 @@ func requestClipboardRead() string {
 func applyClipboardReadGate(allow bool) {
 	if allow {
 		parser.SetDefaultClipboardReader(requestClipboardRead)
+		parser.SetDefaultPrimaryReader(requestPrimaryRead)
 	} else {
 		parser.SetDefaultClipboardReader(nil)
+		parser.SetDefaultPrimaryReader(nil)
 	}
-}
-
-// lineBuffer tracks the current line being typed for command interception
-type lineBuffer struct {
-	buffer strings.Builder
-}
-
-func (lb *lineBuffer) addChar(c rune) {
-	lb.buffer.WriteRune(c)
-}
-
-func (lb *lineBuffer) addBytes(data []byte) {
-	lb.buffer.Write(data)
-}
-
-func (lb *lineBuffer) backspace() {
-	s := lb.buffer.String()
-	if len(s) > 0 {
-		// Remove last rune
-		runes := []rune(s)
-		lb.buffer.Reset()
-		lb.buffer.WriteString(string(runes[:len(runes)-1]))
-	}
-}
-
-func (lb *lineBuffer) clear() {
-	lb.buffer.Reset()
-}
-
-func (lb *lineBuffer) getLine() string {
-	return lb.buffer.String()
 }
 
 type searchResponse struct {
@@ -189,13 +172,19 @@ type ollamaModelsResponse struct {
 // delivers the result on results; it returns immediately so it is safe to
 // call from the GLFW main thread.
 func listOllamaModelsAsync(baseURL string, timeout time.Duration, results chan<- ollamaModelsResponse) {
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	listOllamaModels(context.Background(), baseURL, timeout, results)
+}
+
+// listOllamaModels is listOllamaModelsAsync bound to ctx: the fetch is
+// aborted, and its result dropped, once ctx ends.
+func listOllamaModels(ctx context.Context, baseURL string, timeout time.Duration, results chan<- ollamaModelsResponse) {
+	goSafe("ollama model list", func() {
+		tctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 		client := ollama.NewClient(baseURL, "")
-		models, err := client.ListModels(ctx)
-		results <- ollamaModelsResponse{models: models, err: err}
-	}()
+		models, err := client.ListModels(tctx)
+		deliver(ctx, results, ollamaModelsResponse{models: models, err: err})
+	})
 }
 
 // summarizeToolArgs renders tool-call arguments as a short human-readable
@@ -281,8 +270,14 @@ type toastState struct {
 
 // mouseCtxFor snapshots a pane's mouse-routing state for DecideMouse.
 func mouseCtxFor(pane *tab.Pane, shift bool) parser.MouseContext {
-	mode, sgr, alt, appCur := pane.Terminal.MouseState()
-	return parser.MouseContext{Mode: mode, SGR: sgr, Shift: shift, AltScreen: alt, AppCursorKeys: appCur}
+	ctx := pane.Terminal.MouseCtx()
+	ctx.Shift = shift
+	if w := glfw.GetCurrentContext(); w != nil {
+		down := func(a, b glfw.Key) bool { return w.GetKey(a) == glfw.Press || w.GetKey(b) == glfw.Press }
+		ctx.Alt = down(glfw.KeyLeftAlt, glfw.KeyRightAlt)
+		ctx.Ctrl = down(glfw.KeyLeftControl, glfw.KeyRightControl)
+	}
+	return ctx
 }
 
 // previewCacheKey keys the preview cache: proxy and direct fetches return
@@ -292,50 +287,157 @@ func previewCacheKey(useProxy bool, url string) string {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "@" {
+		os.Exit(ipcClientMain(os.Args[2:], os.Stdout, os.Stderr))
+	}
+	opts, err := parseArgs(os.Args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "raven-terminal: %v\n\n%s", err, usageText())
+		os.Exit(2)
+	}
+	switch {
+	case opts.help:
+		fmt.Print(usageText())
+		return
+	case opts.listFonts:
+		fmt.Print(listFontsText())
+		return
+	case opts.keybindings:
+		fmt.Print(keybindingsText())
+		return
+	}
+	tab.SetHoldOnExit(opts.hold)
+	windowClass = opts.class
+	initialTitle = opts.title
+	stop := installSignalHandler(window.PostEmptyEvent)
+	defer startIPCServer()()
 	// runApps owns the lifetime of every window, including destroying each one
 	// as it closes and terminating GLFW after the last.
-	args := os.Args[1:]
-	runApps(newApp(startDirFromArgs(args), commandFromArgs(args)))
+	runApps(newApp(opts.dir, opts.command))
+	stop()
+	// Closed panes hang up their shells in the background; give stragglers
+	// their SIGKILL before the process (and with it the reapers) goes away.
+	shell.WaitReaped(2 * time.Second)
 }
 
-// startDirFromArgs returns the directory `--working-directory DIR` (also
-// `--working-directory=DIR`, or `-d DIR`) names for the first tab, or "" for
-// the home directory. Only flags before a `-e`/`--` count: everything after
-// those belongs to the command being run. This is how the rest of Raven opens
-// a terminal in a folder (`raven-open --terminal DIR`).
-func startDirFromArgs(args []string) string {
-	dir := ""
+// launchOptions is the parsed command line.
+type launchOptions struct {
+	dir         string   // first tab's working directory ("" = home)
+	command     []string // -e / -- command instead of a shell
+	title       string   // initial window title
+	class       string   // X11 class / Wayland app_id
+	hold        bool     // keep panes open after their process exits
+	listFonts   bool
+	keybindings bool
+	help        bool
+}
+
+// parseArgs reads the command line. Everything after -e/--execute/-- is the
+// command, verbatim (`Exec=raven-terminal -e crow %F` must run crow). A bare
+// argument before that is the working directory, as a path or a file:// URI
+// (how file managers and `raven-open --terminal DIR` hand over a folder). A
+// value flag at the very end with no value is ignored rather than fatal.
+func parseArgs(args []string) (launchOptions, error) {
+	o := launchOptions{class: "raven-terminal"}
+	positional := false
 	for i := 0; i < len(args); i++ {
-		switch arg := args[i]; {
-		case arg == "-e" || arg == "--execute" || arg == "--":
-			return dir
-		case arg == "--working-directory" || arg == "-d":
+		arg := args[i]
+		name, val, hasVal := strings.Cut(arg, "=")
+		if !strings.HasPrefix(arg, "--") {
+			name, hasVal = arg, false
+		}
+		value := func() (string, bool) {
+			if hasVal {
+				return val, true
+			}
 			if i+1 < len(args) {
 				i++
-				dir = args[i]
+				return args[i], true
 			}
-		case strings.HasPrefix(arg, "--working-directory="):
-			dir = strings.TrimPrefix(arg, "--working-directory=")
+			return "", false
 		}
-	}
-	return dir
-}
-
-// commandFromArgs extracts the command a `-e` (xterm convention) or `--`
-// introduces: everything after the flag, verbatim, is the program and its
-// arguments. Desktop entries rely on this — `Exec=raven-terminal -e crow %F`
-// must run crow, not a bare shell. Returns nil when no command was given.
-func commandFromArgs(args []string) []string {
-	for i, arg := range args {
-		switch arg {
+		switch name {
 		case "-e", "--execute", "--":
 			if i+1 < len(args) {
-				return args[i+1:]
+				o.command = args[i+1:]
 			}
-			return nil
+			return o, nil
+		case "--working-directory", "-d":
+			if v, ok := value(); ok {
+				o.dir = v
+			}
+		case "--title", "-T":
+			if v, ok := value(); ok {
+				o.title = v
+			}
+		case "--class", "--app-id":
+			if v, ok := value(); ok && v != "" {
+				o.class = v
+			}
+		case "--hold":
+			o.hold = true
+		case "--list-fonts":
+			o.listFonts = true
+		case "--keybindings":
+			o.keybindings = true
+		case "-h", "--help":
+			o.help = true
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return o, fmt.Errorf("unknown option %q", arg)
+			}
+			if positional {
+				return o, fmt.Errorf("unexpected argument %q", arg)
+			}
+			positional = true
+			dir, err := dirFromArg(arg)
+			if err != nil {
+				return o, err
+			}
+			o.dir = dir
 		}
 	}
-	return nil
+	return o, nil
+}
+
+// dirFromArg accepts a path or a local file:// URI.
+func dirFromArg(arg string) (string, error) {
+	if !strings.HasPrefix(arg, "file:") {
+		return arg, nil
+	}
+	u, err := url.Parse(arg)
+	if err != nil {
+		return "", fmt.Errorf("bad directory URI %q: %w", arg, err)
+	}
+	if u.Host != "" && u.Host != "localhost" {
+		if h, _ := os.Hostname(); u.Host != h {
+			return "", fmt.Errorf("directory URI %q is not on this host", arg)
+		}
+	}
+	return u.Path, nil
+}
+
+func usageText() string {
+	return `Usage: raven-terminal [OPTIONS] [DIR] [-e COMMAND [ARGS...]]
+
+  DIR                         start in DIR (a path or file:// URI)
+  -d, --working-directory DIR start in DIR
+  -e, --execute CMD ...       run CMD instead of a shell (also: -- CMD ...)
+      --hold                  keep panes open after their process exits
+  -T, --title TITLE           initial window title
+      --class ID, --app-id ID window class / Wayland app_id (default raven-terminal)
+      --list-fonts            print the available fonts and exit
+      --keybindings           print the keybindings and exit
+  -h, --help                  print this help and exit
+`
+}
+
+func listFontsText() string {
+	return strings.TrimLeft(commands.FontList(fonts.AvailableFonts(), fonts.DefaultFontName()), "\n")
+}
+
+func keybindingsText() string {
+	return strings.TrimLeft(commands.KeybindingsHelp(), "\n")
 }
 
 // writePaste sends clipboard text to a terminal, normalizing newlines and,

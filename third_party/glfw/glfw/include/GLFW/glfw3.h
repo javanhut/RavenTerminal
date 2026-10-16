@@ -1106,6 +1106,17 @@ extern "C" {
  *  The vertical resize arrow shape.
  */
 #define GLFW_VRESIZE_CURSOR         0x00036006
+/*! @brief The top-left to bottom-right diagonal resize shape (GLFW 3.4). */
+#define GLFW_RESIZE_NWSE_CURSOR     0x00036007
+/*! @brief The top-right to bottom-left diagonal resize shape (GLFW 3.4). */
+#define GLFW_RESIZE_NESW_CURSOR     0x00036008
+/*! @brief The omni-directional resize shape (GLFW 3.4). */
+#define GLFW_RESIZE_ALL_CURSOR      0x00036009
+/*! @brief The operation-not-allowed shape (GLFW 3.4). */
+#define GLFW_NOT_ALLOWED_CURSOR     0x0003600A
+#define GLFW_POINTING_HAND_CURSOR   GLFW_HAND_CURSOR
+#define GLFW_RESIZE_EW_CURSOR       GLFW_HRESIZE_CURSOR
+#define GLFW_RESIZE_NS_CURSOR       GLFW_VRESIZE_CURSOR
 /*! @} */
 
 #define GLFW_CONNECTED              0x00040001
@@ -1608,6 +1619,14 @@ typedef void (* GLFWcharmodsfun)(GLFWwindow* window, unsigned int codepoint, int
  *  @ingroup input
  */
 typedef void (* GLFWdropfun)(GLFWwindow* window, int path_count, const char* paths[]);
+
+/*! @brief The function pointer type for input method pre-edit callbacks.
+ *
+ *  Raven extension.  `text` is the UTF-8 pre-edit (composition) string, empty
+ *  when the composition ended; `cursor_bytes` is the caret as a byte offset
+ *  into `text`, or -1 when the input method hides it.
+ */
+typedef void (* GLFWpreeditfun)(GLFWwindow* window, const char* text, int cursor_bytes);
 
 /*! @brief The function pointer type for monitor configuration callbacks.
  *
@@ -5356,6 +5375,19 @@ GLFWAPI void glfwSetClipboardString(GLFWwindow* window, const char* string);
  *  @ingroup input
  */
 GLFWAPI const char* glfwGetClipboardString(GLFWwindow* window);
+
+/*! @brief Raven extensions: primary selection, input method and monitor
+ *  tracking.
+ *
+ *  The primary selection is X11 PRIMARY or Wayland
+ *  zwp_primary_selection_v1; where neither exists it is kept in-process.
+ *  The IME cursor rectangle is in window content coordinates.
+ */
+GLFWAPI void glfwSetPrimarySelectionString(const char* string);
+GLFWAPI const char* glfwGetPrimarySelectionString(void);
+GLFWAPI GLFWpreeditfun glfwSetPreeditCallback(GLFWwindow* window, GLFWpreeditfun callback);
+GLFWAPI void glfwSetIMECursorRect(GLFWwindow* window, int x, int y, int width, int height);
+GLFWAPI GLFWmonitor* glfwGetWindowCurrentMonitor(GLFWwindow* window);
 
 /*! @brief Returns the GLFW time.
  *

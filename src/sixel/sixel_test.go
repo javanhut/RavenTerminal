@@ -76,3 +76,67 @@ func TestDecodeEmpty(t *testing.T) {
 		t.Fatalf("empty sixel should be 0x0, got %dx%d", img.Width, img.Height)
 	}
 }
+
+func at(t *testing.T, pix []byte, w, x, y int) [4]byte {
+	t.Helper()
+	o := (y*w + x) * 4
+	return [4]byte{pix[o], pix[o+1], pix[o+2], pix[o+3]}
+}
+
+func TestDecodeRasterAttributesSize(t *testing.T) {
+	img, err := Decode([]int{0, 1}, []byte("\"1;1;10;12#1;2;100;0;0#1@"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if img.Width != 10 || img.Height != 12 {
+		t.Fatalf("dims = %dx%d, want 10x12", img.Width, img.Height)
+	}
+	if got := at(t, img.Pixels, img.Width, 0, 0); got != [4]byte{255, 0, 0, 255} {
+		t.Fatalf("pixel(0,0) = %v", got)
+	}
+	if got := at(t, img.Pixels, img.Width, 5, 5); got[3] != 0 {
+		t.Fatalf("P2=1 background should be transparent, got %v", got)
+	}
+}
+
+func TestDecodeBackgroundFill(t *testing.T) {
+	img, _ := Decode([]int{0, 0}, []byte("#0;2;0;0;100\"1;1;4;6#1;2;100;0;0#1@"))
+	if got := at(t, img.Pixels, img.Width, 3, 3); got != [4]byte{0, 0, 255, 255} {
+		t.Fatalf("P2=0 background should use register 0, got %v", got)
+	}
+}
+
+func TestDecodeBandsAndCR(t *testing.T) {
+	// Two bands; '$' returns to column 0 on the same band and overlays.
+	img, _ := Decode([]int{0, 1}, []byte("#1;2;100;0;0#1~~$#2;2;0;100;0@-#1~"))
+	if img.Width != 2 || img.Height != 12 {
+		t.Fatalf("dims = %dx%d", img.Width, img.Height)
+	}
+	if got := at(t, img.Pixels, img.Width, 0, 0); got != [4]byte{0, 255, 0, 255} {
+		t.Fatalf("overlay pixel = %v", got)
+	}
+	if got := at(t, img.Pixels, img.Width, 0, 11); got != [4]byte{255, 0, 0, 255} {
+		t.Fatalf("second band pixel = %v", got)
+	}
+	if got := at(t, img.Pixels, img.Width, 1, 11); got[3] != 0 {
+		t.Fatalf("unset pixel = %v", got)
+	}
+}
+
+func TestDecodeHLSAndRegisterWrap(t *testing.T) {
+	// HLS hue 120 is red in sixel's colour wheel; register 257 wraps to 1.
+	img, _ := Decode([]int{0, 1}, []byte("#257;1;120;50;100#1~"))
+	if got := at(t, img.Pixels, img.Width, 0, 0); got[0] < 250 || got[1] > 5 || got[2] > 5 {
+		t.Fatalf("HLS red = %v", got)
+	}
+}
+
+func TestDecodeHugeRepeatBounded(t *testing.T) {
+	img, err := Decode([]int{0, 1}, []byte("#1;2;100;0;0!999999999~"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if img.Width > MaxWidth {
+		t.Fatalf("width %d exceeds cap", img.Width)
+	}
+}

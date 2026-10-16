@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/go-gl/gl/v4.1-core/gl"
-	gtfont "github.com/go-text/typesetting/font"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/opentype"
 )
@@ -332,6 +331,8 @@ type Glyph struct {
 	// instead of being cut off at the cell boundary.
 	OffsetX float32
 	OffsetY float32
+	Layer   uint16 // atlas page (texture array layer)
+	Color   bool   // RGBA color-emoji atlas entry (drawn untinted)
 }
 
 // asciiGlyphSlot is the per-rune resolution cache entry for ASCII runes.
@@ -357,23 +358,19 @@ type Renderer struct {
 	barViewH        float32 // height of the last rendered frame (tab chip fitting)
 	currentFont     string
 
-	// Font data. The atlas is dynamic: glyphs are rasterized on demand at
-	// their natural ink bounds and shelf-packed into a growable RED texture.
+	// Font data. Glyphs are rasterized on demand at their natural ink bounds
+	// into the paged atlases of textState (see atlas.go, text.go).
+	textState
 	glyphs      map[rune]Glyph
 	glyphMisses map[rune]bool // runes no font in the chain covers (negative cache)
 	// asciiCache is a flat array in front of the glyphs map for runes < 128
 	// (the overwhelming majority of terminal content); neither fallback table
 	// has ASCII keys, so resolution for them is exactly ensureGlyph. Cleared
-	// wherever the glyph cache is invalidated (font reload, atlas grow,
+	// wherever the glyph cache is invalidated (font reload, page eviction,
 	// system-fallback load).
-	asciiCache     [128]asciiGlyphSlot
-	fontAtlas      uint32
-	atlasSize      int
-	atlasPix       []byte    // CPU-side mirror of the RED atlas (for grow/repack)
-	shelfX, shelfY int       // shelf packer cursor
-	shelfH         int       // height of the current shelf
-	atlasAscent    int       // baseline offset from the cell top (font ascent)
-	face           font.Face // current rasterization face (kept open)
+	asciiCache  [128]asciiGlyphSlot
+	atlasAscent int       // baseline offset from the cell top (font ascent)
+	face        font.Face // current rasterization face (kept open)
 	// Font fallback chain (see fallback.go): tried in order when the active
 	// font misses a glyph, before the substitution tables and the '?' resort.
 	fallbackFonts         []fallbackFont
@@ -410,6 +407,10 @@ type Renderer struct {
 	glyphBatchVBO     uint32
 	glyphBatchProjLoc int32
 	glyphBatchTexLoc  int32
+	glyphEmojiLoc     int32
+	glyphBgLoc        int32
+	glyphGammaLoc     int32
+	glyphContrastLoc  int32
 	glyphBatchCap     int
 	// Reusable per-frame batch buffers (avoid re-allocation each frame).
 	gridRects  rectBatch
@@ -425,23 +426,16 @@ type Renderer struct {
 	// immediate decoration draws (block elements, underline, strikethrough),
 	// so pass 2 doesn't re-scan the whole grid.
 	pass2 []pass2Item
-	// atlasGen increments whenever the glyph atlas grows and re-packs
-	// (invalidating all previously recorded UVs); renderGridAt uses it to
-	// detect a mid-pass repack and re-record the batch.
+	// atlasGen increments whenever an atlas page drawn from in the current
+	// batch is recycled (invalidating UVs already recorded); renderGridAt uses
+	// it to detect that mid-pass and re-record the batch.
 	atlasGen uint64
 
-	// Color emoji: system color-emoji font decoded to per-glyph RGBA textures,
-	// drawn with a dedicated non-tinting shader (see coloremoji.go). colorDraws
-	// collects emoji quads during the batched grid pass to draw after the
-	// monochrome glyph batch flushes.
-	colorFace     *gtfont.Face
-	colorFontFile *os.File
-	colorGlyphs   map[rune]colorGlyph
+	// Straight-alpha RGBA texture shader (see coloremoji.go), used for images.
 	colorProgram  uint32
 	colorProjLoc  int32
 	colorTexLoc   int32
 	colorAlphaLoc int32
-	colorDraws    []colorDrawItem
 
 	// Modal UI (see shapes.go): the signed-distance shape shader and labels
 	// rasterized at their own pixel size, from fontParsed for words and
@@ -504,6 +498,35 @@ type Renderer struct {
 	tabSlot   map[*tab.Tab]float32
 	tabSlotAt time.Time
 	dragTab   *tab.Tab
+
+	// Per-pane effective colours (termcolors.go); pc is nil outside the
+	// grid pass so UI chrome keeps theme colours.
+	pc          *paneColors
+	paneCols    paneColors
+	themedTerms map[*parser.Terminal]uint64
+
+	// Inline images (images.go).
+	frame        parser.RenderFrame
+	paneImgs     paneImages
+	texCache     *texCache
+	placeholders []placeholderDraw
+
+	// Effects (effects.go).
+	epoch         time.Time
+	reduceMotion  bool
+	promptMarks   bool
+	blinkInterval time.Duration
+	blinkOff      bool // SGR 5 text is in its hidden phase this frame
+	sawBlink      bool // the last grid pass drew blinking text
+	nextAnim      time.Time
+	flashes       map[*tab.Pane]time.Time
+	preedit       string
+	preeditCursor int
+	markBuf       []grid.PromptMark
+	allMarks      []grid.PromptMark
+	gutterBuf     []gutterMark
+	tickBuf       []scrollTick
+	tickKey       [3]any
 }
 
 // pass2Item marks a cell needing immediate decoration draws after the batches
@@ -603,11 +626,14 @@ func NewRenderer() (*Renderer, error) {
 		contentScale:    1,
 		glyphs:          make(map[rune]Glyph),
 		glyphMisses:     make(map[rune]bool),
-		// atlasSize calculated dynamically in loadFontData based on glyph count
-		fauxBold:   true,
-		fauxItalic: true,
-		undercurl:  true,
+		fauxBold:        true,
+		fauxItalic:      true,
+		undercurl:       true,
+		promptMarks:     true,
 	}
+
+	r.ligatures = true
+	r.textGamma, r.textContrast = defaultTextGamma, defaultTextContrast
 
 	if err := r.initGL(); err != nil {
 		return nil, err
@@ -630,54 +656,6 @@ func NewRenderer() (*Renderer, error) {
 // loadFont loads the current embedded font and creates a glyph atlas
 func (r *Renderer) loadFont() error {
 	return r.loadFontData(fonts.DefaultFont())
-}
-
-// loadFontData parses a font, builds the rasterization face, and initializes an
-// empty dynamic glyph atlas. Glyphs are rasterized lazily by ensureGlyph; this
-// replaces the old startup bake of ~4000 fixed-range glyphs.
-func (r *Renderer) loadFontData(fontData []byte) error {
-	parsedFont, err := opentype.Parse(fontData)
-	if err != nil {
-		return fmt.Errorf("failed to parse font: %w", err)
-	}
-
-	face, err := opentype.NewFace(parsedFont, &opentype.FaceOptions{
-		Size:    float64(r.fontSize),
-		DPI:     r.fontDPI(),
-		Hinting: font.HintingFull,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create font face: %w", err)
-	}
-
-	// Close any previously-open face before replacing it.
-	if r.face != nil {
-		r.face.Close()
-	}
-	r.face = face
-	r.fontParsed = parsedFont
-	r.clearLabels()
-
-	metrics := face.Metrics()
-	r.cellHeight = float32((metrics.Ascent + metrics.Descent).Ceil())
-	advance, _ := face.GlyphAdvance('M')
-	r.cellWidth = float32(advance.Ceil())
-	r.atlasAscent = metrics.Ascent.Ceil()
-
-	// Rebuild the fallback faces at the (possibly new) font size.
-	r.rebuildFallbackFaces()
-
-	// Reset the glyph cache and (re)create an empty atlas texture.
-	r.glyphs = make(map[rune]Glyph)
-	r.glyphMisses = make(map[rune]bool)
-	r.asciiCache = [128]asciiGlyphSlot{}
-	if r.fontAtlas != 0 {
-		gl.DeleteTextures(1, &r.fontAtlas)
-		r.fontAtlas = 0
-	}
-	r.initAtlas(atlasInitialSize)
-	r.uiDirty = true // glyph metrics changed; force a redraw
-	return nil
 }
 
 // fontDPI is the rasterization DPI: 96 scaled by the HiDPI content scale, so
@@ -733,6 +711,9 @@ func (r *Renderer) ContentScale() float32 { return r.hidpiScale() }
 func (r *Renderer) ConsumeUIDirty() bool {
 	d := r.uiDirty
 	r.uiDirty = false
+	if wait, ok := r.NextAnimationFrame(time.Now()); ok && wait <= time.Millisecond {
+		d = true
+	}
 	return d
 }
 
@@ -1764,16 +1745,16 @@ func buildHelpSections() []helpSection {
 	// the Super alias where the letters differ.
 	isMac := runtime.GOOS == "darwin"
 	mod := "Ctrl+Shift"
-	exitKey := "Ctrl+Q"
-	pasteKey := "Super+V / Ctrl+Shift+P"
-	splitV := "Super+D / Ctrl+Shift+V"
-	splitH := "Super+Shift+D / Ctrl+Shift+H"
-	nextTab := "Ctrl+Tab / Super+Shift+]"
-	prevTab := "Ctrl+Shift+Tab / Super+Shift+["
-	cyclePanes := "Super+Shift+Tab"
+	exitKey := "Ctrl+Shift+Q"
+	pasteKey := "Ctrl+Shift+V / Super+V"
+	splitV := "Ctrl+Shift+D / Super+D"
+	splitH := "Ctrl+Shift+Alt+D / Super+Shift+D"
+	nextTab := "Ctrl+Shift+Tab / Super+Tab"
+	prevTab := "Ctrl+Shift+Alt+Tab / Super+Shift+Tab"
 	// Find stays on the Super layer on Linux too: Ctrl+Shift+F is already the
 	// web-search panel there, so there is no Ctrl+Shift chord left for it.
 	findKey := "Super+Shift+F"
+	shiftLeader := "Super+"
 	if isMac {
 		mod = "Cmd"
 		exitKey = "Cmd+Q"
@@ -1782,8 +1763,8 @@ func buildHelpSections() []helpSection {
 		splitH = "Cmd+Shift+D"
 		nextTab = "Cmd+Shift+]"
 		prevTab = "Cmd+Shift+["
-		cyclePanes = "Cmd+Shift+Tab"
 		findKey = "Cmd+Shift+F"
+		shiftLeader = "Cmd+"
 	}
 
 	return []helpSection{
@@ -1793,7 +1774,7 @@ func buildHelpSections() []helpSection {
 				{exitKey, "Exit terminal"},
 				{mod + "+C", "Copy visible screen"},
 				{pasteKey, "Paste clipboard"},
-				{"Shift+Enter", "Toggle fullscreen"},
+				{mod + "+Enter / F11", "Toggle fullscreen"},
 				{mod + "+K", "Show/hide help"},
 				{mod + "+S", "Open settings"},
 				{mod + "+F", "Toggle web search"},
@@ -1822,12 +1803,24 @@ func buildHelpSections() []helpSection {
 				{splitV, "Split vertical"},
 				{splitH, "Split horizontal"},
 				{mod + "+W", "Close pane"},
-				{cyclePanes, "Cycle panes"},
 				{mod + "+]", "Next pane"},
 				{mod + "+[", "Previous pane"},
 				{mod + "+[ or ]", "Cycle overlay panel (when open)"},
-				{"Ctrl+R", "Toggle resize mode"},
+				{mod + "+R", "Toggle resize mode"},
 				{"Arrow Keys", "Resize active pane"},
+			},
+		},
+		{
+			title: "Shell Integration & Overlays",
+			bindings: [][2]string{
+				{mod + "+Up / Down", "Jump to previous / next prompt"},
+				{shiftLeader + "Shift+C", "Copy last command output"},
+				{mod + "+H / " + mod + "+E", "Hints"},
+				{mod + "+Space", "Copy mode"},
+				{mod + "+P", "Command palette"},
+				{mod + "+Z", "Zoom focused pane"},
+				{mod + "+B", "Broadcast input to all panes"},
+				{shiftLeader + "Shift+H", "Scrollback in pager"},
 			},
 		},
 		{
@@ -2466,6 +2459,7 @@ func (r *Renderer) renderPanes(t *tab.Tab, width, height int, proj [16]float32, 
 	// Get active pane for highlighting
 	activePane := t.GetActivePane()
 	separatorWidth := float32(2)
+	r.beginEffectsFrame()
 
 	// First pass: draw separators between panes
 	if len(layouts) > 1 {
@@ -2498,6 +2492,17 @@ func (r *Renderer) renderPanes(t *tab.Tab, width, height int, proj [16]float32, 
 			}
 		}
 
+		term := layout.Pane.Terminal
+		if term == nil {
+			continue
+		}
+		// One locked frame per pane: snapshot, image anchors and modes.
+		term.RenderFrame(&r.frame)
+		r.applyPaneColors(term, r.frame.Reverse)
+		if bg, ok := r.paneBackground(); ok {
+			r.drawRect(offsetX, offsetY, paneWidth, paneHeight, bg, proj)
+		}
+
 		// Draw active pane indicator (subtle border)
 		isActive := layout.Pane == activePane
 		if isActive && len(layouts) > 1 {
@@ -2516,21 +2521,16 @@ func (r *Renderer) renderPanes(t *tab.Tab, width, height int, proj [16]float32, 
 		// Render the pane's grid
 		showCursor := cursorVisible && isActive
 		cursorStyle := parser.CursorStyleBlock
-		term := layout.Pane.Terminal
-		if showCursor && term != nil {
+		if showCursor {
 			// CursorStyle takes Terminal.mu; skip the lock when no cursor
 			// will be drawn this frame.
 			cursorStyle = term.CursorStyle()
 		}
-		// One locked snapshot per pane per frame. The grid pointer is used
-		// only for hover-URL identity matching, so GetGrid (another
-		// Terminal.mu acquisition) is only needed while a hover is active.
-		var g *grid.Grid
-		if r.hoverActive {
-			g = term.GetGrid()
-		}
-		snap := term.Snapshot()
-		r.renderGridAt(snap, g, offsetX, offsetY, paneWidth, paneHeight, proj, showCursor, cursorStyle)
+		f := &r.frame
+		r.prepareImages(f, offsetX, offsetY, paneWidth, paneHeight)
+		r.renderGridAt(f.Snap, f.Grid, offsetX, offsetY, paneWidth, paneHeight, proj, showCursor, cursorStyle)
+		r.paneEffects(layout.Pane, isActive, offsetX, offsetY, paneWidth, paneHeight, proj)
+		r.pc, r.paneImgs.frame = nil, nil
 	}
 }
 
@@ -2982,8 +2982,12 @@ func (r *Renderer) TabDropIndex(tm *tab.TabManager, y float64) int {
 	return tabDropSlot(fy, n, r.tabBarGeom(n))
 }
 
-// tabLabel returns a compact directory-based label for a tab (e.g. "~/D/RavenTerminal").
+// tabLabel returns the tab's OSC 0/2 title when one is set, else a compact
+// directory-based label (e.g. "~/D/RavenTerminal").
 func tabLabel(t *tab.Tab, home string) string {
+	if title := t.Title(); title != "" {
+		return title
+	}
 	dir := t.ActiveDir()
 	if dir == "" {
 		return fmt.Sprintf("Tab %d", t.ID())
@@ -3119,15 +3123,11 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 		}
 	}
 	r.uiFlush() // anything batched earlier (tab bar, chrome) lands under grid content
+	r.drawPlacements(r.paneImgs.below, proj)
 	r.flushRects(&r.gridRects, proj)
-	r.flushGlyphs(&r.gridGlyphs, proj)
-
-	// Color emoji: drawn after the monochrome batch (each is its own RGBA
-	// texture, so they can't share the alpha-atlas draw call).
-	for i := range r.colorDraws {
-		cd := &r.colorDraws[i]
-		r.drawColorGlyph(cd.x, cd.yTop, cd.span, cd.cg, cd.alpha, proj)
-	}
+	r.drawPlacements(r.paneImgs.under, proj)
+	r.drawPlaceholders(proj)
+	r.flushGlyphs(&r.gridGlyphs, proj) // text and color emoji in one draw
 
 	// Pass 2: immediate draws for the minority cases — block elements,
 	// underlines, strikethrough (drawn over the batched glyphs) — visiting
@@ -3141,24 +3141,19 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 		}
 		if cell.Flags&grid.FlagUnderline != 0 || it.hovered {
 			ulColor := it.fg
-			style := uint8(1)
-			if cell.Flags&grid.FlagUnderline != 0 && !it.hovered {
-				if cell.UnderlineColor.Type != grid.ColorDefault {
-					ulColor = r.colorToRGBA(cell.UnderlineColor, false)
-				}
-				if cell.UnderlineStyle != 0 {
-					style = cell.UnderlineStyle
-				}
-				if !r.undercurl {
-					style = 1
-				}
+			if !it.hovered && cell.UnderlineColor.Type != grid.ColorDefault {
+				ulColor = r.colorToRGBA(cell.UnderlineColor, false)
 			}
-			r.drawUnderlineStyled(it.x, it.y, ulColor, proj, style)
+			r.drawUnderlineStyled(it.x, it.y, ulColor, proj, underlineStyleFor(cell, it.hovered, r.undercurl))
 		}
 		if cell.Flags&grid.FlagStrikethrough != 0 {
 			r.drawRect(it.x, it.y+r.cellHeight/2, r.cellWidth, 1, it.fg, proj)
 		}
+		if cell.Flags&grid.FlagOverline != 0 {
+			r.drawRect(it.x, it.y, r.cellWidth, max32(1, r.cellHeight/18), it.fg, proj)
+		}
 	}
+	r.drawPlacements(r.paneImgs.over, proj)
 
 	// Draw cursor
 	if cursorVisible && snap.ScrollOffset == 0 {
@@ -3175,29 +3170,19 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 				if h < 1 {
 					h = 1
 				}
-				r.drawRect(cursorX, cursorY+r.cellHeight-h, r.cellWidth, h, r.theme.Cursor, proj)
+				r.drawRect(cursorX, cursorY+r.cellHeight-h, r.cellWidth, h, r.cursorColor(), proj)
 			case parser.CursorStyleBar:
 				w := r.cellWidth / 6
 				if w < 1 {
 					w = 1
 				}
-				r.drawRect(cursorX, cursorY, w, r.cellHeight, r.theme.Cursor, proj)
+				r.drawRect(cursorX, cursorY, w, r.cellHeight, r.cursorColor(), proj)
 			default:
-				r.drawRect(cursorX, cursorY, r.cellWidth, r.cellHeight, r.theme.Cursor, proj)
+				r.drawRect(cursorX, cursorY, r.cellWidth, r.cellHeight, r.cursorColor(), proj)
 				// Redraw character under cursor in inverse
 				if cell.Char != ' ' && cell.Char != 0 && cell.Flags&grid.FlagHidden == 0 {
-					if !r.drawGeometryRune(cursorX, cursorY, cell.Char, r.theme.Background, proj) {
-						if _, ok := r.resolveGlyph(cell.Char); ok {
-							r.drawChar(cursorX, cursorY+r.cellHeight, cell.Char, r.theme.Background, proj)
-						} else if cg, ok := r.ensureColorGlyph(cell.Char); ok {
-							span := 1
-							if cell.Width == grid.CellWidthWide {
-								span = 2
-							}
-							r.drawColorGlyph(cursorX, cursorY, span, cg, 1.0, proj)
-						} else {
-							r.drawChar(cursorX, cursorY+r.cellHeight, cell.Char, r.theme.Background, proj)
-						}
+					if !r.drawGeometryRune(cursorX, cursorY, cell.Char, r.defaultBg(), proj) {
+						r.drawCellGlyph(cursorX, cursorY, cell, r.defaultBg(), proj)
 					}
 				}
 			}
@@ -3236,8 +3221,10 @@ func (r *Renderer) buildGridBatches(snap *grid.Snapshot, offsetX, offsetY, paneW
 
 	r.gridRects.reset()
 	r.gridGlyphs.reset()
-	r.colorDraws = r.colorDraws[:0]
 	r.pass2 = r.pass2[:0]
+	r.placeholders = r.placeholders[:0]
+	r.sawBlink = false
+	var prevPH placeholderInfo
 
 	// Hoist the pane-clip check: cells past these limits produce no output.
 	maxCol := fitCells(offsetX, r.cellWidth, cols, offsetX+paneWidth)
@@ -3245,14 +3232,16 @@ func (r *Renderer) buildGridBatches(snap *grid.Snapshot, offsetX, offsetY, paneW
 
 	selActive := snap.SelActive
 	selColor := r.theme.Selection
-	bgTheme := r.theme.Background
-	fgTheme := r.theme.Foreground
+	bgTheme := r.defaultBg()
+	fgTheme := r.defaultFg()
 	rectW := r.cellWidth + 0.5
 
 	for row := range maxRow {
 		rowCells := snap.Cells[row*cols : row*cols+cols]
 		y := offsetY + float32(row)*r.cellHeight
 		hoverLo, hoverHi := r.hoverColsForRow(hover, row, cols)
+		prevPH = placeholderInfo{}
+		r.prepareRowShaping(rowCells[:maxCol])
 		for col := range maxCol {
 			cell := rowCells[col]
 			x := offsetX + float32(col)*r.cellWidth
@@ -3278,6 +3267,16 @@ func (r *Renderer) buildGridBatches(snap *grid.Snapshot, offsetX, offsetY, paneW
 			}
 
 			hidden := cell.Flags&grid.FlagHidden != 0
+			if cell.Char == placeholderRune {
+				prevPH = decodePlaceholder(cell, prevPH)
+				r.placeholders = append(r.placeholders, placeholderDraw{x: x, y: y, info: prevPH})
+				continue
+			}
+			prevPH = placeholderInfo{}
+			if cell.Flags&grid.FlagBlink != 0 && !r.reduceMotion {
+				r.sawBlink = true
+				hidden = hidden || r.blinkOff
+			}
 			isBlock := isGeometryRune(cell.Char)
 			// Block-element chars and the cursor cell are drawn immediately
 			// in pass 2; everything else is a batched glyph. A glyph
@@ -3286,7 +3285,7 @@ func (r *Renderer) buildGridBatches(snap *grid.Snapshot, offsetX, offsetY, paneW
 			needGlyph := !hidden && cell.Char != ' ' && cell.Char != 0 && !isBlock
 			hovered := col >= hoverLo && col <= hoverHi
 			needDecor := !hidden && (isBlock || hovered ||
-				cell.Flags&(grid.FlagUnderline|grid.FlagStrikethrough) != 0)
+				cell.Flags&(grid.FlagUnderline|grid.FlagStrikethrough|grid.FlagOverline) != 0)
 			if !needGlyph && !needDecor {
 				continue
 			}
@@ -3313,48 +3312,7 @@ func (r *Renderer) buildGridBatches(snap *grid.Snapshot, offsetX, offsetY, paneW
 			}
 
 			if needGlyph {
-				g, ok := r.resolveGlyph(cell.Char)
-				if !ok {
-					if cg, isColor := r.ensureColorGlyph(cell.Char); isColor {
-						span := 1
-						if cell.Width == grid.CellWidthWide {
-							span = 2
-						}
-						r.colorDraws = append(r.colorDraws, colorDrawItem{
-							x: x, yTop: y, span: span, cg: cg, alpha: fgColor[3],
-						})
-					} else {
-						g, ok = r.ensureGlyph('?')
-					}
-				}
-				if ok && g.PixelWidth > 0 {
-					// Available span: wide chars own two cells; icons may
-					// also use a following blank cell (Ghostty-style), which
-					// is how Nerd Font icons are typically spaced in TUIs.
-					span := 1
-					if cell.Width == grid.CellWidthWide {
-						span = 2
-					} else if isIconRune(cell.Char) && col+1 < cols {
-						next := rowCells[col+1]
-						if next.Char == ' ' || next.Char == 0 {
-							span = 2
-						}
-					}
-					if span == 2 && x+2*r.cellWidth > offsetX+paneWidth {
-						span = 1
-					}
-					gx, gyTop, gw, gh := r.glyphQuad(cell.Char, g, x, y, span)
-					var shear float32
-					if r.fauxItalic && cell.Flags&grid.FlagItalic != 0 {
-						shear = gh * 0.2
-					}
-					r.gridGlyphs.addGlyph(gx, gyTop+gh, gw, gh,
-						g.X, g.Y, g.Width, g.Height, fgColor, shear)
-					if r.fauxBold && cell.Flags&grid.FlagBold != 0 {
-						r.gridGlyphs.addGlyph(gx+1, gyTop+gh, gw, gh,
-							g.X, g.Y, g.Width, g.Height, fgColor, shear)
-					}
-				}
+				r.emitCellGlyph(&r.gridGlyphs, rowCells, col, x, y, offsetX+paneWidth, fgColor)
 			}
 		}
 	}
@@ -3492,12 +3450,13 @@ func (r *Renderer) drawRect(x, y, w, h float32, clr [4]float32, proj [16]float32
 // 1=solid, 2=double, 3=curly (undercurl), 4=dotted, 5=dashed. Unknown styles draw solid.
 func (r *Renderer) drawUnderlineStyled(x, y float32, clr [4]float32, proj [16]float32, style uint8) {
 	w := r.cellWidth
-	baseY := y + r.cellHeight - 1
+	th := float32(int(max32(1, r.cellHeight/18)))
+	baseY := y + r.cellHeight - th
 	switch style {
 	case 2: // double underline
-		r.drawRect(x, baseY, w, 1, clr, proj)
-		if baseY-2 >= y {
-			r.drawRect(x, baseY-2, w, 1, clr, proj)
+		r.drawRect(x, baseY, w, th, clr, proj)
+		if baseY-2*th >= y {
+			r.drawRect(x, baseY-2*th, w, th, clr, proj)
 		}
 	case 3: // curly / undercurl
 		r.drawUndercurl(x, baseY, w, clr, proj)
@@ -3514,7 +3473,7 @@ func (r *Renderer) drawUnderlineStyled(x, y float32, clr [4]float32, proj [16]fl
 			r.drawRect(x+float32(dx), baseY, seg, 1, clr, proj)
 		}
 	default: // solid
-		r.drawRect(x, baseY, w, 1, clr, proj)
+		r.drawRect(x, baseY, w, th, clr, proj)
 	}
 }
 
@@ -3731,11 +3690,18 @@ func (r *Renderer) drawChar(x, y float32, char rune, clr [4]float32, proj [16]fl
 	r.drawCharStyled(x, y, char, clr, proj, false, false)
 }
 
-// drawCharStyled draws a glyph with optional synthesized bold (offset double-draw)
-// and italic (horizontal shear). With bold=false, italic=false it is identical to a
-// plain drawChar.
+// drawCharStyled draws a glyph in the bold/italic face (real variant or
+// synthesized at rasterization). With bold=false, italic=false it is identical
+// to a plain drawChar.
 func (r *Renderer) drawCharStyled(x, y float32, char rune, clr [4]float32, proj [16]float32, bold, italic bool) {
-	glyph, ok := r.resolveGlyph(char)
+	style := styleRegular
+	if bold {
+		style |= styleBold
+	}
+	if italic {
+		style |= styleItalic
+	}
+	glyph, ok := r.styledGlyph(char, style)
 	if !ok {
 		// Try the color-emoji path (same as the grid renderer) before the
 		// '?' fallback, so emoji in panel text render instead of degrading.
@@ -3760,25 +3726,15 @@ func (r *Renderer) drawCharStyled(x, y float32, char rune, clr [4]float32, proj 
 	tw := glyph.Width
 	th := glyph.Height
 
-	// Faux italic: slant the glyph by shifting its top edge to the right.
-	var shear float32
-	if italic {
-		shear = h * 0.2
-	}
-
 	r.uiEnsure(uiKindGlyph, proj)
-	// resolveGlyph above may have grown (re-packed) the atlas, invalidating
-	// UVs already recorded in this batch. Drop them rather than draw garbage;
-	// the affected chars reappear next frame from the now-warm atlas.
+	// styledGlyph above may have recycled an atlas page, invalidating UVs
+	// already recorded in this batch. Drop them rather than draw garbage.
 	if r.uiAtlasGen != r.atlasGen {
 		r.uiGlyphs.reset()
 		r.uiAtlasGen = r.atlasGen
 	}
-	r.uiGlyphs.addGlyph(gx, gy, w, h, tx, ty, tw, th, clr, shear)
-	// Faux bold: a second quad offset by 1px in x thickens the strokes.
-	if bold {
-		r.uiGlyphs.addGlyph(gx+1, gy, w, h, tx, ty, tw, th, clr, shear)
-	}
+	r.atlas.touch(int(glyph.Layer))
+	r.uiGlyphs.addGlyphL(gx, gy, w, h, tx, ty, tw, th, clr, 0, float32(glyph.Layer))
 }
 
 // drawText draws a string of text
@@ -3893,7 +3849,12 @@ func (r *Renderer) drawCharScaled(x, y float32, char rune, clr [4]float32, proj 
 	th := glyph.Height
 
 	r.uiEnsure(uiKindGlyph, proj)
-	r.uiGlyphs.addGlyph(gx, gy, w, h, tx, ty, tw, th, clr, 0)
+	if r.uiAtlasGen != r.atlasGen {
+		r.uiGlyphs.reset()
+		r.uiAtlasGen = r.atlasGen
+	}
+	r.atlas.touch(int(glyph.Layer))
+	r.uiGlyphs.addGlyphL(gx, gy, w, h, tx, ty, tw, th, clr, 0, float32(glyph.Layer))
 }
 
 // colorToRGBA converts a grid.Color to RGBA
@@ -3901,10 +3862,13 @@ func (r *Renderer) colorToRGBA(c grid.Color, isBackground bool) [4]float32 {
 	switch c.Type {
 	case grid.ColorDefault:
 		if isBackground {
-			return r.theme.Background
+			return r.defaultBg()
 		}
-		return r.theme.Foreground
+		return r.defaultFg()
 	case grid.ColorIndexed:
+		if r.pc != nil {
+			return r.pc.palette[c.Index]
+		}
 		if c.Index < 16 && r.theme.ANSI != nil {
 			return r.theme.ANSI[c.Index]
 		}
@@ -3942,22 +3906,20 @@ func indexedColor(index uint8) [4]float32 {
 		return standard16[index]
 	}
 
-	// 216 color cube (indices 16-231)
+	// xterm 6x6x6 color cube (indices 16-231)
 	if index < 232 {
 		idx := index - 16
-		red := (idx / 36) % 6
-		green := (idx / 6) % 6
-		blue := idx % 6
-		return [4]float32{
-			float32(red) * 51 / 255,
-			float32(green) * 51 / 255,
-			float32(blue) * 51 / 255,
-			1.0,
+		level := func(v uint8) float32 {
+			if v == 0 {
+				return 0
+			}
+			return float32(55+40*int(v)) / 255
 		}
+		return [4]float32{level(idx / 36), level((idx / 6) % 6), level(idx % 6), 1.0}
 	}
 
-	// Grayscale (indices 232-255)
-	gray := float32(index-232) * 10 / 255
+	// xterm grayscale ramp (indices 232-255): 8, 18, ..., 238
+	gray := float32(8+10*int(index-232)) / 255
 	return [4]float32{gray, gray, gray, 1.0}
 }
 
@@ -4094,6 +4056,9 @@ func clampFontSize(size float32) float32 {
 
 // Destroy cleans up renderer resources
 func (r *Renderer) Destroy() {
+	if r.texCache != nil {
+		r.texCache.freeAll()
+	}
 	gl.DeleteVertexArrays(1, &r.quadVAO)
 	gl.DeleteBuffers(1, &r.quadVBO)
 	gl.DeleteVertexArrays(1, &r.fontVAO)
@@ -4107,14 +4072,7 @@ func (r *Renderer) Destroy() {
 	gl.DeleteBuffers(1, &r.glyphBatchVBO)
 	gl.DeleteProgram(r.glyphBatchProgram)
 	r.destroyShapes()
-	gl.DeleteTextures(1, &r.fontAtlas)
-	if r.face != nil {
-		r.face.Close()
-	}
-	for _, f := range r.fallbackFaces {
-		f.Close()
-	}
-	r.destroyColorEmoji()
+	r.destroyText()
 }
 
 // cachedHomeDir avoids an os.UserHomeDir syscall per tab-bar frame; the home

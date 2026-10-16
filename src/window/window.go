@@ -21,6 +21,10 @@ type Config struct {
 	Width  int
 	Height int
 	Title  string
+	Class  string // X11 WM_CLASS and Wayland app_id
+	// Transparent requests a framebuffer with alpha that the compositor
+	// blends (glass themes, background opacity below 1).
+	Transparent bool
 }
 
 // DefaultConfig returns the default window configuration
@@ -29,6 +33,7 @@ func DefaultConfig() Config {
 		Width:  900,
 		Height: 600,
 		Title:  "Raven Terminal",
+		Class:  "raven-terminal",
 	}
 }
 
@@ -81,6 +86,32 @@ func Terminate() {
 	}
 }
 
+type intHint struct {
+	hint  glfw.Hint
+	value int
+}
+
+// intHints are the GLFW window hints for config. Every window sets all of
+// them, since hints persist between CreateWindow calls.
+func intHints(config Config) []intHint {
+	transparent := glfw.False
+	if config.Transparent {
+		transparent = glfw.True
+	}
+	return []intHint{
+		{glfw.ContextVersionMajor, 4},
+		{glfw.ContextVersionMinor, 1},
+		{glfw.OpenGLProfile, glfw.OpenGLCoreProfile},
+		{glfw.OpenGLForwardCompatible, glfw.True},
+		{glfw.Resizable, glfw.True},
+		{glfw.DoubleBuffer, glfw.True},
+		// Don't auto-minimize exclusive-fullscreen windows on focus loss
+		// (macOS: swiping to another Space was hiding the window)
+		{glfw.AutoIconify, glfw.False},
+		{glfw.TransparentFramebuffer, transparent},
+	}
+}
+
 // NewWindow creates a new GLFW window with OpenGL context
 func NewWindow(config Config) (*Window, error) {
 	if !glfwReady {
@@ -90,20 +121,17 @@ func NewWindow(config Config) (*Window, error) {
 		glfwReady = true
 	}
 
-	// OpenGL context hints
-	glfw.WindowHint(glfw.ContextVersionMajor, 4)
-	glfw.WindowHint(glfw.ContextVersionMinor, 1)
-	glfw.WindowHint(glfw.OpenGLProfile, glfw.OpenGLCoreProfile)
-	glfw.WindowHint(glfw.OpenGLForwardCompatible, glfw.True)
-	glfw.WindowHint(glfw.Resizable, glfw.True)
-	glfw.WindowHint(glfw.DoubleBuffer, glfw.True)
-	// Don't auto-minimize exclusive-fullscreen windows on focus loss
-	// (macOS: swiping to another Space was hiding the window)
-	glfw.WindowHint(glfw.AutoIconify, glfw.False)
+	for _, h := range intHints(config) {
+		glfw.WindowHint(h.hint, h.value)
+	}
 
 	// Set X11 window class for proper WM integration (Hyprland, i3, etc.)
-	glfw.WindowHintString(glfw.X11ClassName, "raven-terminal")
-	glfw.WindowHintString(glfw.X11InstanceName, "raven-terminal")
+	class := config.Class
+	if class == "" {
+		class = "raven-terminal"
+	}
+	glfw.WindowHintString(glfw.X11ClassName, class)
+	glfw.WindowHintString(glfw.X11InstanceName, class)
 
 	window, err := glfw.CreateWindow(config.Width, config.Height, config.Title, nil, nil)
 	if err != nil {

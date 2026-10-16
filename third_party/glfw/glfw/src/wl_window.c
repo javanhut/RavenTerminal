@@ -26,7 +26,9 @@
 // It is fine to use C99 in this file because it will not be built with VS
 //========================================================================
 
-#define _GNU_SOURCE
+#ifndef _GNU_SOURCE
+ #define _GNU_SOURCE
+#endif
 
 #include "internal.h"
 
@@ -348,14 +350,40 @@ static void setContentAreaOpaque(_GLFWwindow* window)
 }
 
 
+static float getWindowScale(_GLFWwindow* window)
+{
+    if (window->wl.fractionalScaling)
+        return _glfwRavenScaleFromWire(window->wl.fractionalScale);
+
+    return (float) window->wl.contentScale;
+}
+
+static void getFramebufferSize(_GLFWwindow* window, int* width, int* height)
+{
+    if (window->wl.fractionalScaling)
+    {
+        *width = _glfwRavenScaledSize(window->wl.width, window->wl.fractionalScale);
+        *height = _glfwRavenScaledSize(window->wl.height, window->wl.fractionalScale);
+    }
+    else
+    {
+        *width = window->wl.width * window->wl.contentScale;
+        *height = window->wl.height * window->wl.contentScale;
+    }
+}
+
 static void resizeWindow(_GLFWwindow* window)
 {
-    int scale = window->wl.contentScale;
-    int scaledWidth = window->wl.width * scale;
-    int scaledHeight = window->wl.height * scale;
+    int scaledWidth, scaledHeight;
+    getFramebufferSize(window, &scaledWidth, &scaledHeight);
 
     if (window->wl.egl.window)
         wl_egl_window_resize(window->wl.egl.window, scaledWidth, scaledHeight, 0, 0);
+    if (window->wl.viewport)
+    {
+        wp_viewport_set_destination(window->wl.viewport,
+                                    window->wl.width, window->wl.height);
+    }
     if (!window->wl.transparent)
         setContentAreaOpaque(window);
     _glfwInputFramebufferSize(window, scaledWidth, scaledHeight);
@@ -386,17 +414,25 @@ static void resizeWindow(_GLFWwindow* window)
 
 void _glfwUpdateContentScaleWayland(_GLFWwindow* window)
 {
+    if (window->wl.fractionalScaling)
+        return;
+
     if (wl_compositor_get_version(_glfw.wl.compositor) <
         WL_SURFACE_SET_BUFFER_SCALE_SINCE_VERSION)
     {
         return;
     }
 
-    // Get the scale factor from the highest scale monitor.
+    // Prefer the compositor's choice, else the highest scale monitor.
     int maxScale = 1;
 
-    for (int i = 0; i < window->wl.scaleCount; i++)
-        maxScale = _glfw_max(window->wl.scales[i].factor, maxScale);
+    if (window->wl.preferredBufferScale > 0)
+        maxScale = window->wl.preferredBufferScale;
+    else
+    {
+        for (int i = 0; i < window->wl.scaleCount; i++)
+            maxScale = _glfw_max(window->wl.scales[i].factor, maxScale);
+    }
 
     // Only change the framebuffer size if the scale changed.
     if (window->wl.contentScale != maxScale)
@@ -451,7 +487,8 @@ static void surfaceHandleLeave(void* userData,
     {
         if (window->wl.scales[i].output == output)
         {
-            window->wl.scales[i] = window->wl.scales[window->wl.scaleCount - 1];
+            memmove(window->wl.scales + i, window->wl.scales + i + 1,
+                    (window->wl.scaleCount - i - 1) * sizeof(_GLFWscaleWayland));
             window->wl.scaleCount--;
             break;
         }
@@ -460,10 +497,59 @@ static void surfaceHandleLeave(void* userData,
     _glfwUpdateContentScaleWayland(window);
 }
 
+#ifdef WL_SURFACE_PREFERRED_BUFFER_SCALE_SINCE_VERSION
+static void surfaceHandlePreferredBufferScale(void* userData,
+                                              struct wl_surface* surface,
+                                              int32_t factor)
+{
+    _GLFWwindow* window = userData;
+
+    if (factor < 1 || window->wl.preferredBufferScale == factor)
+        return;
+
+    window->wl.preferredBufferScale = factor;
+    _glfwUpdateContentScaleWayland(window);
+}
+
+static void surfaceHandlePreferredBufferTransform(void* userData,
+                                                  struct wl_surface* surface,
+                                                  uint32_t transform)
+{
+}
+#endif
+
 static const struct wl_surface_listener surfaceListener =
 {
     surfaceHandleEnter,
-    surfaceHandleLeave
+    surfaceHandleLeave,
+#ifdef WL_SURFACE_PREFERRED_BUFFER_SCALE_SINCE_VERSION
+    surfaceHandlePreferredBufferScale,
+    surfaceHandlePreferredBufferTransform,
+#endif
+};
+
+static void fractionalScaleHandlePreferredScale(void* userData,
+                                                struct wp_fractional_scale_v1* object,
+                                                uint32_t scale)
+{
+    _GLFWwindow* window = userData;
+
+    if (scale == 0 || window->wl.fractionalScale == (int) scale)
+        return;
+
+    window->wl.fractionalScale = (int) scale;
+
+    const float contentScale = _glfwRavenScaleFromWire(scale);
+    _glfwInputWindowContentScale(window, contentScale, contentScale);
+    resizeWindow(window);
+
+    if (window->wl.visible)
+        _glfwInputWindowDamage(window);
+}
+
+static const struct wp_fractional_scale_v1_listener fractionalScaleListener =
+{
+    fractionalScaleHandlePreferredScale
 };
 
 static void setIdleInhibitor(_GLFWwindow* window, GLFWbool enable)
@@ -482,6 +568,87 @@ static void setIdleInhibitor(_GLFWwindow* window, GLFWbool enable)
         zwp_idle_inhibitor_v1_destroy(window->wl.idleInhibitor);
         window->wl.idleInhibitor = NULL;
     }
+}
+
+// Hands the launcher's XDG_ACTIVATION_TOKEN to the first window mapped
+//
+static void activateWithStartupToken(_GLFWwindow* window)
+{
+    if (!_glfw.wl.activationToken)
+        return;
+
+    if (_glfw.wl.activationManager)
+    {
+        xdg_activation_v1_activate(_glfw.wl.activationManager,
+                                   _glfw.wl.activationToken,
+                                   window->wl.surface);
+    }
+
+    free(_glfw.wl.activationToken);
+    _glfw.wl.activationToken = NULL;
+}
+
+static void activationTokenHandleDone(void* userData,
+                                      struct xdg_activation_token_v1* token,
+                                      const char* tokenString)
+{
+    _GLFWwindow* window = userData;
+
+    if (token != window->wl.activationToken)
+        return;
+
+    xdg_activation_v1_activate(_glfw.wl.activationManager,
+                               tokenString,
+                               window->wl.surface);
+    xdg_activation_token_v1_destroy(token);
+    window->wl.activationToken = NULL;
+}
+
+static const struct xdg_activation_token_v1_listener activationTokenListener =
+{
+    activationTokenHandleDone
+};
+
+// Requests an activation token and activates the window with it. With the
+// latest input serial the compositor may move focus; without one it should
+// only mark the window as wanting attention.
+//
+static void requestActivation(_GLFWwindow* window, GLFWbool focus)
+{
+    if (!_glfw.wl.activationManager)
+    {
+        if (!_glfw.wl.activationWarned)
+        {
+            _glfw.wl.activationWarned = GLFW_TRUE;
+            _glfwInputError(GLFW_PLATFORM_ERROR,
+                            "Wayland: The compositor does not support xdg_activation_v1");
+        }
+        return;
+    }
+
+    // A request is already in flight for this window
+    if (window->wl.activationToken)
+        return;
+
+    window->wl.activationToken =
+        xdg_activation_v1_get_activation_token(_glfw.wl.activationManager);
+    xdg_activation_token_v1_add_listener(window->wl.activationToken,
+                                         &activationTokenListener,
+                                         window);
+
+    if (focus && _glfw.wl.seat && _glfw.wl.serial)
+    {
+        xdg_activation_token_v1_set_serial(window->wl.activationToken,
+                                           _glfw.wl.serial,
+                                           _glfw.wl.seat);
+    }
+
+    _GLFWwindow* requester = _glfw.wl.keyboardFocus ? _glfw.wl.keyboardFocus : window;
+    xdg_activation_token_v1_set_surface(window->wl.activationToken,
+                                        requester->wl.surface);
+    if (window->wl.appId)
+        xdg_activation_token_v1_set_app_id(window->wl.activationToken, window->wl.appId);
+    xdg_activation_token_v1_commit(window->wl.activationToken);
 }
 
 // Make the specified window and its video mode active on its monitor
@@ -650,6 +817,7 @@ static void xdgSurfaceHandleConfigure(void* userData,
         if (!window->wl.xdg.decoration || window->wl.xdg.decorationMode)
         {
             window->wl.visible = GLFW_TRUE;
+            activateWithStartupToken(window);
             _glfwInputWindowDamage(window);
         }
     }
@@ -729,6 +897,7 @@ void libdecorFrameHandleConfigure(struct libdecor_frame* frame,
     if (!window->wl.visible)
     {
         window->wl.visible = GLFW_TRUE;
+        activateWithStartupToken(window);
         damaged = GLFW_TRUE;
     }
 
@@ -1010,12 +1179,103 @@ static GLFWbool createNativeSurface(_GLFWwindow* window,
     if (!window->wl.transparent)
         setContentAreaOpaque(window);
 
+    if (_glfw.wl.fractionalScaleManager && _glfw.wl.viewporter)
+    {
+        window->wl.fractionalScale = 120;
+        window->wl.viewport =
+            wp_viewporter_get_viewport(_glfw.wl.viewporter, window->wl.surface);
+        wp_viewport_set_destination(window->wl.viewport,
+                                    window->wl.width, window->wl.height);
+        window->wl.fractionalScaling =
+            wp_fractional_scale_manager_v1_get_fractional_scale(
+                _glfw.wl.fractionalScaleManager, window->wl.surface);
+        wp_fractional_scale_v1_add_listener(window->wl.fractionalScaling,
+                                            &fractionalScaleListener,
+                                            window);
+    }
+
+    return GLFW_TRUE;
+}
+
+// Maps a GLFW standard cursor to its wp_cursor_shape_device_v1 shape
+//
+int _glfwRavenCursorShapeWayland(int shape)
+{
+    switch (shape)
+    {
+        case GLFW_ARROW_CURSOR:
+            return WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DEFAULT;
+        case GLFW_IBEAM_CURSOR:
+            return WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_TEXT;
+        case GLFW_CROSSHAIR_CURSOR:
+            return WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_CROSSHAIR;
+        case GLFW_HAND_CURSOR:
+            return WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_POINTER;
+        case GLFW_HRESIZE_CURSOR:
+            return WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_EW_RESIZE;
+        case GLFW_VRESIZE_CURSOR:
+            return WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NS_RESIZE;
+        case GLFW_RESIZE_NWSE_CURSOR:
+            return WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NWSE_RESIZE;
+        case GLFW_RESIZE_NESW_CURSOR:
+            return WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NESW_RESIZE;
+        case GLFW_RESIZE_ALL_CURSOR:
+            return WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ALL_SCROLL;
+        case GLFW_NOT_ALLOWED_CURSOR:
+            return WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NOT_ALLOWED;
+    }
+
+    return 0;
+}
+
+// Maps a fallback decoration cursor name to its wp_cursor_shape_device_v1 shape
+//
+static int cursorShapeFromName(const char* name)
+{
+    static const struct { const char* name; int shape; } shapes[] =
+    {
+        { "left_ptr", WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DEFAULT },
+        { "n-resize", WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_N_RESIZE },
+        { "s-resize", WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_S_RESIZE },
+        { "e-resize", WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_E_RESIZE },
+        { "w-resize", WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_W_RESIZE },
+        { "ne-resize", WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NE_RESIZE },
+        { "nw-resize", WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NW_RESIZE },
+        { "se-resize", WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_SE_RESIZE },
+        { "sw-resize", WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_SW_RESIZE },
+    };
+
+    for (size_t i = 0; i < sizeof(shapes) / sizeof(shapes[0]); i++)
+    {
+        if (strcmp(shapes[i].name, name) == 0)
+            return shapes[i].shape;
+    }
+
+    return 0;
+}
+
+// Sets a standard cursor through wp_cursor_shape_v1 if the compositor has it
+//
+static GLFWbool setCursorShape(int shape)
+{
+    if (!_glfw.wl.cursorShapeDevice || !shape)
+        return GLFW_FALSE;
+
+    struct itimerspec timer = {0};
+    timerfd_settime(_glfw.wl.cursorTimerfd, 0, &timer, NULL);
+
+    wp_cursor_shape_device_v1_set_shape(_glfw.wl.cursorShapeDevice,
+                                        _glfw.wl.pointerEnterSerial,
+                                        shape);
     return GLFW_TRUE;
 }
 
 static void setCursorImage(_GLFWwindow* window,
                            _GLFWcursorWayland* cursorWayland)
 {
+    if (setCursorShape(_glfwRavenCursorShapeWayland(cursorWayland->shape)))
+        return;
+
     struct itimerspec timer = {0};
     struct wl_cursor* wlCursor = cursorWayland->cursor;
     struct wl_cursor_image* image;
@@ -1027,7 +1287,7 @@ static void setCursorImage(_GLFWwindow* window,
         buffer = cursorWayland->buffer;
     else
     {
-        if (window->wl.contentScale > 1 && cursorWayland->cursorHiDPI)
+        if (getWindowScale(window) > 1.f && cursorWayland->cursorHiDPI)
         {
             wlCursor = cursorWayland->cursorHiDPI;
             scale = 2;
@@ -1147,12 +1407,13 @@ static void handleEvents(double* timeout)
 #endif
 
     GLFWbool event = GLFW_FALSE;
-    struct pollfd fds[4] =
+    struct pollfd fds[5] =
     {
         { wl_display_get_fd(_glfw.wl.display), POLLIN },
         { _glfw.wl.keyRepeatTimerfd, POLLIN },
         { _glfw.wl.cursorTimerfd, POLLIN },
-        { -1, POLLIN }
+        { -1, POLLIN },
+        { _glfw.wl.emptyEventPipe[0], POLLIN }
     };
 
     if (_glfw.wl.libdecor.context)
@@ -1208,7 +1469,7 @@ static void handleEvents(double* timeout)
                     _glfwInputKey(_glfw.wl.keyboardFocus,
                                   translateKey(_glfw.wl.keyRepeatScancode),
                                   _glfw.wl.keyRepeatScancode,
-                                  GLFW_PRESS,
+                                  GLFW_REPEAT,
                                   _glfw.wl.xkb.modifiers);
                     inputText(_glfw.wl.keyboardFocus, _glfw.wl.keyRepeatScancode);
                 }
@@ -1230,8 +1491,20 @@ static void handleEvents(double* timeout)
             if (libdecor_dispatch(_glfw.wl.libdecor.context, 0) > 0)
                 event = GLFW_TRUE;
         }
+
+        if (fds[4].revents & POLLIN)
+        {
+            char buffer[64];
+
+            while (read(_glfw.wl.emptyEventPipe[0], buffer, sizeof(buffer)) > 0)
+                ;
+
+            event = GLFW_TRUE;
+        }
     }
 }
+
+static char* readPipeAsString(int fds[2]);
 
 // Reads the specified data offer as the specified MIME type
 //
@@ -1248,6 +1521,33 @@ static char* readDataOfferAsString(struct wl_data_offer* offer, const char* mime
     }
 
     wl_data_offer_receive(offer, mimeType, fds[1]);
+    return readPipeAsString(fds);
+}
+
+// Reads the specified primary selection offer as the specified MIME type
+//
+static char* readPrimaryOfferAsString(struct zwp_primary_selection_offer_v1* offer,
+                                      const char* mimeType)
+{
+    int fds[2];
+
+    if (pipe2(fds, O_CLOEXEC) == -1)
+    {
+        _glfwInputError(GLFW_PLATFORM_ERROR,
+                        "Wayland: Failed to create pipe for primary selection: %s",
+                        strerror(errno));
+        return NULL;
+    }
+
+    zwp_primary_selection_offer_v1_receive(offer, mimeType, fds[1]);
+    return readPipeAsString(fds);
+}
+
+// Closes the write end after the receive request went out and reads the
+// read end to EOF
+//
+static char* readPipeAsString(int fds[2])
+{
     flushDisplay();
     close(fds[1]);
 
@@ -1413,13 +1713,18 @@ static void pointerHandleMotion(void* userData,
             assert(0);
     }
 
-    if (_glfw.wl.cursorPreviousName != cursorName)
+    if (_glfw.wl.cursorPreviousName != cursorName &&
+        setCursorShape(cursorShapeFromName(cursorName)))
+    {
+        _glfw.wl.cursorPreviousName = cursorName;
+    }
+    else if (_glfw.wl.cursorPreviousName != cursorName)
     {
         struct wl_surface* surface = _glfw.wl.cursorSurface;
         struct wl_cursor_theme* theme = _glfw.wl.cursorTheme;
         int scale = 1;
 
-        if (window->wl.contentScale > 1 && _glfw.wl.cursorThemeHiDPI)
+        if (getWindowScale(window) > 1.f && _glfw.wl.cursorThemeHiDPI)
         {
             // We only support up to scale=2 for now, since libwayland-cursor
             // requires us to load a different theme for each size.
@@ -1825,9 +2130,22 @@ static void seatHandleCapabilities(void* userData,
     {
         _glfw.wl.pointer = wl_seat_get_pointer(seat);
         wl_pointer_add_listener(_glfw.wl.pointer, &pointerListener, NULL);
+
+        if (_glfw.wl.cursorShapeManager)
+        {
+            _glfw.wl.cursorShapeDevice =
+                wp_cursor_shape_manager_v1_get_pointer(_glfw.wl.cursorShapeManager,
+                                                       _glfw.wl.pointer);
+        }
     }
     else if (!(caps & WL_SEAT_CAPABILITY_POINTER) && _glfw.wl.pointer)
     {
+        if (_glfw.wl.cursorShapeDevice)
+        {
+            wp_cursor_shape_device_v1_destroy(_glfw.wl.cursorShapeDevice);
+            _glfw.wl.cursorShapeDevice = NULL;
+        }
+
         wl_pointer_destroy(_glfw.wl.pointer);
         _glfw.wl.pointer = NULL;
     }
@@ -1880,6 +2198,97 @@ static int textMimeTypeRank(const char* mimeType)
     }
 
     return 0;
+}
+
+static void primaryOfferHandleOffer(void* userData,
+                                    struct zwp_primary_selection_offer_v1* offer,
+                                    const char* mimeType)
+{
+    for (unsigned int i = 0; i < _glfw.wl.primaryOfferCount; i++)
+    {
+        _GLFWprimaryOfferWayland* entry = &_glfw.wl.primaryOffers[i];
+        if (entry->offer != offer)
+            continue;
+
+        const int rank = textMimeTypeRank(mimeType);
+        if (rank && (!entry->textMimeRank || rank < entry->textMimeRank) &&
+            strlen(mimeType) < sizeof(entry->textMimeType))
+        {
+            strcpy(entry->textMimeType, mimeType);
+            entry->textMimeRank = rank;
+        }
+
+        break;
+    }
+}
+
+static const struct zwp_primary_selection_offer_v1_listener primaryOfferListener =
+{
+    primaryOfferHandleOffer
+};
+
+static void primaryDeviceHandleDataOffer(void* userData,
+                                         struct zwp_primary_selection_device_v1* device,
+                                         struct zwp_primary_selection_offer_v1* offer)
+{
+    _GLFWprimaryOfferWayland* offers =
+        realloc(_glfw.wl.primaryOffers,
+                sizeof(_GLFWprimaryOfferWayland) * (_glfw.wl.primaryOfferCount + 1));
+    if (!offers)
+    {
+        _glfwInputError(GLFW_OUT_OF_MEMORY, NULL);
+        zwp_primary_selection_offer_v1_destroy(offer);
+        return;
+    }
+
+    _glfw.wl.primaryOffers = offers;
+    _glfw.wl.primaryOfferCount++;
+
+    _glfw.wl.primaryOffers[_glfw.wl.primaryOfferCount - 1] =
+        (_GLFWprimaryOfferWayland) { offer };
+    zwp_primary_selection_offer_v1_add_listener(offer, &primaryOfferListener, NULL);
+}
+
+static void primaryDeviceHandleSelection(void* userData,
+                                         struct zwp_primary_selection_device_v1* device,
+                                         struct zwp_primary_selection_offer_v1* offer)
+{
+    if (_glfw.wl.primarySelectionOffer)
+    {
+        zwp_primary_selection_offer_v1_destroy(_glfw.wl.primarySelectionOffer);
+        _glfw.wl.primarySelectionOffer = NULL;
+    }
+
+    for (unsigned int i = 0; i < _glfw.wl.primaryOfferCount; i++)
+    {
+        if (_glfw.wl.primaryOffers[i].offer == offer)
+        {
+            if (_glfw.wl.primaryOffers[i].textMimeRank)
+            {
+                _glfw.wl.primarySelectionOffer = offer;
+                strcpy(_glfw.wl.primarySelectionMimeType,
+                       _glfw.wl.primaryOffers[i].textMimeType);
+            }
+            else
+                zwp_primary_selection_offer_v1_destroy(offer);
+
+            _glfw.wl.primaryOffers[i] =
+                _glfw.wl.primaryOffers[_glfw.wl.primaryOfferCount - 1];
+            _glfw.wl.primaryOfferCount--;
+            break;
+        }
+    }
+}
+
+static const struct zwp_primary_selection_device_v1_listener primaryDeviceListener =
+{
+    primaryDeviceHandleDataOffer,
+    primaryDeviceHandleSelection
+};
+
+void _glfwAddPrimarySelectionListenerWayland(struct zwp_primary_selection_device_v1* device)
+{
+    zwp_primary_selection_device_v1_add_listener(device, &primaryDeviceListener, NULL);
 }
 
 static void dataOfferHandleOffer(void* userData,
@@ -2129,6 +2538,14 @@ static char *translateCursorShape(int shape)
 {
     switch (shape)
     {
+        case GLFW_RESIZE_NWSE_CURSOR:
+            return "nwse-resize";
+        case GLFW_RESIZE_NESW_CURSOR:
+            return "nesw-resize";
+        case GLFW_RESIZE_ALL_CURSOR:
+            return "all-scroll";
+        case GLFW_NOT_ALLOWED_CURSOR:
+            return "not-allowed";
         case GLFW_ARROW_CURSOR:
             return "left_ptr";
         case GLFW_IBEAM_CURSOR:
@@ -2143,6 +2560,160 @@ static char *translateCursorShape(int shape)
             return "sb_v_double_arrow";
     }
     return NULL;
+}
+
+// Legacy X cursor font names for themes without the CSS names
+//
+static char *translateCursorShapeFallback(int shape)
+{
+    switch (shape)
+    {
+        case GLFW_RESIZE_NWSE_CURSOR:
+            return "bd_double_arrow";
+        case GLFW_RESIZE_NESW_CURSOR:
+            return "fd_double_arrow";
+        case GLFW_RESIZE_ALL_CURSOR:
+            return "fleur";
+        case GLFW_NOT_ALLOWED_CURSOR:
+            return "crossed_circle";
+    }
+    return NULL;
+}
+
+static struct wl_cursor* getThemeCursor(struct wl_cursor_theme* theme, int shape)
+{
+    struct wl_cursor* cursor = wl_cursor_theme_get_cursor(theme, translateCursorShape(shape));
+    if (!cursor && translateCursorShapeFallback(shape))
+        cursor = wl_cursor_theme_get_cursor(theme, translateCursorShapeFallback(shape));
+    return cursor;
+}
+
+static void updateTextInputCursorRect(_GLFWwindow* window)
+{
+    zwp_text_input_v3_set_cursor_rectangle(_glfw.wl.textInput,
+                                           window->imeCursor.x,
+                                           window->imeCursor.y,
+                                           window->imeCursor.width,
+                                           window->imeCursor.height);
+}
+
+static void textInputHandleEnter(void* userData,
+                                 struct zwp_text_input_v3* textInput,
+                                 struct wl_surface* surface)
+{
+    if (!surface || wl_proxy_get_tag((struct wl_proxy*) surface) != &_glfw.wl.tag)
+        return;
+
+    _GLFWwindow* window = wl_surface_get_user_data(surface);
+    if (!window || surface != window->wl.surface)
+        return;
+
+    _glfw.wl.textInputFocus = window;
+    zwp_text_input_v3_enable(textInput);
+    zwp_text_input_v3_set_content_type(textInput,
+                                       ZWP_TEXT_INPUT_V3_CONTENT_HINT_NONE,
+                                       ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_TERMINAL);
+    updateTextInputCursorRect(window);
+    zwp_text_input_v3_commit(textInput);
+}
+
+static void textInputHandleLeave(void* userData,
+                                 struct zwp_text_input_v3* textInput,
+                                 struct wl_surface* surface)
+{
+    _GLFWwindow* window = _glfw.wl.textInputFocus;
+
+    zwp_text_input_v3_disable(textInput);
+    zwp_text_input_v3_commit(textInput);
+
+    if (window && _glfw.wl.textInputHasPreedit)
+        _glfwInputPreedit(window, "", -1);
+
+    _glfw.wl.textInputHasPreedit = GLFW_FALSE;
+    _glfw.wl.textInputFocus = NULL;
+}
+
+static void textInputHandlePreeditString(void* userData,
+                                         struct zwp_text_input_v3* textInput,
+                                         const char* text,
+                                         int32_t cursorBegin,
+                                         int32_t cursorEnd)
+{
+    free(_glfw.wl.textInputPreedit);
+    _glfw.wl.textInputPreedit = text ? _glfw_strdup(text) : NULL;
+    _glfw.wl.textInputCursor = cursorBegin;
+}
+
+static void textInputHandleCommitString(void* userData,
+                                        struct zwp_text_input_v3* textInput,
+                                        const char* text)
+{
+    free(_glfw.wl.textInputCommit);
+    _glfw.wl.textInputCommit = text ? _glfw_strdup(text) : NULL;
+}
+
+// The application exposes no surrounding text, so there is nothing to delete
+static void textInputHandleDeleteSurroundingText(void* userData,
+                                                 struct zwp_text_input_v3* textInput,
+                                                 uint32_t beforeLength,
+                                                 uint32_t afterLength)
+{
+}
+
+static void textInputHandleDone(void* userData,
+                                struct zwp_text_input_v3* textInput,
+                                uint32_t serial)
+{
+    _GLFWwindow* window = _glfw.wl.textInputFocus;
+    char* preedit = _glfw.wl.textInputPreedit;
+    char* commit = _glfw.wl.textInputCommit;
+
+    _glfw.wl.textInputPreedit = NULL;
+    _glfw.wl.textInputCommit = NULL;
+
+    if (window)
+    {
+        const GLFWbool hasPreedit = preedit && *preedit;
+
+        if (commit)
+            _glfwInputCommitString(window, commit, 0);
+
+        if (hasPreedit || _glfw.wl.textInputHasPreedit)
+        {
+            const int cursor = hasPreedit && _glfw.wl.textInputCursor >= 0 ?
+                _glfw_min(_glfw.wl.textInputCursor, (int) strlen(preedit)) : -1;
+            _glfwInputPreedit(window, hasPreedit ? preedit : "", cursor);
+        }
+
+        _glfw.wl.textInputHasPreedit = hasPreedit;
+    }
+
+    free(preedit);
+    free(commit);
+}
+
+static const struct zwp_text_input_v3_listener textInputListener =
+{
+    textInputHandleEnter,
+    textInputHandleLeave,
+    textInputHandlePreeditString,
+    textInputHandleCommitString,
+    textInputHandleDeleteSurroundingText,
+    textInputHandleDone
+};
+
+void _glfwAddTextInputListenerWayland(struct zwp_text_input_v3* textInput)
+{
+    zwp_text_input_v3_add_listener(textInput, &textInputListener, NULL);
+}
+
+void _glfwPlatformSetIMECursorRect(_GLFWwindow* window)
+{
+    if (!_glfw.wl.textInput || _glfw.wl.textInputFocus != window)
+        return;
+
+    updateTextInputCursorRect(window);
+    zwp_text_input_v3_commit(_glfw.wl.textInput);
 }
 
 void _glfwAddSeatListenerWayland(struct wl_seat* seat)
@@ -2225,6 +2796,18 @@ void _glfwPlatformDestroyWindow(_GLFWwindow* window)
 
     if (window->wl.lockedPointer)
         zwp_locked_pointer_v1_destroy(window->wl.lockedPointer);
+
+    if (window == _glfw.wl.textInputFocus)
+        _glfw.wl.textInputFocus = NULL;
+
+    if (window->wl.activationToken)
+        xdg_activation_token_v1_destroy(window->wl.activationToken);
+
+    if (window->wl.fractionalScaling)
+        wp_fractional_scale_v1_destroy(window->wl.fractionalScaling);
+
+    if (window->wl.viewport)
+        wp_viewport_destroy(window->wl.viewport);
 
     if (window->context.destroy)
         window->context.destroy(window);
@@ -2401,11 +2984,12 @@ void _glfwPlatformSetWindowAspectRatio(_GLFWwindow* window,
 void _glfwPlatformGetFramebufferSize(_GLFWwindow* window,
                                      int* width, int* height)
 {
-    _glfwPlatformGetWindowSize(window, width, height);
+    int fbWidth, fbHeight;
+    getFramebufferSize(window, &fbWidth, &fbHeight);
     if (width)
-        *width *= window->wl.contentScale;
+        *width = fbWidth;
     if (height)
-        *height *= window->wl.contentScale;
+        *height = fbHeight;
 }
 
 void _glfwPlatformGetWindowFrameSize(_GLFWwindow* window,
@@ -2429,9 +3013,9 @@ void _glfwPlatformGetWindowContentScale(_GLFWwindow* window,
                                         float* xscale, float* yscale)
 {
     if (xscale)
-        *xscale = (float) window->wl.contentScale;
+        *xscale = getWindowScale(window);
     if (yscale)
-        *yscale = (float) window->wl.contentScale;
+        *yscale = getWindowScale(window);
 }
 
 void _glfwPlatformIconifyWindow(_GLFWwindow* window)
@@ -2499,15 +3083,28 @@ void _glfwPlatformHideWindow(_GLFWwindow* window)
 
 void _glfwPlatformRequestWindowAttention(_GLFWwindow* window)
 {
-    // TODO
-    _glfwInputError(GLFW_PLATFORM_ERROR,
-                    "Wayland: Window attention request not implemented yet");
+    requestActivation(window, GLFW_FALSE);
 }
 
 void _glfwPlatformFocusWindow(_GLFWwindow* window)
 {
-    _glfwInputError(GLFW_PLATFORM_ERROR,
-                    "Wayland: Focusing a window requires user interaction");
+    requestActivation(window, GLFW_TRUE);
+}
+
+_GLFWmonitor* _glfwPlatformGetWindowCurrentMonitor(_GLFWwindow* window)
+{
+    if (window->monitor)
+        return window->monitor;
+
+    // The output entered first that the surface is still on
+    for (int i = 0; i < window->wl.scaleCount; i++)
+    {
+        _GLFWmonitor* monitor = wl_output_get_user_data(window->wl.scales[i].output);
+        if (monitor)
+            return monitor;
+    }
+
+    return NULL;
 }
 
 void _glfwPlatformSetWindowMonitor(_GLFWwindow* window,
@@ -2659,8 +3256,9 @@ void _glfwPlatformWaitEventsTimeout(double timeout)
 
 void _glfwPlatformPostEmptyEvent(void)
 {
-    wl_display_sync(_glfw.wl.display);
-    flushDisplay();
+    // A full pipe already has a wake-up pending, so EAGAIN is fine
+    while (write(_glfw.wl.emptyEventPipe[1], "\0", 1) == -1 && errno == EINTR)
+        ;
 }
 
 void _glfwPlatformGetCursorPos(_GLFWwindow* window, double* xpos, double* ypos)
@@ -2761,10 +3359,16 @@ int _glfwPlatformCreateStandardCursor(_GLFWcursor* cursor, int shape)
 {
     struct wl_cursor* standardCursor;
 
-    standardCursor = wl_cursor_theme_get_cursor(_glfw.wl.cursorTheme,
-                                                translateCursorShape(shape));
+    cursor->wl.shape = shape;
+    cursor->wl.currentImage = 0;
+
+    standardCursor = getThemeCursor(_glfw.wl.cursorTheme, shape);
     if (!standardCursor)
     {
+        // The compositor draws it; the theme is only the fallback
+        if (_glfw.wl.cursorShapeManager)
+            return GLFW_TRUE;
+
         _glfwInputError(GLFW_PLATFORM_ERROR,
                         "Wayland: Standard cursor \"%s\" not found",
                         translateCursorShape(shape));
@@ -2772,14 +3376,9 @@ int _glfwPlatformCreateStandardCursor(_GLFWcursor* cursor, int shape)
     }
 
     cursor->wl.cursor = standardCursor;
-    cursor->wl.currentImage = 0;
 
     if (_glfw.wl.cursorThemeHiDPI)
-    {
-        standardCursor = wl_cursor_theme_get_cursor(_glfw.wl.cursorThemeHiDPI,
-                                                    translateCursorShape(shape));
-        cursor->wl.cursorHiDPI = standardCursor;
-    }
+        cursor->wl.cursorHiDPI = getThemeCursor(_glfw.wl.cursorThemeHiDPI, shape);
 
     return GLFW_TRUE;
 }
@@ -2787,7 +3386,7 @@ int _glfwPlatformCreateStandardCursor(_GLFWcursor* cursor, int shape)
 void _glfwPlatformDestroyCursor(_GLFWcursor* cursor)
 {
     // If it's a standard cursor we don't need to do anything here
-    if (cursor->wl.cursor)
+    if (cursor->wl.cursor || cursor->wl.shape)
         return;
 
     if (cursor->wl.buffer)
@@ -2915,7 +3514,7 @@ void _glfwPlatformSetCursor(_GLFWwindow* window, _GLFWcursor* cursor)
     {
         if (cursor)
             setCursorImage(window, &cursor->wl);
-        else
+        else if (!setCursorShape(WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DEFAULT))
         {
             struct wl_cursor* defaultCursor =
                 wl_cursor_theme_get_cursor(_glfw.wl.cursorTheme, "left_ptr");
@@ -2940,6 +3539,7 @@ void _glfwPlatformSetCursor(_GLFWwindow* window, _GLFWcursor* cursor)
                 NULL,
                 0, 0,
                 0, 0,
+                0,
                 0
             };
 
@@ -2965,21 +3565,11 @@ static void dataSourceHandleTarget(void* userData,
     }
 }
 
-static void dataSourceHandleSend(void* userData,
-                                 struct wl_data_source* source,
-                                 const char* mimeType,
-                                 int fd)
+// Writes a selection string to the receiving client and closes the pipe
+//
+static void writeStringToFd(int fd, const char* string)
 {
-    // Ignore it if this is an outdated or invalid request
-    if (_glfw.wl.selectionSource != source ||
-        strcmp(mimeType, "text/plain;charset=utf-8") != 0)
-    {
-        close(fd);
-        return;
-    }
-
-    char* string = _glfw.wl.clipboardString;
-    size_t length = strlen(string);
+    size_t length = string ? strlen(string) : 0;
 
     while (length > 0)
     {
@@ -3000,6 +3590,70 @@ static void dataSourceHandleSend(void* userData,
     }
 
     close(fd);
+}
+
+static void offerTextMimeTypes(void (*offer)(void*, const char*), void* source)
+{
+    for (size_t i = 0;  i < sizeof(textMimeTypes) / sizeof(textMimeTypes[0]);  i++)
+    {
+        // Spacing variant of the first entry; offering it twice adds nothing
+        if (i != 1)
+            offer(source, textMimeTypes[i]);
+    }
+}
+
+static void dataSourceHandleSend(void* userData,
+                                 struct wl_data_source* source,
+                                 const char* mimeType,
+                                 int fd)
+{
+    // Ignore it if this is an outdated or invalid request
+    if (_glfw.wl.selectionSource != source || !textMimeTypeRank(mimeType))
+    {
+        close(fd);
+        return;
+    }
+
+    writeStringToFd(fd, _glfw.wl.clipboardString);
+}
+
+static void primarySourceHandleSend(void* userData,
+                                    struct zwp_primary_selection_source_v1* source,
+                                    const char* mimeType,
+                                    int fd)
+{
+    if (_glfw.wl.primarySelectionSource != source || !textMimeTypeRank(mimeType))
+    {
+        close(fd);
+        return;
+    }
+
+    writeStringToFd(fd, _glfw.wl.primarySelectionString);
+}
+
+static void primarySourceHandleCancelled(void* userData,
+                                         struct zwp_primary_selection_source_v1* source)
+{
+    zwp_primary_selection_source_v1_destroy(source);
+
+    if (_glfw.wl.primarySelectionSource == source)
+        _glfw.wl.primarySelectionSource = NULL;
+}
+
+static const struct zwp_primary_selection_source_v1_listener primarySourceListener =
+{
+    primarySourceHandleSend,
+    primarySourceHandleCancelled
+};
+
+static void offerDataSource(void* source, const char* mimeType)
+{
+    wl_data_source_offer(source, mimeType);
+}
+
+static void offerPrimarySource(void* source, const char* mimeType)
+{
+    zwp_primary_selection_source_v1_offer(source, mimeType);
 }
 
 static void dataSourceHandleCancelled(void* userData,
@@ -3072,7 +3726,7 @@ void _glfwPlatformSetClipboardString(const char* string)
     wl_data_source_add_listener(_glfw.wl.selectionSource,
                                 &dataSourceListener,
                                 NULL);
-    wl_data_source_offer(_glfw.wl.selectionSource, "text/plain;charset=utf-8");
+    offerTextMimeTypes(offerDataSource, _glfw.wl.selectionSource);
     wl_data_device_set_selection(_glfw.wl.dataDevice,
                                  _glfw.wl.selectionSource,
                                  _glfw.wl.serial);
@@ -3094,6 +3748,71 @@ const char* _glfwPlatformGetClipboardString(void)
     _glfw.wl.clipboardString =
         readDataOfferAsString(_glfw.wl.selectionOffer, _glfw.wl.selectionMimeType);
     return _glfw.wl.clipboardString;
+}
+
+void _glfwPlatformSetPrimarySelectionString(const char* string)
+{
+    char* copy = _glfw_strdup(string);
+    if (!copy)
+    {
+        _glfwInputError(GLFW_OUT_OF_MEMORY, NULL);
+        return;
+    }
+
+    free(_glfw.wl.primarySelectionString);
+    _glfw.wl.primarySelectionString = copy;
+
+    // Without the protocol the selection stays in-process
+    if (!_glfw.wl.primarySelectionDevice)
+        return;
+
+    if (_glfw.wl.primarySelectionSource)
+        zwp_primary_selection_source_v1_destroy(_glfw.wl.primarySelectionSource);
+
+    _glfw.wl.primarySelectionSource =
+        zwp_primary_selection_device_manager_v1_create_source(
+            _glfw.wl.primarySelectionManager);
+    if (!_glfw.wl.primarySelectionSource)
+    {
+        _glfwInputError(GLFW_PLATFORM_ERROR,
+                        "Wayland: Failed to create primary selection source");
+        return;
+    }
+
+    zwp_primary_selection_source_v1_add_listener(_glfw.wl.primarySelectionSource,
+                                                 &primarySourceListener,
+                                                 NULL);
+    offerTextMimeTypes(offerPrimarySource, _glfw.wl.primarySelectionSource);
+    zwp_primary_selection_device_v1_set_selection(_glfw.wl.primarySelectionDevice,
+                                                  _glfw.wl.primarySelectionSource,
+                                                  _glfw.wl.serial);
+}
+
+const char* _glfwPlatformGetPrimarySelectionString(void)
+{
+    if (_glfw.wl.primarySelectionSource || !_glfw.wl.primarySelectionDevice)
+    {
+        if (!_glfw.wl.primarySelectionString)
+        {
+            _glfwInputError(GLFW_FORMAT_UNAVAILABLE,
+                            "Wayland: No primary selection available");
+        }
+
+        return _glfw.wl.primarySelectionString;
+    }
+
+    if (!_glfw.wl.primarySelectionOffer)
+    {
+        _glfwInputError(GLFW_FORMAT_UNAVAILABLE,
+                        "Wayland: No primary selection available");
+        return NULL;
+    }
+
+    free(_glfw.wl.primarySelectionString);
+    _glfw.wl.primarySelectionString =
+        readPrimaryOfferAsString(_glfw.wl.primarySelectionOffer,
+                                 _glfw.wl.primarySelectionMimeType);
+    return _glfw.wl.primarySelectionString;
 }
 
 void _glfwPlatformGetRequiredInstanceExtensions(char** extensions)

@@ -44,6 +44,7 @@
 #include <limits.h>
 #include <errno.h>
 #include <assert.h>
+#include <wchar.h>
 
 // Action for EWMH client messages
 #define _NET_WM_STATE_REMOVE        0
@@ -506,6 +507,148 @@ static char* convertLatin1toUTF8(const char* source)
 
 // Updates the cursor image according to its cursor mode
 //
+// Reports the on-the-spot composition text with its caret as a byte offset
+//
+static void inputPreeditX11(_GLFWwindow* window)
+{
+    char* text = calloc((size_t) window->x11.preeditLength * 4 + 1, 1);
+    size_t length = 0;
+    int caret = 0;
+
+    if (!text)
+    {
+        _glfwInputError(GLFW_OUT_OF_MEMORY, NULL);
+        return;
+    }
+
+    for (int i = 0;  i < window->x11.preeditLength;  i++)
+    {
+        if (i == window->x11.preeditCaret)
+            caret = (int) length;
+        length += _glfwEncodeUTF8(text + length, window->x11.preedit[i]);
+    }
+
+    if (window->x11.preeditCaret >= window->x11.preeditLength)
+        caret = (int) length;
+
+    _glfwInputPreedit(window, text, caret);
+    free(text);
+}
+
+static int preeditStartCallback(XIC ic, XPointer clientData, XPointer callData)
+{
+    _GLFWwindow* window = (_GLFWwindow*) clientData;
+    window->x11.preeditLength = 0;
+    window->x11.preeditCaret = 0;
+    // No limit on the composition length
+    return -1;
+}
+
+static void preeditDoneCallback(XIC ic, XPointer clientData, XPointer callData)
+{
+    _GLFWwindow* window = (_GLFWwindow*) clientData;
+    window->x11.preeditLength = 0;
+    window->x11.preeditCaret = 0;
+    _glfwInputPreedit(window, "", -1);
+}
+
+static void preeditDrawCallback(XIC ic, XPointer clientData,
+                                XIMPreeditDrawCallbackStruct* callData)
+{
+    _GLFWwindow* window = (_GLFWwindow*) clientData;
+    const XIMText* text = callData->text;
+    uint32_t* insert = NULL;
+    int insertLength = 0;
+
+    if (text && text->length)
+    {
+        insert = calloc(text->length, sizeof(uint32_t));
+        if (!insert)
+        {
+            _glfwInputError(GLFW_OUT_OF_MEMORY, NULL);
+            return;
+        }
+
+        if (text->encoding_is_wchar)
+        {
+            if (text->string.wide_char)
+            {
+                for (insertLength = 0;  insertLength < text->length;  insertLength++)
+                    insert[insertLength] = (uint32_t) text->string.wide_char[insertLength];
+            }
+        }
+        else if (text->string.multi_byte)
+        {
+            const char* mb = text->string.multi_byte;
+            size_t remaining = strlen(mb);
+            mbstate_t state;
+            memset(&state, 0, sizeof(state));
+
+            while (insertLength < text->length && remaining > 0)
+            {
+                wchar_t wc;
+                const size_t count = mbrtowc(&wc, mb, remaining, &state);
+                if (count == 0 || count == (size_t) -1 || count == (size_t) -2)
+                    break;
+
+                insert[insertLength++] = (uint32_t) wc;
+                mb += count;
+                remaining -= count;
+            }
+        }
+    }
+
+    const int length = _glfwRavenPreeditEdit(&window->x11.preedit,
+                                             window->x11.preeditLength,
+                                             callData->chg_first,
+                                             callData->chg_length,
+                                             insert, insertLength);
+    free(insert);
+
+    if (length < 0)
+    {
+        _glfwInputError(GLFW_OUT_OF_MEMORY, NULL);
+        return;
+    }
+
+    window->x11.preeditLength = length;
+    window->x11.preeditCaret = _glfw_min(_glfw_max(callData->caret, 0), length);
+    inputPreeditX11(window);
+}
+
+static void preeditCaretCallback(XIC ic, XPointer clientData,
+                                 XIMPreeditCaretCallbackStruct* callData)
+{
+    _GLFWwindow* window = (_GLFWwindow*) clientData;
+    int caret = window->x11.preeditCaret;
+
+    switch (callData->direction)
+    {
+        case XIMAbsolutePosition:
+            caret = callData->position;
+            break;
+        case XIMForwardChar:
+            caret++;
+            break;
+        case XIMBackwardChar:
+            caret--;
+            break;
+        case XIMLineStart:
+            caret = 0;
+            break;
+        case XIMLineEnd:
+            caret = window->x11.preeditLength;
+            break;
+        default:
+            break;
+    }
+
+    caret = _glfw_min(_glfw_max(caret, 0), window->x11.preeditLength);
+    window->x11.preeditCaret = caret;
+    callData->position = caret;
+    inputPreeditX11(window);
+}
+
 static void updateCursorImage(_GLFWwindow* window)
 {
     if (window->cursorMode == GLFW_CURSOR_NORMAL)
@@ -807,14 +950,42 @@ static GLFWbool createNativeWindow(_GLFWwindow* window,
 
     if (_glfw.x11.im)
     {
-        window->x11.ic = XCreateIC(_glfw.x11.im,
-                                   XNInputStyle,
-                                   XIMPreeditNothing | XIMStatusNothing,
-                                   XNClientWindow,
-                                   window->x11.handle,
-                                   XNFocusWindow,
-                                   window->x11.handle,
-                                   NULL);
+        if (_glfw.x11.imStyle == (XIMPreeditCallbacks | XIMStatusNothing))
+        {
+            XICCallback start = { (XPointer) window, (XICProc) preeditStartCallback };
+            XIMCallback done = { (XPointer) window, (XIMProc) preeditDoneCallback };
+            XIMCallback draw = { (XPointer) window, (XIMProc) preeditDrawCallback };
+            XIMCallback caret = { (XPointer) window, (XIMProc) preeditCaretCallback };
+            XVaNestedList preedit = XVaCreateNestedList(0,
+                                                        XNPreeditStartCallback, &start,
+                                                        XNPreeditDoneCallback, &done,
+                                                        XNPreeditDrawCallback, &draw,
+                                                        XNPreeditCaretCallback, &caret,
+                                                        NULL);
+            window->x11.ic = XCreateIC(_glfw.x11.im,
+                                       XNInputStyle,
+                                       _glfw.x11.imStyle,
+                                       XNClientWindow,
+                                       window->x11.handle,
+                                       XNFocusWindow,
+                                       window->x11.handle,
+                                       XNPreeditAttributes,
+                                       preedit,
+                                       NULL);
+            XFree(preedit);
+        }
+
+        if (!window->x11.ic)
+        {
+            window->x11.ic = XCreateIC(_glfw.x11.im,
+                                       XNInputStyle,
+                                       XIMPreeditNothing | XIMStatusNothing,
+                                       XNClientWindow,
+                                       window->x11.handle,
+                                       XNFocusWindow,
+                                       window->x11.handle,
+                                       NULL);
+        }
     }
 
     if (window->x11.ic)
@@ -2092,6 +2263,10 @@ void _glfwPlatformDestroyWindow(_GLFWwindow* window)
         window->x11.ic = NULL;
     }
 
+    free(window->x11.preedit);
+    window->x11.preedit = NULL;
+    window->x11.preeditLength = 0;
+
     if (window->context.destroy)
         window->context.destroy(window);
 
@@ -2976,6 +3151,36 @@ int _glfwPlatformCreateCursor(_GLFWcursor* cursor,
 int _glfwPlatformCreateStandardCursor(_GLFWcursor* cursor, int shape)
 {
     int native = 0;
+    const char* themeName = NULL;
+
+    if (shape == GLFW_RESIZE_NWSE_CURSOR)
+        themeName = "nwse-resize", native = XC_bottom_right_corner;
+    else if (shape == GLFW_RESIZE_NESW_CURSOR)
+        themeName = "nesw-resize", native = XC_bottom_left_corner;
+    else if (shape == GLFW_RESIZE_ALL_CURSOR)
+        themeName = "all-scroll", native = XC_fleur;
+    else if (shape == GLFW_NOT_ALLOWED_CURSOR)
+        themeName = "not-allowed", native = XC_X_cursor;
+
+    if (themeName)
+    {
+        if (_glfw.x11.xcursor.LibraryLoadCursor)
+        {
+            cursor->x11.handle =
+                _glfw.x11.xcursor.LibraryLoadCursor(_glfw.x11.display, themeName);
+        }
+
+        if (!cursor->x11.handle)
+            cursor->x11.handle = XCreateFontCursor(_glfw.x11.display, native);
+        if (!cursor->x11.handle)
+        {
+            _glfwInputError(GLFW_PLATFORM_ERROR,
+                            "X11: Failed to create standard cursor");
+            return GLFW_FALSE;
+        }
+
+        return GLFW_TRUE;
+    }
 
     if (shape == GLFW_ARROW_CURSOR)
         native = XC_left_ptr;
@@ -3209,10 +3414,8 @@ GLFWAPI Window glfwGetX11Window(GLFWwindow* handle)
     return window->x11.handle;
 }
 
-GLFWAPI void glfwSetX11SelectionString(const char* string)
+void _glfwPlatformSetPrimarySelectionString(const char* string)
 {
-    _GLFW_REQUIRE_INIT();
-
     free(_glfw.x11.primarySelectionString);
     _glfw.x11.primarySelectionString = _glfw_strdup(string);
 
@@ -3227,6 +3430,33 @@ GLFWAPI void glfwSetX11SelectionString(const char* string)
         _glfwInputError(GLFW_PLATFORM_ERROR,
                         "X11: Failed to become owner of primary selection");
     }
+}
+
+const char* _glfwPlatformGetPrimarySelectionString(void)
+{
+    return getSelectionString(_glfw.x11.PRIMARY);
+}
+
+// Positions the input method's candidate window under the text cursor
+//
+void _glfwPlatformSetIMECursorRect(_GLFWwindow* window)
+{
+    if (!window->x11.ic)
+        return;
+
+    XPoint spot;
+    spot.x = (short) window->imeCursor.x;
+    spot.y = (short) (window->imeCursor.y + window->imeCursor.height);
+
+    XVaNestedList attributes = XVaCreateNestedList(0, XNSpotLocation, &spot, NULL);
+    XSetICValues(window->x11.ic, XNPreeditAttributes, attributes, NULL);
+    XFree(attributes);
+}
+
+GLFWAPI void glfwSetX11SelectionString(const char* string)
+{
+    _GLFW_REQUIRE_INIT();
+    _glfwPlatformSetPrimarySelectionString(string);
 }
 
 GLFWAPI const char* glfwGetX11SelectionString(void)

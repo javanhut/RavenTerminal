@@ -143,7 +143,7 @@ func (g *Grid) SelectMatch(m Match) {
 	if g.Cols == 0 || g.Rows == 0 {
 		return
 	}
-	g.selectionActive = true
+	g.selectionActive, g.selBlock = true, false
 	g.selAnchorAbsRow, g.selAnchorCol = m.StartAbsRow, clampInt(m.StartCol, 0, g.Cols-1)
 	g.selEndAbsRow, g.selEndCol = m.EndAbsRow, clampInt(m.EndCol, 0, g.Cols-1)
 }

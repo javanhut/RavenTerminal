@@ -2,32 +2,52 @@ package parser
 
 import (
 	"bytes"
+	"compress/zlib"
 	"encoding/base64"
+	"errors"
 	"image"
+	"image/draw"
 	"image/png"
+	"io"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/javanhut/RavenTerminal/src/images"
 )
 
-// kittyTransmit accumulates a chunked Kitty image transmission (m=1 chunks).
+const (
+	maxKittyData  = 128 << 20 // assembled / decompressed / file payload cap
+	maxKittyPixel = 10000     // per-dimension cap
+	maxKittyArea  = 4096 * 4096
+	maxKittyCells = 10000 // per-dimension placement size cap
+)
+
+// kittyTransmit accumulates a chunked Kitty transmission (m=1 chunks). All
+// controls come from the first chunk; later chunks only carry m (and q).
 type kittyTransmit struct {
-	id     images.ImageID
-	format int // 24=RGB, 32=RGBA, 100=PNG
-	width  int
-	height int
-	buf    bytes.Buffer
+	ctrl map[string]string
+	buf  bytes.Buffer
 }
+
+type kittyError struct{ code, msg string }
+
+func (e *kittyError) Error() string { return e.code + ":" + e.msg }
+
+func kerr(code, msg string) error { return &kittyError{code, msg} }
 
 // processAPC accumulates APC payload bytes until a terminator (ST/BEL).
 func (t *Terminal) processAPC(b byte) {
 	switch b {
 	case 0x1b: // ESC — possible start of ST
 		t.state = StateAPCEscape
-	case 0x07: // BEL. 0x9c is NOT a terminator: in UTF-8 mode it only occurs
-		// as a continuation byte (see processOSC).
+	case 0x07: // BEL. 0x9c is NOT a terminator in UTF-8 mode (see processOSC).
 		t.handleAPC(t.apcBuf)
+		t.state = StateGround
+	case 0x18, 0x1a: // CAN/SUB abort
+		t.apcBuf = t.apcBuf[:0]
 		t.state = StateGround
 	default:
 		if len(t.apcBuf) < maxAPCLen {
@@ -43,11 +63,10 @@ func (t *Terminal) processAPCEscape(b byte) {
 		t.state = StateGround
 		return
 	}
-	// Not a terminator: the ESC was literal payload.
-	if len(t.apcBuf) < maxAPCLen {
-		t.apcBuf = append(t.apcBuf, 0x1b, b)
-	}
-	t.state = StateAPC
+	// Not ST: the ESC aborts the string and starts a new sequence.
+	t.apcBuf = t.apcBuf[:0]
+	t.state = StateEscape
+	t.processEscape(b)
 }
 
 // activeImages returns the image store for the current screen.
@@ -61,38 +80,58 @@ func (t *Terminal) activeImages() *images.Store {
 // handleAPC dispatches a Kitty graphics APC command ("G<controls>;<payload>").
 func (t *Terminal) handleAPC(buf []byte) {
 	if len(buf) == 0 || len(buf) >= maxAPCLen || buf[0] != 'G' {
-		return // only the Kitty graphics APC is supported; drop overflowed payloads
+		return
 	}
-	body := buf[1:]
-	var ctrlPart, payloadPart []byte
-	if before, after, ok := bytes.Cut(body, []byte{';'}); ok {
-		ctrlPart, payloadPart = before, after
-	} else {
-		ctrlPart = body
-	}
+	ctrlPart, payload, _ := bytes.Cut(buf[1:], []byte{';'})
 	ctrl := parseKittyControls(string(ctrlPart))
+	data := decodeB64(payload)
+
+	if tr := t.pendingKitty; tr != nil {
+		if tr.buf.Len()+len(data) > maxKittyData {
+			t.pendingKitty = nil
+			t.kittyReply(tr.ctrl, 0, kerr("EFBIG", "image data too large"))
+			return
+		}
+		tr.buf.Write(data)
+		if ctrl["m"] != "1" {
+			t.pendingKitty = nil
+			t.kittyFinishTransmit(tr.ctrl, tr.buf.Bytes())
+		}
+		return
+	}
 
 	switch ctrl["a"] {
-	case "", "t", "T": // transmit (and, for T, display)
-		t.kittyTransmit(ctrl, payloadPart)
-	case "p": // put/display an already-transmitted image
+	case "", "t", "T", "q":
+		if ctrl["m"] == "1" {
+			t.pendingKitty = &kittyTransmit{ctrl: ctrl}
+			t.pendingKitty.buf.Write(data)
+			return
+		}
+		t.kittyFinishTransmit(ctrl, data)
+	case "p":
 		t.kittyPlace(ctrl)
-	case "d": // delete
+	case "d":
 		t.kittyDelete(ctrl)
-	case "q": // query — answer OK without storing
-		t.kittyReply(ctrl, "OK")
+	default:
+		t.kittyReply(ctrl, images.ImageID(ctrlInt(ctrl, "i", 0)), kerr("EINVAL", "unsupported action"))
 	}
+}
+
+func decodeB64(p []byte) []byte {
+	s := strings.TrimSpace(string(p))
+	if out, err := base64.StdEncoding.DecodeString(s); err == nil {
+		return out
+	}
+	out, _ := base64.RawStdEncoding.DecodeString(strings.TrimRight(s, "="))
+	return out
 }
 
 // parseKittyControls parses comma-separated key=value control pairs.
 func parseKittyControls(s string) map[string]string {
 	m := make(map[string]string)
 	for kv := range strings.SplitSeq(s, ",") {
-		if kv == "" {
-			continue
-		}
-		if before, after, ok := strings.Cut(kv, "="); ok {
-			m[before] = after
+		if k, v, ok := strings.Cut(kv, "="); ok && k != "" {
+			m[k] = v
 		}
 	}
 	return m
@@ -107,148 +146,358 @@ func ctrlInt(m map[string]string, key string, def int) int {
 	return def
 }
 
-// kittyTransmit handles transmit (and optional display) of image data, including
-// chunked transmission (m=1 means more chunks follow).
-func (t *Terminal) kittyTransmit(ctrl map[string]string, payload []byte) {
-	// Begin or continue an assembly buffer. Format/size come from the first chunk.
-	if t.pendingKitty == nil {
-		t.pendingKitty = &kittyTransmit{
-			id:     images.ImageID(ctrlInt(ctrl, "i", 0)),
-			format: ctrlInt(ctrl, "f", 32),
-			width:  ctrlInt(ctrl, "s", 0),
-			height: ctrlInt(ctrl, "v", 0),
-		}
-	}
-	if decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(payload))); err == nil {
-		t.pendingKitty.buf.Write(decoded)
-	}
-
-	if ctrl["m"] == "1" {
-		return // more chunks to come
-	}
-
-	// Final chunk: build the image.
-	tr := t.pendingKitty
-	t.pendingKitty = nil
-	img := decodeKittyImage(tr)
-	if img == nil {
-		t.kittyReply(ctrl, "EINVAL")
+// kittyFinishTransmit loads, decodes and stores (or for a=q only validates)
+// a complete transmission.
+func (t *Terminal) kittyFinishTransmit(ctrl map[string]string, data []byte) {
+	img, err := loadKittyImage(ctrl, data)
+	if ctrl["a"] == "q" {
+		t.kittyReply(ctrl, images.ImageID(ctrlInt(ctrl, "i", 0)), err)
 		return
 	}
-	stored := t.activeImages().Add(tr.id, img.Width, img.Height, img.Pixels)
-
-	// a=T also displays the image at the cursor.
-	if ctrl["a"] == "T" {
-		t.placeImage(stored, ctrl)
+	if err != nil {
+		t.kittyReply(ctrl, images.ImageID(ctrlInt(ctrl, "i", 0)), err)
+		return
 	}
-	t.kittyReply(ctrl, "OK")
+	store := t.activeImages()
+	stored := store.Add(images.ImageID(ctrlInt(ctrl, "i", 0)), img.Width, img.Height, img.Pixels)
+	stored.Number = uint32(ctrlInt(ctrl, "I", 0))
+	if ctrl["a"] == "T" {
+		err = t.placeImage(stored, ctrl)
+	}
+	t.kittyReply(ctrl, stored.ID, err)
 }
 
-// decodeKittyImage converts an assembled transmission into RGBA pixels.
-func decodeKittyImage(tr *kittyTransmit) *images.Image {
-	data := tr.buf.Bytes()
-	switch tr.format {
-	case 100: // PNG
+func loadKittyImage(ctrl map[string]string, data []byte) (*images.Image, error) {
+	switch medium := ctrl["t"]; medium {
+	case "", "d":
+	case "f", "t", "s":
+		var err error
+		if data, err = readKittyMedium(medium, string(data), ctrlInt(ctrl, "S", 0), ctrlInt(ctrl, "O", 0)); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, kerr("EINVAL", "unknown transmission medium")
+	}
+	if ctrl["o"] == "z" {
+		zr, err := zlib.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return nil, kerr("EINVAL", "bad zlib data")
+		}
+		data, err = io.ReadAll(io.LimitReader(zr, maxKittyData+1))
+		if err != nil || len(data) > maxKittyData {
+			return nil, kerr("EINVAL", "bad zlib data")
+		}
+	}
+	return decodeKittyImage(ctrlInt(ctrl, "f", 32), ctrlInt(ctrl, "s", 0), ctrlInt(ctrl, "v", 0), data)
+}
+
+// readKittyMedium reads image data from a file (t=f), a temporary file that is
+// deleted afterwards (t=t, only under /tmp or /dev/shm and named with
+// "tty-graphics-protocol"), or a POSIX shared-memory object (t=s). Only
+// regular files are read, never from /proc, /sys or /dev (except /dev/shm).
+func readKittyMedium(medium, path string, size, offset int) ([]byte, error) {
+	if medium == "s" {
+		name := strings.TrimPrefix(path, "/")
+		if name == "" || strings.Contains(name, "/") || name == "." || name == ".." {
+			return nil, kerr("EINVAL", "bad shared memory name")
+		}
+		path = "/dev/shm/" + name
+	}
+	if !filepath.IsAbs(path) {
+		return nil, kerr("EINVAL", "path must be absolute")
+	}
+	clean := filepath.Clean(path)
+	real, err := filepath.EvalSymlinks(clean)
+	if err != nil {
+		return nil, kerr("EBADF", "cannot open file")
+	}
+	inShm := strings.HasPrefix(real, "/dev/shm/")
+	// Media that are deleted after reading never follow a symlink.
+	if (medium == "s" || medium == "t") && real != clean || medium == "s" && !inShm {
+		return nil, kerr("EPERM", "refusing symlinked or out-of-place file")
+	}
+	for _, bad := range []string{"/proc/", "/sys/", "/dev/"} {
+		if strings.HasPrefix(real, bad) && !inShm {
+			return nil, kerr("EPERM", "refusing device or kernel file")
+		}
+	}
+	if medium == "t" {
+		if !(strings.HasPrefix(real, "/tmp/") || inShm) || !strings.Contains(filepath.Base(real), "tty-graphics-protocol") {
+			return nil, kerr("EPERM", "temporary file outside temp dirs")
+		}
+	}
+	// O_NOFOLLOW|O_NONBLOCK and an fstat close the swap-in race: a symlink or
+	// FIFO put in place after the checks above is refused, never blocked on.
+	f, err := os.OpenFile(real, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, kerr("EBADF", "cannot open file")
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() {
+		return nil, kerr("EBADF", "not a regular file")
+	}
+	if fi.Size() > maxKittyData {
+		return nil, kerr("EFBIG", "file too large")
+	}
+	if offset > 0 {
+		if _, err := f.Seek(int64(offset), io.SeekStart); err != nil {
+			return nil, kerr("EINVAL", "bad offset")
+		}
+	}
+	limit := int64(maxKittyData)
+	if size > 0 {
+		limit = int64(min(size, maxKittyData))
+	}
+	data, err := io.ReadAll(io.LimitReader(f, limit))
+	if err != nil {
+		return nil, kerr("EBADF", "read failed")
+	}
+	if medium == "t" || medium == "s" {
+		if cur, err := os.Lstat(real); err == nil && os.SameFile(cur, fi) {
+			os.Remove(real)
+		}
+	}
+	return data, nil
+}
+
+// decodeKittyImage converts raw transmitted data into RGBA pixels.
+func decodeKittyImage(format, width, height int, data []byte) (*images.Image, error) {
+	switch format {
+	case 100:
+		cfg, err := png.DecodeConfig(bytes.NewReader(data))
+		if err != nil {
+			return nil, kerr("EBADPNG", "cannot decode PNG")
+		}
+		if cfg.Width > maxKittyPixel || cfg.Height > maxKittyPixel || cfg.Width*cfg.Height > maxKittyArea {
+			return nil, kerr("EFBIG", "image too large")
+		}
 		img, err := png.Decode(bytes.NewReader(data))
 		if err != nil {
-			return nil
+			return nil, kerr("EBADPNG", "cannot decode PNG")
 		}
 		b := img.Bounds()
-		rgba := image.NewRGBA(b)
-		for y := b.Min.Y; y < b.Max.Y; y++ {
-			for x := b.Min.X; x < b.Max.X; x++ {
-				rgba.Set(x, y, img.At(x, y))
-			}
+		rgba := image.NewNRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
+		draw.Draw(rgba, rgba.Bounds(), img, b.Min, draw.Src)
+		return &images.Image{Width: b.Dx(), Height: b.Dy(), Pixels: rgba.Pix}, nil
+	case 24, 32:
+		if width <= 0 || height <= 0 {
+			return nil, kerr("EINVAL", "bad image dimensions")
 		}
-		return &images.Image{Width: b.Dx(), Height: b.Dy(), Pixels: rgba.Pix}
-	case 24: // RGB
-		if tr.width*tr.height*3 != len(data) {
-			return nil
+		if width > maxKittyPixel || height > maxKittyPixel || width*height > maxKittyArea {
+			return nil, kerr("EFBIG", "image too large")
 		}
-		pix := make([]byte, tr.width*tr.height*4)
-		for i := 0; i < tr.width*tr.height; i++ {
-			pix[i*4] = data[i*3]
-			pix[i*4+1] = data[i*3+1]
-			pix[i*4+2] = data[i*3+2]
+		bpp := format / 8
+		if len(data) < width*height*bpp {
+			return nil, kerr("ENODATA", "insufficient image data")
+		}
+		pix := make([]byte, width*height*4)
+		if bpp == 4 { // copy so the pixels never pin the whole payload
+			copy(pix, data)
+			return &images.Image{Width: width, Height: height, Pixels: pix}, nil
+		}
+		for i := 0; i < width*height; i++ {
+			copy(pix[i*4:i*4+3], data[i*3:i*3+3])
 			pix[i*4+3] = 255
 		}
-		return &images.Image{Width: tr.width, Height: tr.height, Pixels: pix}
-	default: // 32 = RGBA
-		if tr.width*tr.height*4 != len(data) {
-			return nil
-		}
-		return &images.Image{Width: tr.width, Height: tr.height, Pixels: data}
+		return &images.Image{Width: width, Height: height, Pixels: pix}, nil
 	}
+	return nil, kerr("EINVAL", "unknown format")
+}
+
+// lookupKittyImage resolves i= (id) or I= (number).
+func (t *Terminal) lookupKittyImage(ctrl map[string]string) (*images.Image, bool) {
+	store := t.activeImages()
+	if id := ctrlInt(ctrl, "i", 0); id != 0 {
+		return store.Get(images.ImageID(id))
+	}
+	if n := ctrlInt(ctrl, "I", 0); n != 0 {
+		return store.ByNumber(uint32(n))
+	}
+	return nil, false
 }
 
 // kittyPlace displays an already-stored image (a=p).
 func (t *Terminal) kittyPlace(ctrl map[string]string) {
-	id := images.ImageID(ctrlInt(ctrl, "i", 0))
-	if img, ok := t.activeImages().Get(id); ok {
-		t.placeImage(img, ctrl)
-		t.kittyReply(ctrl, "OK")
-	} else {
-		t.kittyReply(ctrl, "ENOENT")
+	img, ok := t.lookupKittyImage(ctrl)
+	if !ok {
+		t.kittyReply(ctrl, images.ImageID(ctrlInt(ctrl, "i", 0)), kerr("ENOENT", "image not found"))
+		return
 	}
+	t.kittyReply(ctrl, img.ID, t.placeImage(img, ctrl))
 }
 
-// placeImage anchors a placement at the cursor and advances the cursor past it.
-func (t *Terminal) placeImage(img *images.Image, ctrl map[string]string) {
-	cellW, cellH := 1, 1 // dimensions in cells are derived from pixel size below
-	cols := ctrlInt(ctrl, "c", 0)
-	rows := ctrlInt(ctrl, "r", 0)
-	// Without explicit c/r, the caller cannot know cell pixel size here; default
-	// to covering the image's natural cell span using a nominal 1px cell (the
-	// renderer scales to the real pane cell size). Cols/rows are advisory.
-	_ = cellW
-	_ = cellH
+// placeImage anchors a placement at the cursor. Without c/r the size in cells
+// follows from the (source-rect) pixel size and the cell size. Real
+// placements move the cursor right past the image on its last row unless C=1.
+// Relative placements (P/Q) anchor at the parent placement offset by H/V
+// cells and never move the cursor.
+func (t *Terminal) placeImage(img *images.Image, ctrl map[string]string) error {
+	cw, ch := t.cellSize()
+	px := func(k string) int { return min(max(ctrlInt(ctrl, k, 0), 0), maxKittyPixel) }
+	sx, sy, sw, sh := px("x"), px("y"), px("w"), px("h")
+	pw, ph := sw, sh
+	if pw == 0 {
+		pw = max(img.Width-sx, 0)
+	}
+	if ph == 0 {
+		ph = max(img.Height-sy, 0)
+	}
+	ox, oy := px("X"), px("Y")
+	cols, rows := ctrlInt(ctrl, "c", 0), ctrlInt(ctrl, "r", 0)
 	if cols <= 0 {
-		cols = 1
+		cols = max((pw+ox+cw-1)/cw, 1)
 	}
 	if rows <= 0 {
-		rows = 1
+		rows = max((ph+oy+ch-1)/ch, 1)
 	}
+	cols, rows = min(cols, maxKittyCells), min(rows, maxKittyCells)
+	virtual := ctrl["U"] == "1"
 	col, _ := t.Grid.GetCursorLocked()
+	anchorCol, anchorRow := col, t.Grid.AbsoluteCursorRowLocked()
+	relative := false
+	if pid := ctrlInt(ctrl, "P", 0); pid > 0 {
+		parent := t.findPlacement(images.ImageID(pid), uint32(ctrlInt(ctrl, "Q", 0)))
+		if parent == nil {
+			return kerr("ENOPARENT", "parent placement not found")
+		}
+		anchorCol = max(parent.AnchorCol+ctrlInt(ctrl, "H", 0), 0)
+		anchorRow = parent.AnchorAbsRow + ctrlInt(ctrl, "V", 0)
+		relative = true
+	}
 	t.activeImages().Place(&images.Placement{
 		ImageID:      img.ID,
 		PlacementID:  uint32(ctrlInt(ctrl, "p", 0)),
-		AnchorAbsRow: t.Grid.AbsoluteCursorRowLocked(),
-		AnchorCol:    col,
+		AnchorAbsRow: anchorRow,
+		AnchorCol:    anchorCol,
 		Cols:         cols,
 		Rows:         rows,
 		ZIndex:       ctrlInt(ctrl, "z", 0),
+		SrcX:         sx, SrcY: sy, SrcW: sw, SrcH: sh,
+		OffsetX: ox, OffsetY: oy,
+		Virtual: virtual,
 	})
-}
-
-// kittyDelete handles a=d deletions. Lowercase d-values remove placements only;
-// uppercase also free image data. Only the common forms are implemented.
-func (t *Terminal) kittyDelete(ctrl map[string]string) {
-	store := t.activeImages()
-	switch ctrl["d"] {
-	case "", "a", "A":
-		if ctrl["d"] == "A" {
-			store.DeleteAll()
-		} else {
-			store.ClearPlacements()
-		}
-	case "i", "I":
-		id := images.ImageID(ctrlInt(ctrl, "i", 0))
-		store.DeleteImage(id)
+	t.Grid.MarkScreenDirtyLocked()
+	if virtual || relative || ctrl["C"] == "1" {
+		return nil
 	}
+	// Past a full screen of index() only blank rows would scroll by.
+	for range min(rows-1, t.Grid.Rows) {
+		t.index()
+	}
+	_, row := t.Grid.GetCursorLocked()
+	t.Grid.SetCursorLocked(min(col+cols, t.Grid.Cols-1), row)
+	return nil
 }
 
-// kittyReply sends the Kitty graphics response, honoring quiet mode (q=1 quells
-// success, q=2 quells all).
-func (t *Terminal) kittyReply(ctrl map[string]string, msg string) {
+func (t *Terminal) findPlacement(id images.ImageID, pid uint32) *images.Placement {
+	for _, p := range t.activeImages().Placements() {
+		if p.ImageID == id && p.PlacementID == pid {
+			return p
+		}
+	}
+	return nil
+}
+
+// kittyDelete handles a=d. Lowercase selectors delete placements only;
+// uppercase also free image data no longer referenced.
+func (t *Terminal) kittyDelete(ctrl map[string]string) {
+	d := ctrl["d"]
+	if d == "" {
+		d = "a"
+	}
+	free := d != strings.ToLower(d)
+	store := t.activeImages()
+	curCol, curRow := t.Grid.GetCursorLocked()
+	screenTop := t.Grid.AbsoluteCursorRowLocked() - curRow
+	hit := func(p *images.Placement, col, row int) bool {
+		r0 := p.AnchorAbsRow - screenTop
+		return (col < 0 || col >= p.AnchorCol && col < p.AnchorCol+p.Cols) &&
+			(row < 0 || row >= r0 && row < r0+p.Rows)
+	}
+	x, y, z := ctrlInt(ctrl, "x", 0), ctrlInt(ctrl, "y", 0), ctrlInt(ctrl, "z", 0)
+	var match func(*images.Placement) bool
+	var candidates []images.ImageID
+	switch strings.ToLower(d) {
+	case "a":
+		rows := t.Grid.Rows
+		match = func(p *images.Placement) bool {
+			r0 := p.AnchorAbsRow - screenTop
+			return !p.Virtual && r0 < rows && r0+p.Rows > 0
+		}
+	case "i", "n":
+		img, ok := t.lookupKittyImage(ctrl)
+		if !ok {
+			return
+		}
+		pid := uint32(ctrlInt(ctrl, "p", 0))
+		match = func(p *images.Placement) bool {
+			return p.ImageID == img.ID && (pid == 0 || p.PlacementID == pid)
+		}
+		if pid == 0 {
+			candidates = append(candidates, img.ID)
+		}
+	case "c":
+		match = func(p *images.Placement) bool { return !p.Virtual && hit(p, curCol, curRow) }
+	case "p":
+		match = func(p *images.Placement) bool { return !p.Virtual && hit(p, x-1, y-1) }
+	case "q":
+		match = func(p *images.Placement) bool { return !p.Virtual && p.ZIndex == z && hit(p, x-1, y-1) }
+	case "x":
+		match = func(p *images.Placement) bool { return !p.Virtual && hit(p, x-1, -1) }
+	case "y":
+		match = func(p *images.Placement) bool { return !p.Virtual && hit(p, -1, y-1) }
+	case "z":
+		match = func(p *images.Placement) bool { return !p.Virtual && p.ZIndex == z }
+	case "r":
+		lo, hi := images.ImageID(x), images.ImageID(y)
+		match = func(p *images.Placement) bool { return p.ImageID >= lo && p.ImageID <= hi }
+		for _, id := range store.ImageIDs() {
+			if id >= lo && id <= hi {
+				candidates = append(candidates, id)
+			}
+		}
+	default:
+		return
+	}
+	store.DeletePlacements(match, free, candidates...)
+	t.Grid.MarkScreenDirtyLocked()
+}
+
+// kittyReply answers a command that named an image (i= or I=), or any a=q.
+// q=1 suppresses OK replies, q=2 all replies.
+func (t *Terminal) kittyReply(ctrl map[string]string, id images.ImageID, err error) {
 	if t.responseWriter == nil {
 		return
 	}
-	q := ctrlInt(ctrl, "q", 0)
-	if q >= 2 || (q == 1 && msg == "OK") {
+	_, hasI := ctrl["i"]
+	num := ctrlInt(ctrl, "I", 0)
+	if !hasI && num == 0 && ctrl["a"] != "q" {
 		return
 	}
-	id := ctrlInt(ctrl, "i", 0)
-	t.responseWriter([]byte("\x1b_Gi=" + strconv.Itoa(id) + ";" + msg + "\x1b\\"))
+	q := ctrlInt(ctrl, "q", 0)
+	if q >= 2 || (q == 1 && err == nil) {
+		return
+	}
+	msg := "OK"
+	if err != nil {
+		var ke *kittyError
+		if errors.As(err, &ke) {
+			msg = ke.Error()
+		} else {
+			msg = "EINVAL:" + err.Error()
+		}
+	}
+	var b strings.Builder
+	b.WriteString("\x1b_Gi=" + strconv.FormatUint(uint64(id), 10))
+	if num != 0 {
+		b.WriteString(",I=" + strconv.Itoa(num))
+	}
+	if p := ctrlInt(ctrl, "p", 0); p != 0 {
+		b.WriteString(",p=" + strconv.Itoa(p))
+	}
+	b.WriteString(";" + msg + "\x1b\\")
+	t.responseWriter([]byte(b.String()))
 }
 
 // Images returns the active screen's image store (for the renderer).

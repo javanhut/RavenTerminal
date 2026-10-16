@@ -178,15 +178,10 @@ func referenceBuildGridBatches(r *Renderer, snap *grid.Snapshot, offsetX, offset
 					if span == 2 && x+2*r.cellWidth > offsetX+paneWidth {
 						span = 1
 					}
+					// Bold/italic come from styled faces, not extra quads;
+					// without fonts they resolve to the regular glyph.
 					gx, gyTop, gw, gh := r.glyphQuad(cell.Char, g, x, y, span)
-					var shear float32
-					if r.fauxItalic && cell.Flags&grid.FlagItalic != 0 {
-						shear = gh * 0.2
-					}
-					gb.addGlyph(gx, gyTop+gh, gw, gh, g.X, g.Y, g.Width, g.Height, fgColor, shear)
-					if r.fauxBold && cell.Flags&grid.FlagBold != 0 {
-						gb.addGlyph(gx+1, gyTop+gh, gw, gh, g.X, g.Y, g.Width, g.Height, fgColor, shear)
-					}
+					gb.addGlyph(gx, gyTop+gh, gw, gh, g.X, g.Y, g.Width, g.Height, fgColor, 0)
 				}
 			}
 		}
@@ -225,9 +220,6 @@ func TestBuildGridBatchesMatchesReference(t *testing.T) {
 				wantRects, wantGlyphs, wantP2 := referenceBuildGridBatches(r, snap, clip.offX, clip.offY, clip.w, clip.h, hover, &rb, &gb, nil)
 				r.buildGridBatches(snap, clip.offX, clip.offY, clip.w, clip.h, hover)
 
-				if len(r.colorDraws) != 0 {
-					t.Fatalf("styled=%v geo=%v clip=%d: unexpected color draws", styled, geo, ci)
-				}
 				if !floatsEqual(r.gridRects.verts, wantRects) {
 					t.Fatalf("styled=%v geo=%v clip=%d: rect verts differ (got %d floats, want %d)",
 						styled, geo, ci, len(r.gridRects.verts), len(wantRects))

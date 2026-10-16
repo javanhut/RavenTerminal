@@ -4,39 +4,31 @@ import (
 	"bytes"
 	"fmt"
 	"image"
-	"image/draw"
 	"image/png"
 	"os"
 	"runtime"
 
 	"github.com/go-gl/gl/v4.1-core/gl"
 	gtfont "github.com/go-text/typesetting/font"
+	xdraw "golang.org/x/image/draw"
+	"golang.org/x/image/math/fixed"
 )
 
-// Color-emoji rendering. The monochrome glyph atlas (gl.RED, tinted with the
-// cell's foreground color) cannot represent multi-color emoji, and the bundled
-// nerd fonts contain no emoji at all. To render real color emoji (e.g. starship
-// language symbols like the Go gopher), we load the system color-emoji font,
-// decode each needed glyph's bitmap, and upload it as its own RGBA texture drawn
-// with a dedicated non-tinting shader. Emoji on screen are few, so a standalone
-// texture per unique glyph is simpler than packing an RGBA atlas and is plenty
-// fast.
+// Color emoji. The bundled nerd fonts contain no emoji, so the system
+// color-emoji font is loaded and each needed bitmap is decoded, scaled to the
+// cell once, and packed into the RGBA atlas. Color glyphs are ordinary quads
+// in the glyph batch (negative layer selects the color atlas), so emoji cost
+// no extra texture binds or draw calls.
 
-// colorGlyph is a decoded color-emoji bitmap uploaded as an RGBA texture.
-// ok=false records a cached miss (rune absent from the color font).
+// colorGlyph identifies a color-emoji glyph; ok=false means none.
 type colorGlyph struct {
-	tex  uint32
-	w, h int // native bitmap pixel size
-	ok   bool
+	gid uint32
+	ok  bool
 }
 
-// colorDrawItem is a deferred color-emoji quad, collected during the batched
-// grid pass and drawn after the monochrome glyph batch flushes.
-type colorDrawItem struct {
-	x, yTop float32
-	span    int // column span (2 for wide emoji, 1 otherwise)
-	cg      colorGlyph
-	alpha   float32
+type colorKey struct {
+	gid  uint32
+	side int
 }
 
 // colorEmojiFontPaths lists candidate system color-emoji fonts per platform,
@@ -57,34 +49,31 @@ func colorEmojiFontPaths() []string {
 	}
 }
 
-// loadColorFont opens the first available system color-emoji font. The font file
-// stays open and is read lazily (Apple Color Emoji is ~190MB; we never load it
-// fully into memory). Failure is non-fatal: emoji then fall back to '?'.
+// loadColorFont opens the first available system color-emoji font. The file
+// stays open and is read lazily (Apple Color Emoji is ~190MB). Failure is
+// non-fatal: emoji then fall back to '?'.
 func (r *Renderer) loadColorFont() {
 	for _, path := range colorEmojiFontPaths() {
 		f, err := os.Open(path)
 		if err != nil {
 			continue
 		}
-		faces, err := gtfont.ParseTTC(f) // *os.File satisfies font.Resource (ReaderAt)
+		faces, err := gtfont.ParseTTC(f)
 		if err != nil || len(faces) == 0 {
 			f.Close()
 			continue
 		}
 		face := faces[0]
-		// Request a large bitmap strike; the font snaps to its nearest available
-		// size (160px for Apple Color Emoji). The quad is scaled to the cell at
-		// draw time, so this is independent of font size / zoom.
+		// Request a large bitmap strike; the font snaps to its nearest size.
 		face.SetPpem(128, 128)
 		r.colorFontFile = f
 		r.colorFace = face
-		r.colorGlyphs = make(map[rune]colorGlyph)
 		return
 	}
 }
 
-// initColorEmoji compiles the RGBA color-glyph shader (samples the texture
-// directly rather than tinting an alpha channel). Called from initGL.
+// initColorEmoji compiles the straight-alpha RGBA texture shader (samples the
+// texture directly rather than tinting an alpha channel). Called from initGL.
 func (r *Renderer) initColorEmoji() error {
 	vert := `
 		#version 410 core
@@ -109,7 +98,7 @@ func (r *Renderer) initColorEmoji() error {
 	` + "\x00"
 	prog, err := createProgram(vert, frag)
 	if err != nil {
-		return fmt.Errorf("color emoji shader: %w", err)
+		return fmt.Errorf("color texture shader: %w", err)
 	}
 	r.colorProgram = prog
 	r.colorProjLoc = gl.GetUniformLocation(prog, gl.Str("projection\x00"))
@@ -118,105 +107,109 @@ func (r *Renderer) initColorEmoji() error {
 	return nil
 }
 
-// ensureColorGlyph returns (and lazily uploads) the color texture for ch, or
-// ok=false if no color-emoji font provides it. Hits and misses are both cached.
+func (r *Renderer) hasColorBitmap(gid gtfont.GID) bool {
+	bm, ok := r.colorFace.GlyphData(gid).(gtfont.GlyphBitmap)
+	return ok && bm.Format == gtfont.PNG
+}
+
+// ensureColorGlyph reports whether the color font has a bitmap for ch.
 func (r *Renderer) ensureColorGlyph(ch rune) (colorGlyph, bool) {
 	if r.colorFace == nil {
 		return colorGlyph{}, false
 	}
-	if cg, seen := r.colorGlyphs[ch]; seen {
-		return cg, cg.ok
+	gid, seen := r.colorRunes[ch]
+	if !seen {
+		if g, ok := r.colorFace.NominalGlyph(ch); ok && r.hasColorBitmap(g) {
+			gid = uint32(g)
+		}
+		r.colorRunes[ch] = gid
 	}
+	return colorGlyph{gid: gid, ok: gid != 0}, gid != 0
+}
 
-	miss := colorGlyph{}
-	gid, ok := r.colorFace.NominalGlyph(ch)
-	if !ok {
-		r.colorGlyphs[ch] = miss
-		return miss, false
+// colorGlyphAt returns the atlas entry for a color glyph scaled to fit span
+// cells, decoding and uploading it on first use.
+func (r *Renderer) colorGlyphAt(gid uint32, span int) (Glyph, bool) {
+	side := int(min(r.cellHeight, float32(span)*r.cellWidth))
+	if side <= 0 || r.colorFace == nil {
+		return Glyph{}, false
 	}
-	bm, ok := r.colorFace.GlyphData(gid).(gtfont.GlyphBitmap)
+	key := colorKey{gid, side}
+	if g, ok := r.colorGlyphs[key]; ok {
+		return g, true
+	}
+	bm, ok := r.colorFace.GlyphData(gtfont.GID(gid)).(gtfont.GlyphBitmap)
 	if !ok || bm.Format != gtfont.PNG {
-		r.colorGlyphs[ch] = miss
-		return miss, false
+		return Glyph{}, false
 	}
 	src, err := png.Decode(bytes.NewReader(bm.Data))
 	if err != nil {
-		r.colorGlyphs[ch] = miss
-		return miss, false
+		return Glyph{}, false
 	}
-
-	// Normalize to straight-alpha NRGBA. The blend state is straight alpha
-	// (SRC_ALPHA, ONE_MINUS_SRC_ALPHA), so uploading premultiplied image.RGBA
-	// would apply alpha twice and darken the fringes.
-	nrgba, isNRGBA := src.(*image.NRGBA)
-	if !isNRGBA {
-		b := src.Bounds()
-		nrgba = image.NewNRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
-		draw.Draw(nrgba, nrgba.Bounds(), src, b.Min, draw.Src)
+	b := src.Bounds()
+	scale := float32(side) / float32(max(b.Dx(), b.Dy()))
+	w, h := max(1, int(float32(b.Dx())*scale+0.5)), max(1, int(float32(b.Dy())*scale+0.5))
+	const pad = 1
+	// Premultiplied, so LINEAR filtering never bleeds dark fringes; the
+	// shader un-premultiplies.
+	dst := image.NewRGBA(image.Rect(0, 0, w+2*pad, h+2*pad))
+	xdraw.CatmullRom.Scale(dst, image.Rect(pad, pad, pad+w, pad+h), src, b, xdraw.Src, nil)
+	layer, px, py, ok := r.colorAtlas.alloc(w+2*pad, h+2*pad)
+	if !ok {
+		return Glyph{}, false
 	}
-	w, h := nrgba.Bounds().Dx(), nrgba.Bounds().Dy()
-
-	var tex uint32
-	gl.GenTextures(1, &tex)
-	gl.BindTexture(gl.TEXTURE_2D, tex)
-	gl.PixelStorei(gl.UNPACK_ALIGNMENT, 1)
-	gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA, int32(w), int32(h), 0,
-		gl.RGBA, gl.UNSIGNED_BYTE, gl.Ptr(nrgba.Pix))
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
-	gl.BindTexture(gl.TEXTURE_2D, 0)
-
-	cg := colorGlyph{tex: tex, w: w, h: h, ok: true}
-	r.colorGlyphs[ch] = cg
-	return cg, true
+	r.colorAtlas.write(layer, px, py, w+2*pad, h+2*pad, dst.Pix)
+	size := float32(r.colorAtlas.size)
+	g := Glyph{
+		X:           float32(px+pad) / size,
+		Y:           float32(py+pad) / size,
+		Width:       float32(w) / size,
+		Height:      float32(h) / size,
+		PixelWidth:  w,
+		PixelHeight: h,
+		Layer:       uint16(layer),
+		Color:       true,
+	}
+	r.colorGlyphs[key] = g
+	return g, true
 }
 
-// drawColorGlyph draws a color-emoji texture as a square fitted to the cell
-// height and centered over the cell's column span.
-func (r *Renderer) drawColorGlyph(x, yTop float32, spanCols int, cg colorGlyph, alpha float32, proj [16]float32) {
-	r.uiFlush() // immediate textured draw: pending UI batches must land first
-	spanW := float32(spanCols) * r.cellWidth
-	side := r.cellHeight
-	if side > spanW {
-		side = spanW
+// colorCluster shapes an emoji sequence with the color font and returns its
+// glyph when the font has one (ZWJ sequences, flags and keycaps are
+// ligatures there). A sequence the font lacks draws its first emoji.
+func (r *Renderer) colorCluster(text []rune, span int) []placedGlyph {
+	if r.colorFace == nil {
+		return nil
 	}
-	dx := x + (spanW-side)/2
-	dy := yTop + (r.cellHeight-side)/2
-	x2 := dx + side
-	y2 := dy + side
-
-	verts := []float32{
-		dx, dy, 0, 0,
-		x2, dy, 1, 0,
-		x2, y2, 1, 1,
-		dx, dy, 0, 0,
-		x2, y2, 1, 1,
-		dx, y2, 0, 1,
-	}
-
-	gl.UseProgram(r.colorProgram)
-	gl.UniformMatrix4fv(r.colorProjLoc, 1, false, &proj[0])
-	gl.Uniform1i(r.colorTexLoc, 0)
-	gl.Uniform1f(r.colorAlphaLoc, alpha)
-	gl.ActiveTexture(gl.TEXTURE0)
-	gl.BindTexture(gl.TEXTURE_2D, cg.tex)
-	gl.BindVertexArray(r.fontVAO)
-	gl.BindBuffer(gl.ARRAY_BUFFER, r.fontVBO)
-	gl.BufferSubData(gl.ARRAY_BUFFER, 0, len(verts)*4, gl.Ptr(verts))
-	gl.DrawArrays(gl.TRIANGLES, 0, 6)
-	gl.BindVertexArray(0)
-}
-
-// destroyColorEmoji releases the color-glyph textures, shader, and font handle.
-func (r *Renderer) destroyColorEmoji() {
-	for ch, cg := range r.colorGlyphs {
-		if cg.ok && cg.tex != 0 {
-			gl.DeleteTextures(1, &cg.tex)
+	for _, sg := range r.shapeRunes(r.colorFace, text, fixed.I(128)) {
+		if sg.gid == 0 || !r.hasColorBitmap(gtfont.GID(sg.gid)) {
+			continue
 		}
-		delete(r.colorGlyphs, ch)
+		if g, ok := r.colorGlyphAt(sg.gid, span); ok {
+			return []placedGlyph{{g: g}}
+		}
+		return nil
 	}
+	return nil
+}
+
+// drawColorGlyph draws a color glyph fitted to the cell height and centered
+// over its column span, batched with the UI glyphs.
+func (r *Renderer) drawColorGlyph(x, yTop float32, spanCols int, cg colorGlyph, alpha float32, proj [16]float32) {
+	g, ok := r.colorGlyphAt(cg.gid, max(1, spanCols))
+	if !ok {
+		return
+	}
+	r.uiEnsure(uiKindGlyph, proj)
+	if r.uiAtlasGen != r.atlasGen {
+		r.uiGlyphs.reset()
+		r.uiAtlasGen = r.atlasGen
+	}
+	r.emitColor(&r.uiGlyphs, g, x, yTop, max(1, spanCols), alpha)
+}
+
+// destroyColorEmoji releases the RGBA shader and the color font handle.
+func (r *Renderer) destroyColorEmoji() {
 	if r.colorProgram != 0 {
 		gl.DeleteProgram(r.colorProgram)
 		r.colorProgram = 0

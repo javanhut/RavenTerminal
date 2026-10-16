@@ -2238,6 +2238,14 @@ int _glfwPlatformCreateStandardCursor(_GLFWcursor* cursor, int shape)
         id = OCR_SIZEWE;
     else if (shape == GLFW_VRESIZE_CURSOR)
         id = OCR_SIZENS;
+    else if (shape == GLFW_RESIZE_NWSE_CURSOR)
+        id = OCR_SIZENWSE;
+    else if (shape == GLFW_RESIZE_NESW_CURSOR)
+        id = OCR_SIZENESW;
+    else if (shape == GLFW_RESIZE_ALL_CURSOR)
+        id = OCR_SIZEALL;
+    else if (shape == GLFW_NOT_ALLOWED_CURSOR)
+        id = OCR_NO;
     else
         return GLFW_FALSE;
 

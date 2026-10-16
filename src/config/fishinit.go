@@ -1,7 +1,6 @@
 package config
 
 import (
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -61,7 +60,7 @@ func (c *Config) writeFishInitScript() (string, error) {
 	// with it. A parse error in a sub-sourced file only aborts that file.
 	if c.Scripts.Init != "" {
 		userPath := filepath.Join(GetScriptsDir(), "user-init.fish")
-		if err := os.WriteFile(userPath, []byte(c.Scripts.Init+"\n"), 0644); err == nil {
+		if err := writeIfChanged(userPath, []byte(c.Scripts.Init+"\n"), 0644); err == nil {
 			b.WriteString("# User init script (must be valid fish syntax; kept in its own\n")
 			b.WriteString("# file so a syntax error cannot break the rest of this script)\n")
 			b.WriteString("source " + FishQuote(userPath) + "\n\n")
@@ -83,6 +82,8 @@ func (c *Config) writeFishInitScript() (string, error) {
 	b.WriteString("    printf '\\033]7;file://%s%s\\a' \"$_host\" \"$PWD\"\n")
 	b.WriteString("end\n\n")
 
+	b.WriteString(fishOSC133)
+	b.WriteString(fishRavenFunctions)
 	b.WriteString(c.buildFishPromptFunction())
 
 	// Aliases (sorted for deterministic output).
@@ -120,7 +121,7 @@ func (c *Config) writeFishInitScript() (string, error) {
 		}
 	}
 
-	if err := os.WriteFile(path, []byte(b.String()), 0644); err != nil {
+	if err := writeIfChanged(path, []byte(b.String()), 0644); err != nil {
 		return "", err
 	}
 	return path, nil
@@ -370,7 +371,43 @@ func (c *Config) buildFishPromptFunction() string {
 		b.WriteString("    printf '" + dim + ">" + reset + " '\n")
 	}
 
+	b.WriteString("    set -q __raven_osc133; and printf '\\033]133;B\\a'\n")
 	b.WriteString("    __raven_emit_osc7\n")
 	b.WriteString("end\n")
 	return b.String()
 }
+
+// fishOSC133 emits OSC 133 marks from fish's event hooks. fish 4 marks its
+// prompt itself, so the hooks are only installed for older versions.
+const fishOSC133 = `# OSC 133 semantic prompt marks (fish 4+ emits them natively)
+if test (string split -f1 . -- $FISH_VERSION) -lt 4 2>/dev/null
+    set -g __raven_osc133 1
+    function __raven_osc133_prompt --on-event fish_prompt
+        printf '\033]133;A\a'
+    end
+    function __raven_osc133_preexec --on-event fish_preexec
+        printf '\033]133;C\a'
+    end
+    function __raven_osc133_postexec --on-event fish_postexec
+        printf '\033]133;D;%s\a' $status
+    end
+end
+
+`
+
+const fishRavenFunctions = `# Raven Terminal commands
+function list-fonts
+    command raven-terminal --list-fonts $argv
+end
+function keybindings
+    command raven-terminal --keybindings $argv
+end
+function change-font
+    if test (count $argv) -eq 0
+        command raven-terminal --list-fonts
+        return
+    end
+    printf '\033]7771;change-font=%s\033\\\\' "$argv"
+end
+
+`

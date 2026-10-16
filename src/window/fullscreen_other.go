@@ -29,27 +29,26 @@ func isFullscreen(w *Window) bool {
 	return w.glfw.GetMonitor() != nil
 }
 
-// currentMonitor returns the monitor containing the largest portion of the
-// window, falling back to the primary monitor. GLFW only exposes a window's
-// monitor while it is fullscreen, so for windowed mode we compute the overlap
-// between the window rect and each monitor's work area ourselves.
+// currentMonitor returns the monitor the window is on. GLFW tracks it per
+// platform (on Wayland, the outputs the surface entered, since window
+// positions are unknown there); otherwise the monitor containing the window's
+// center, else the one it overlaps most, else the primary.
 func currentMonitor(w *Window) *glfw.Monitor {
-	wx, wy := w.glfw.GetPos()
-	ww, wh := w.glfw.GetSize()
-	best := glfw.GetPrimaryMonitor()
-	bestArea := 0
-	for _, m := range glfw.GetMonitors() {
-		mode := m.GetVideoMode()
-		if mode == nil {
-			continue
-		}
-		mx, my := m.GetPos()
-		overlapW := min(wx+ww, mx+mode.Width) - max(wx, mx)
-		overlapH := min(wy+wh, my+mode.Height) - max(wy, my)
-		if overlapW > 0 && overlapH > 0 && overlapW*overlapH > bestArea {
-			bestArea = overlapW * overlapH
-			best = m
+	if m := w.glfw.CurrentMonitor(); m != nil {
+		return m
+	}
+	monitors := glfw.GetMonitors()
+	rects := make([]rect, len(monitors))
+	for i, m := range monitors {
+		if mode := m.GetVideoMode(); mode != nil {
+			mx, my := m.GetPos()
+			rects[i] = rect{mx, my, mode.Width, mode.Height}
 		}
 	}
-	return best
+	wx, wy := w.glfw.GetPos()
+	ww, wh := w.glfw.GetSize()
+	if i := pickMonitor(rect{wx, wy, ww, wh}, rects); i >= 0 {
+		return monitors[i]
+	}
+	return glfw.GetPrimaryMonitor()
 }

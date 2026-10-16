@@ -13,8 +13,8 @@ func TestDeviceAttributesReplies(t *testing.T) {
 		input string
 		want  string
 	}{
-		{"DA1", "\x1b[c", "\x1b[?62;22c"},
-		{"DA1 explicit zero", "\x1b[0c", "\x1b[?62;22c"},
+		{"DA1", "\x1b[c", "\x1b[?62;4;22c"},
+		{"DA1 explicit zero", "\x1b[0c", "\x1b[?62;4;22c"},
 		{"DA2", "\x1b[>c", "\x1b[>0;136;0c"},
 		{"DA3", "\x1b[=c", "\x1bP!|00000000\x1b\\"},
 		{"DA3 explicit zero", "\x1b[=0c", "\x1bP!|00000000\x1b\\"},
@@ -46,8 +46,8 @@ func TestXTVersion(t *testing.T) {
 			term := NewTerminal(10, 3)
 			out := captureResponses(term)
 			term.Process([]byte(tc.input))
-			if string(*out) != "\x1bP>|RavenTerminal\x1b\\" {
-				t.Fatalf("XTVERSION reply = %q, want %q", string(*out), "\x1bP>|RavenTerminal\x1b\\")
+			if want := "\x1bP>|RavenTerminal(" + Version + ")\x1b\\"; string(*out) != want {
+				t.Fatalf("XTVERSION reply = %q, want %q", string(*out), want)
 			}
 		})
 	}
@@ -65,7 +65,7 @@ func TestDECSCUSRUnchanged(t *testing.T) {
 		{"steady bar", "\x1b[6 q", CursorStyleBar, false},
 		{"blinking underline", "\x1b[3 q", CursorStyleUnderline, true},
 		{"default", "\x1b[0 q", CursorStyleBlock, true},
-		{"no space intermediate", "\x1b[2q", CursorStyleBlock, false},
+		{"no space intermediate is DECLL", "\x1b[6q", CursorStyleBlock, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -102,7 +102,7 @@ func TestOSC52Read(t *testing.T) {
 		term.SetResponseWriter(func(b []byte) { responses <- append([]byte(nil), b...) })
 		term.SetClipboardReader(func() string { return "hello" })
 		term.Process([]byte("\x1b]52;c;?\x07"))
-		want := "\x1b]52;c;aGVsbG8=\x1b\\"
+		want := "\x1b]52;c;aGVsbG8=\x07" // BEL request, BEL reply
 		select {
 		case got := <-responses:
 			if string(got) != want {
@@ -140,7 +140,7 @@ func TestOSC52Read(t *testing.T) {
 		close(release)
 		select {
 		case got := <-responses:
-			if want := "\x1b]52;c;aGk=\x1b\\"; string(got) != want {
+			if want := "\x1b]52;c;aGk=\x07"; string(got) != want {
 				t.Fatalf("OSC 52 reply = %q, want %q", string(got), want)
 			}
 		case <-time.After(2 * time.Second):

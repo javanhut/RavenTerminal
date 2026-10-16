@@ -11,6 +11,9 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -86,6 +89,12 @@ type AppearanceConfig struct {
 	FauxBold          bool    `toml:"faux_bold"`           // Synthesize bold text (offset double-draw)
 	FauxItalic        bool    `toml:"faux_italic"`         // Synthesize italic text (shear)
 	Undercurl         bool    `toml:"undercurl"`           // Render curly/styled underlines (SGR 4:n)
+	TextGamma         float32 `toml:"text_gamma"`          // Extra gamma for text darker than the background (1 = off)
+	TextContrast      float32 `toml:"text_contrast"`       // Text coverage multiplier (1 = off)
+	Ligatures         bool    `toml:"ligatures"`           // Shape programming ligatures (=>, !=, ...)
+	MarksGutter       bool    `toml:"marks_gutter"`        // Show OSC 133 prompt marks beside each prompt
+	ReducedMotion     bool    `toml:"reduced_motion"`      // No flashes, slides or animated progress
+	BackgroundOpacity float32 `toml:"background_opacity"`  // 0.1-1; below 1 the window is translucent
 }
 
 // Config holds the terminal configuration
@@ -113,6 +122,75 @@ type Config struct {
 	// for a finger at all is the system's switch (Settings > Security >
 	// Approve sudo); this only decides how the terminal presents it.
 	FingerprintSudo bool `toml:"fingerprint_sudo"`
+	// ScrollbackLines caps each pane's history (0 disables scrollback).
+	ScrollbackLines int `toml:"scrollback_lines"`
+	// Bell is what BEL does: "visual" (flash, plus attention when
+	// unfocused), "attention" (only mark the window urgent) or "none".
+	Bell string `toml:"bell"`
+	// Notifications allows desktop notifications from applications
+	// (OSC 9/99/777) and for finished commands.
+	Notifications bool `toml:"notifications"`
+	// NotifyCommandAfter notifies, in seconds, when a command that ran at
+	// least this long finishes while the window is unfocused (0 = never).
+	NotifyCommandAfter int `toml:"notify_command_after"`
+}
+
+// BellMode returns Bell normalized to "visual", "attention" or "none".
+func (c *Config) BellMode() string {
+	switch m := strings.ToLower(strings.TrimSpace(c.Bell)); m {
+	case "attention", "none":
+		return m
+	}
+	return "visual"
+}
+
+// Opacity returns the background opacity clamped to [0.1, 1]; unset is 1.
+func (c *Config) Opacity() float32 {
+	o := c.Appearance.BackgroundOpacity
+	switch {
+	case o <= 0 || o >= 1:
+		return 1
+	case o < 0.1:
+		return 0.1
+	}
+	return o
+}
+
+// Scrollback returns ScrollbackLines clamped to be non-negative.
+func (c *Config) Scrollback() int {
+	return max(c.ScrollbackLines, 0)
+}
+
+var (
+	configWatchOnce sync.Once
+	configGen       atomic.Uint64
+)
+
+// ConfigGeneration returns a counter that bumps whenever config.toml changes
+// on disk. The first call starts one poller shared by every window.
+func ConfigGeneration() uint64 {
+	configWatchOnce.Do(func() { go watchStat(GetConfigPath(), time.Second, &configGen, nil) })
+	return configGen.Load()
+}
+
+// watchStat bumps gen whenever path's stat changes, polling every interval
+// until stop is closed (nil: forever).
+func watchStat(path string, interval time.Duration, gen *atomic.Uint64, stop <-chan struct{}) {
+	prev, prevErr := os.Stat(path)
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+		}
+		cur, err := os.Stat(path)
+		if desktopStatChanged(prev, prevErr, cur, err) {
+			gen.Add(1)
+		}
+		prev, prevErr = cur, err
+	}
 }
 
 // sha256 digests of earlier default VCS-detect scripts, kept so LoadConfig
@@ -325,6 +403,11 @@ func DefaultConfig() *Config {
 			FauxBold:          true,
 			FauxItalic:        true,
 			Undercurl:         true,
+			TextGamma:         1.7,
+			TextContrast:      1.0,
+			Ligatures:         true,
+			MarksGutter:       true,
+			BackgroundOpacity: 1,
 		},
 		Commands: []CustomCommand{},
 		Aliases: map[string]string{
@@ -336,6 +419,10 @@ func DefaultConfig() *Config {
 		AllowClipboardRead: false, // opt-in: OSC 52 read leaks clipboard contents to apps
 		RestoreSession:     false, // opt-in: reopening old tabs surprises users who expect a clean start
 		FingerprintSudo:    true,  // the system switch is already the opt-in; this is presentation
+		ScrollbackLines:    10000,
+		Bell:               "visual",
+		Notifications:      true,
+		NotifyCommandAfter: 10,
 	}
 }
 
@@ -397,6 +484,36 @@ func WriteFileAtomic(path string, data []byte) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// writeIfChanged atomically replaces path with data (temp file + rename) and
+// leaves it untouched when the content and mode already match, so a shell
+// sourcing it never sees a half-written script.
+func writeIfChanged(path string, data []byte, perm os.FileMode) error {
+	if old, err := os.ReadFile(path); err == nil && bytes.Equal(old, data) {
+		if st, err := os.Stat(path); err == nil && st.Mode().Perm() == perm {
+			return nil
+		}
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	_, err = f.Write(data)
+	if err == nil {
+		err = f.Chmod(perm)
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		os.Remove(tmp)
+	}
+	return err
 }
 
 // Bookmark is a saved page from the search panel preview.
@@ -620,12 +737,15 @@ func (c *Config) WriteInitScript() (string, error) {
 	script.WriteString("    printf '\\e]7;file://%s%s\\a' \"$_host\" \"$PWD\"\n")
 	script.WriteString("}\n\n")
 
+	script.WriteString(bashOSC133)
+	script.WriteString(posixRavenFunctions)
+
 	// Add prompt building function based on style
 	script.WriteString(c.buildPromptFunction())
 
 	// Add PROMPT_COMMAND
 	script.WriteString("\n# Set up prompt\n")
-	script.WriteString("PROMPT_COMMAND='__raven_prompt'\n")
+	script.WriteString("PROMPT_COMMAND='__raven_osc133_status; __raven_prompt'\n")
 
 	// Add aliases
 	if len(c.Aliases) > 0 {
@@ -657,7 +777,7 @@ func (c *Config) WriteInitScript() (string, error) {
 		script.WriteString("export PATH\n")
 	}
 
-	if err := os.WriteFile(initPath, []byte(script.String()), 0644); err != nil {
+	if err := writeIfChanged(initPath, []byte(script.String()), 0644); err != nil {
 		return "", err
 	}
 
@@ -671,6 +791,48 @@ func (c *Config) WriteInitScript() (string, error) {
 
 	return initPath, nil
 }
+
+// bashOSC133 emits OSC 133 semantic prompt marks: D;<status> when the last
+// command finishes (only if one ran), A/B around PS1, and C from PS0 just
+// before a command executes. PS0's arithmetic side effect records that a
+// command ran without printing anything.
+const bashOSC133 = `# OSC 133 semantic prompt marks
+__raven_osc133_status() {
+    local _st=$?
+    if [ -n "$__raven_osc133_ran" ]; then
+        printf '\e]133;D;%s\a' "$_st"
+        __raven_osc133_ran=
+    fi
+    return $_st
+}
+__raven_osc133_ps1() {
+    case "$PS1" in
+        *'133;A'*) ;;
+        *) PS1='\[\e]133;A\a\]'"$PS1"'\[\e]133;B\a\]' ;;
+    esac
+}
+case "$PS0" in
+    *'133;C'*) ;;
+    *) PS0="$PS0"'${PS0:0:$((__raven_osc133_ran=1,0))}\e]133;C\a' ;;
+esac
+
+`
+
+// posixRavenFunctions are the terminal commands shared by bash and zsh:
+// list-fonts/keybindings print through the binary, change-font asks the
+// running terminal over OSC 7771.
+const posixRavenFunctions = `# Raven Terminal commands
+list-fonts() { command raven-terminal --list-fonts "$@"; }
+keybindings() { command raven-terminal --keybindings "$@"; }
+change-font() {
+    if [ $# -eq 0 ]; then
+        command raven-terminal --list-fonts
+        return
+    fi
+    printf '\033]7771;change-font=%s\033\\' "$*"
+}
+
+`
 
 // getDistroName reads the distribution name from /etc/os-release
 func getDistroName() string {
@@ -777,6 +939,7 @@ func (c *Config) buildPromptFunction() string {
 		script += `    PS1="$_line1\n$_line2"` + "\n"
 	}
 
+	script += "    __raven_osc133_ps1\n"
 	script += "    __raven_emit_osc7\n"
 	script += "}\n"
 	return script

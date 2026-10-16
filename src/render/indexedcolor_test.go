@@ -30,13 +30,14 @@ func TestIndexedColorStandard16(t *testing.T) {
 	}
 }
 
-// TestIndexedColorCube checks the 6x6x6 color cube formula (indices 16-231).
+// TestIndexedColorCube checks the xterm 6x6x6 color cube (indices 16-231).
 func TestIndexedColorCube(t *testing.T) {
+	cubeLevels := [6]int{0, 95, 135, 175, 215, 255}
 	for idx := 16; idx < 232; idx++ {
 		i := idx - 16
-		r := float32((i/36)%6) * 51 / 255
-		g := float32((i/6)%6) * 51 / 255
-		b := float32(i%6) * 51 / 255
+		r := float32(cubeLevels[(i/36)%6]) / 255
+		g := float32(cubeLevels[(i/6)%6]) / 255
+		b := float32(cubeLevels[i%6]) / 255
 		want := [4]float32{r, g, b, 1.0}
 		if got := indexedColor(uint8(idx)); got != want {
 			t.Fatalf("indexedColor(%d) = %v, want %v", idx, got, want)
@@ -53,8 +54,9 @@ func TestIndexedColorCube(t *testing.T) {
 
 // TestIndexedColorGrayscale checks the grayscale ramp (indices 232-255).
 func TestIndexedColorGrayscale(t *testing.T) {
+	// xterm ramp: 8, 18, ..., 238.
 	for idx := 232; idx < 256; idx++ {
-		v := float32(idx-232) * 10 / 255
+		v := float32(8+(idx-232)*10) / 255
 		want := [4]float32{v, v, v, 1.0}
 		if got := indexedColor(uint8(idx)); got != want {
 			t.Fatalf("indexedColor(%d) = %v, want %v", idx, got, want)

@@ -2,7 +2,8 @@
 
 App shortcuts use a **leader** modifier instead of plain Ctrl, so the Control
 key stays free for terminal control characters (Ctrl+C, Ctrl+D, ...), matching
-iTerm2 / Terminal.app:
+iTerm2 / Terminal.app. No plain Ctrl, Alt or Shift chord is taken from the
+running program (Ctrl+Q, Ctrl+R and Shift+Enter all reach it):
 
 - **macOS**: the leader is **Cmd**.
 - **Linux**: the leader is **Super** (same muscle memory as macOS) *or* the
@@ -39,15 +40,15 @@ session) and is not listed above because the terminal has no binding on it.
 
 | Keybinding | Action |
 |------------|--------|
-| Ctrl+Q or Cmd/Super+Q | Exit terminal |
+| Leader+Q | Exit terminal |
 | Leader+C | Copy selection (Cmd+C / Super+C / Ctrl+Shift+C) |
-| Cmd/Super+V (also Ctrl+Shift+P on Linux) | Paste clipboard |
-| Shift+Enter | Toggle fullscreen mode |
+| Leader+V | Paste clipboard |
+| Leader+Enter or F11 | Toggle fullscreen mode |
 | Leader+K | Show keybindings help panel |
 | Leader+S | Open settings menu |
 | Leader+F | Toggle web search panel |
 | Leader+A | Toggle AI chat panel |
-| Ctrl+R or Cmd/Super+R | Toggle pane resize mode |
+| Leader+R | Toggle pane resize mode (arrows resize, Esc exits) |
 
 ## Zoom
 
@@ -64,8 +65,8 @@ session) and is not listed above because the terminal has no binding on it.
 | Leader+T | New tab |
 | Leader+X | Close current tab |
 | Leader+1..9 | Jump to tab 1-9 |
-| Ctrl+Tab | Next tab |
-| Ctrl+Shift+Tab | Previous tab |
+| Leader+Tab | Next tab |
+| Leader+Shift+Tab | Previous tab |
 | Cmd/Super+Shift+] | Next tab |
 | Cmd/Super+Shift+[ | Previous tab |
 
@@ -73,15 +74,14 @@ session) and is not listed above because the terminal has no binding on it.
 
 | Keybinding | Action |
 |------------|--------|
-| Cmd/Super+D (also Ctrl+Shift+V on Linux) | Split pane vertically (side by side) |
-| Cmd/Super+Shift+D (also Ctrl+Shift+H on Linux) | Split pane horizontally (stacked) |
+| Leader+D | Split pane vertically (side by side) |
+| Leader+Shift+D | Split pane horizontally (stacked) |
 | Leader+W | Close current pane |
 | Cmd/Super+] (also Ctrl+Shift+] on Linux) | Focus next pane |
 | Cmd/Super+[ (also Ctrl+Shift+[ on Linux) | Focus previous pane |
-| Cmd/Super+Shift+Tab | Cycle to next pane |
 
-Note: macOS reserves Cmd+Shift+Tab for the app switcher unless remapped, and
-tiling window managers often grab Super chords (on RavenLinux they do not —
+Plain Ctrl+Tab and Ctrl+Shift+Tab without the leader go to the program.
+Note: tiling window managers often grab Super chords (on RavenLinux they do not —
 Huginn leaves Super and Super+Shift alone, see "Reserved" above); the
 leader+] / leader+[ bindings always cycle panes.
 
@@ -95,15 +95,91 @@ leader+] / leader+[ bindings always cycle panes.
 | Shift+PageUp | Scroll up 5 lines |
 | Shift+PageDown | Scroll down 5 lines |
 
+Shift+Up/Down/PageUp/PageDown scroll only on the main screen while the
+program has not enabled mouse reporting or the kitty keyboard protocol. In
+full-screen programs (vim, less, htop, ...) they are sent to the program as
+xterm-style modified keys.
+
 Scrolling is reset to the bottom when any input is typed.
 
 ## Mouse
 
 | Action | Behavior |
 |--------|----------|
-| Left-click drag | Select text and copy to clipboard |
+| Left-click drag | Select text; copies it to the clipboard and the primary selection |
+| Alt+left-click drag | Rectangular (block) selection |
+| Leader+left-click on command output | Select and copy that command's whole output (needs shell integration) |
+| Middle-click | Paste the primary selection (when the program has not enabled mouse reporting) |
 | Right-click | Copy selection if one exists, otherwise paste clipboard |
 | Ctrl+Right-click | Open the URL under the pointer |
+
+When a program enables mouse reporting, clicks, drags, motion and both wheel
+axes (horizontal scrolling as buttons 6/7) go to the program; hold Shift to
+select text instead. With SGR-pixels (mode 1016) positions are reported in
+exact pixels within the pane. A pointer shape requested with OSC 22 applies
+over the program's pane only.
+
+## Shell Integration, Overlays and Panes
+
+"Leader+Shift+X" means Super+Shift+X, or Ctrl+Shift+Alt+X with the Ctrl+Shift
+leader (Ctrl+Shift+X alone is already the plain leader chord).
+
+| Keybinding | Action |
+|------------|--------|
+| Leader+Up / Leader+Down | Jump to the previous / next shell prompt (OSC 133 marks) |
+| Leader+Shift+C | Copy the last command's output |
+| Leader+H (also Leader+E) | Hints: label URLs, paths, `file:line:col`, git hashes and IPs on screen |
+| Leader+Space (also Leader+Shift+V) | Copy mode: vi keys over the scrollback |
+| Leader+P (also Leader+Shift+P) | Command palette: fuzzy search every action, setting, theme and font |
+| Leader+Z | Zoom the focused pane to fill the tab (again to restore the split) |
+| Leader+B | Broadcast typing and pastes to every pane in the tab (orange frame) |
+| Leader+Shift+H | Open the scrollback, with colours, in `less -R` in a new tab |
+
+With the Ctrl+Shift leader, Leader+H is Ctrl+Shift+H, Leader+P is
+Ctrl+Shift+P and Leader+V (paste) is Ctrl+Shift+V.
+
+**Hints**: type a label to copy its text; type it with Shift (an uppercase
+label) to open it instead — URLs in the browser, existing files and folders
+with `raven-open` — or, for hashes and addresses, to type the text into the
+pane. Esc cancels, Backspace undoes a typed letter.
+
+**Copy mode**: `h j k l` / arrows move, `w b e` move by word, `0 ^ $` jump
+within the line, `gg G` go to the top / bottom of the scrollback, `H M L`
+to the top / middle / bottom of the screen, Ctrl+U / Ctrl+D half a page,
+Ctrl+B / Ctrl+F (PageUp / PageDown) a page. `/` and `?` search forward /
+backward (Enter runs, Esc cancels), `n N` repeat. `v` starts a selection,
+`V` a line selection, Ctrl+V a block selection. `y` or Enter copies the
+selection (the current line when nothing is selected) and leaves; Esc
+leaves visual mode, then copy mode; `q` leaves.
+
+**Command palette**: type to filter (words can come in any order), Up / Down
+or Ctrl+P / Ctrl+N to move, Enter to run, Esc to close.
+
+## Remote control
+
+Every instance listens on `$XDG_RUNTIME_DIR/raven-terminal/<pid>.sock` (mode
+0600) and exports its path to shells as `RAVEN_TERMINAL_SOCKET`. The protocol
+is one JSON object per line: `{"cmd": "split", "args": ["v"]}` answered by
+`{"ok": true, "data": ...}` or `{"ok": false, "error": "..."}`.
+
+```
+raven-terminal @ ls                               # windows, tabs, panes (JSON)
+raven-terminal @ new-tab [--cwd DIR] [CMD ARGS]   # prints the new pane id
+raven-terminal @ new-window
+raven-terminal @ split [--id N] h|v               # h stacked, v side by side
+raven-terminal @ focus-pane left|right|up|down|N  # fails when there is no neighbour
+raven-terminal @ send-text [--id N] 'make\r'      # \n \r \t \e \xHH escapes
+raven-terminal @ get-text [--id N] [--extent screen|all|last-output|selection]
+raven-terminal @ set-title [--id N] TITLE          # "-" returns to the program's title
+raven-terminal @ close-pane [--id N]
+raven-terminal @ get-user-vars [--id N]            # OSC 1337 SetUserVar values
+```
+
+Without `--id` a command acts on the focused pane of the focused window.
+`focus-pane` with a direction exits non-zero when there is no pane that way,
+which is what editor split-navigation plugins (smart-splits.nvim style) need
+to hand the move over to the terminal. Outside the terminal, `@` finds the
+newest running instance, or use `raven-terminal @ --to SOCKET ...`.
 
 ## Web Search Panel
 
@@ -129,9 +205,8 @@ the query field):
 | n / N | (Preview, after Enter confirms a find) Jump to next / previous match |
 | Escape | Exit find, clear a mouse selection, back to results, then close the panel |
 
-Note: while the search panel is focused, Ctrl+R retries the search instead of
-toggling pane resize mode. Results and previewed pages are cached for the
-session, so revisiting them is instant; Ctrl+R evicts the cached copy and
+Note: while the search panel is focused, Ctrl+R retries the search. Results
+and previewed pages are cached for the session, so revisiting them is instant; Ctrl+R evicts the cached copy and
 re-fetches. In preview mode, matches of the find term are highlighted and the
 status line shows `find: <term> (current/total)`; the footer shows the scroll
 position as `L<line>/<total> <percent>%`. Search history persists across
@@ -181,13 +256,37 @@ While the help panel (Leader+K) is open:
 
 ## Function Keys
 
-F1-F12 are passed through to the running application.
+F1-F10 and F12 are passed through to the running application (F13-F24 as
+Shift+F1-F12). Plain F11 toggles fullscreen; modified F11 is passed through.
 
 ## Modifier Keys
 
-- **Ctrl+letter**: Sends the control character to the shell (Ctrl+C interrupts,
-  Ctrl+D for EOF, Ctrl+L clears, etc.) — Ctrl is *not* used for copy/paste.
-- **Ctrl+Space**: Sends NUL.
-- **Alt+letter**: Sends ESC prefix followed by the letter.
-- **Shift+Tab**: Always sends the reverse-tab sequence (CSI Z) to the running
-  app (nvim, TUIs). Pane cycling uses Cmd/Super+Shift+Tab instead.
+Keys are encoded like xterm, following the active keyboard layout:
+
+- **Ctrl+letter**: the control character of the letter your layout puts on
+  that key (AZERTY Ctrl+A is ^A). On non-Latin layouts the physical key's
+  Latin letter is used, so Ctrl+C still interrupts. Ctrl is *not* used for
+  copy/paste.
+- **Ctrl+Space / Ctrl+2**: NUL. **Ctrl+[ / Ctrl+3**: ESC. **Ctrl+\ / Ctrl+4**:
+  FS. **Ctrl+] / Ctrl+5**: GS. **Ctrl+6**: RS. **Ctrl+/ / Ctrl+7**: US.
+  **Ctrl+8**: DEL.
+- **Alt+key**: ESC followed by the character your layout produces.
+- **Backspace** sends DEL, **Ctrl+Backspace** ^H, **Alt+Backspace** ESC DEL.
+- **Shift+Tab**: reverse tab (CSI Z). Ctrl+Tab is sent to the program too; tab cycling uses Leader+Tab.
+- **Modified arrows, Home/End, Insert/Delete, PageUp/PageDown, F1-F12** send
+  `CSI 1;<mod> X` / `CSI <n>;<mod> ~` (mod = 1 + Shift 1, Alt 2, Ctrl 4,
+  Super 8). Home/End follow cursor-key application mode (SS3 H/F).
+- **Keypad**: in application keypad mode (DECKPAM) the keypad sends SS3
+  codes (`SS3 p`..`SS3 y` for 0-9, `SS3 M` for Enter, ...). With Num Lock off
+  the keypad acts as the navigation keys printed on it.
+
+## Program-requested keyboard modes
+
+- **modifyOtherKeys** (`CSI > 4 ; 1 m` / `CSI > 4 ; 2 m`): chords without a
+  distinct legacy code (Ctrl+;, Ctrl+1, Shift+Enter, Ctrl+Enter, and at level
+  2 every Ctrl/Alt chord) are sent as `CSI 27 ; <mod> ; <code> ~`.
+- **Kitty keyboard protocol** (`CSI > <flags> u`): all five enhancements are
+  supported: disambiguate (1), report press/repeat/release (2), alternate
+  keys (4, shifted and base-layout key), report all keys as escape codes (8,
+  including modifier keys and Caps/Num Lock state) and associated text (16).
+  Leader shortcuts keep working while a program has the protocol enabled.

@@ -244,29 +244,6 @@ func styleOf(c Cell) Style {
 	}
 }
 
-// internGrapheme returns a compact id for a grapheme cluster (base rune plus
-// combining/ZWJ codepoints), deduplicating repeats. A single-rune cluster
-// returns 0 (meaning "use Cell.Char, no combining").
-func (g *Grid) internGrapheme(cluster []rune) uint32 {
-	if len(cluster) <= 1 {
-		return 0
-	}
-	key := string(cluster)
-	if g.graphemeMap == nil {
-		g.graphemeMap = make(map[string]uint32)
-		g.graphemes = make([][]rune, 1) // index 0 reserved for "none"
-	}
-	if id, ok := g.graphemeMap[key]; ok {
-		return id
-	}
-	cp := make([]rune, len(cluster))
-	copy(cp, cluster)
-	id := uint32(len(g.graphemes))
-	g.graphemes = append(g.graphemes, cp)
-	g.graphemeMap[key] = id
-	return id
-}
-
 // inflate resolves a storedCell back into the public Cell DTO. Callers outside
 // the grid only ever see public Cells, so the interning is invisible to them.
 func (g *Grid) inflate(sc storedCell) Cell {
@@ -311,6 +288,7 @@ func (g *Grid) putCell(idx int, c Cell) {
 		cl = append(cl, c.Char)
 		cl = append(cl, c.Combining...)
 		gid = g.internGrapheme(cl)
+		g.rows[idx/g.Cols].flags |= RowHasCluster
 	}
 	*p = storedCell{
 		Style:    g.styles.intern(styleOf(c)),
@@ -351,7 +329,7 @@ func (g *Grid) putCellStyledRow(row *Row, col int, char rune, id StyleID, width 
 		// Overwriting the last column ends any earlier soft wrap; if this
 		// write itself overflows, the wrap path re-marks the row when the
 		// next character actually moves to the following line.
-		row.flags &^= RowSoftWrapped
+		row.flags &^= rowWrapFlags
 	}
 }
 

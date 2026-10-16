@@ -449,6 +449,12 @@ uninstall_user() {
     if remove_dir "$HOME/.local/share/raven-terminal" false "User data dir"; then
         ((++removed))
     fi
+
+    # Remove terminfo entry (letter and hex directory layouts)
+    if remove_file "$HOME/.terminfo/x/xterm-raven" false "User terminfo"; then
+        ((++removed))
+    fi
+    remove_file "$HOME/.terminfo/78/xterm-raven" false "User terminfo (hex)" || true
     
     if [ $removed -gt 0 ]; then
         print_success "User installation removed ($removed files)"
@@ -508,6 +514,11 @@ uninstall_global() {
 
     # Remove pixmap icon
     if remove_file "$GLOBAL_PIXMAP_DIR/$APP_NAME.svg" true "Global pixmap icon"; then
+        ((++removed))
+    fi
+
+    # Remove terminfo entry
+    if remove_file "/usr/share/terminfo/x/xterm-raven" true "Global terminfo"; then
         ((++removed))
     fi
     

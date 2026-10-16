@@ -437,27 +437,32 @@ static void createKeyTables(void)
     XFree(keysyms);
 }
 
-// Check whether the IM has a usable style
+// Check whether the IM has a usable style, preferring on-the-spot preedit
 //
 static GLFWbool hasUsableInputMethodStyle(void)
 {
-    GLFWbool found = GLFW_FALSE;
     XIMStyles* styles = NULL;
+
+    _glfw.x11.imStyle = 0;
 
     if (XGetIMValues(_glfw.x11.im, XNQueryInputStyle, &styles, NULL) != NULL)
         return GLFW_FALSE;
 
     for (unsigned int i = 0;  i < styles->count_styles;  i++)
     {
-        if (styles->supported_styles[i] == (XIMPreeditNothing | XIMStatusNothing))
+        const XIMStyle style = styles->supported_styles[i];
+
+        if (style == (XIMPreeditCallbacks | XIMStatusNothing))
         {
-            found = GLFW_TRUE;
+            _glfw.x11.imStyle = style;
             break;
         }
+        else if (style == (XIMPreeditNothing | XIMStatusNothing))
+            _glfw.x11.imStyle = style;
     }
 
     XFree(styles);
-    return found;
+    return _glfw.x11.imStyle != 0;
 }
 
 // Check whether the specified atom is supported
@@ -735,6 +740,8 @@ static GLFWbool initExtensions(void)
             _glfw_dlsym(_glfw.x11.xcursor.handle, "XcursorImageDestroy");
         _glfw.x11.xcursor.ImageLoadCursor = (PFN_XcursorImageLoadCursor)
             _glfw_dlsym(_glfw.x11.xcursor.handle, "XcursorImageLoadCursor");
+        _glfw.x11.xcursor.LibraryLoadCursor = (PFN_XcursorLibraryLoadCursor)
+            _glfw_dlsym(_glfw.x11.xcursor.handle, "XcursorLibraryLoadCursor");
     }
 
 #if defined(__CYGWIN__)

@@ -1,7 +1,9 @@
 package shell
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -235,10 +237,20 @@ func zshInitEnv(env []string, sourceRC bool) []string {
 type PtySession struct {
 	cmd       *exec.Cmd
 	pty       *os.File
-	mu        sync.Mutex
-	exited    bool
-	exitedMu  sync.Mutex
 	shellName string // basename of the launched shell (e.g. "bash", "fish")
+
+	// Writes are queued and drained by writeLoop so a child that stops
+	// reading its input can never block the caller (the UI thread).
+	wmu        sync.Mutex
+	wq         [][]byte
+	wqBytes    int
+	wsig       chan struct{}
+	writerDone chan struct{}
+
+	done      chan struct{} // closed by Close
+	closeOnce sync.Once
+	exitCh    chan struct{} // closed once the child has been reaped
+	exitCode  int
 
 	// cwdMu guards a short-lived cache of the working directory used on
 	// platforms without a /proc cwd link (macOS/BSD), where each lookup shells
@@ -251,6 +263,37 @@ type PtySession struct {
 	cwdRefreshing bool
 }
 
+// ErrExited is returned by Write once the child process has exited.
+var ErrExited = errors.New("pty: process exited")
+
+// ErrWriteQueueFull is returned when more than maxQueuedWrite bytes are
+// already waiting for a child that is not reading.
+var ErrWriteQueueFull = errors.New("pty: write queue full")
+
+const (
+	maxQueuedWrite = 64 << 20
+	writeChunk     = 16 << 10
+	// killGrace is how long Close waits after SIGHUP before SIGKILL.
+	killGrace = time.Second
+)
+
+// reapers tracks Close's background hangup/kill goroutines so the process
+// can wait for its children to be gone before exiting (WaitReaped).
+var reapers sync.WaitGroup
+
+// WaitReaped waits up to d for every closed session's child to be reaped,
+// reporting whether all were.
+func WaitReaped(d time.Duration) bool {
+	ch := make(chan struct{})
+	go func() { reapers.Wait(); close(ch) }()
+	select {
+	case <-ch:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
 // ShellName returns the basename of the shell this session runs (e.g.
 // "bash", "zsh", "fish"). Callers use it to send shell-appropriate commands.
 func (p *PtySession) ShellName() string {
@@ -259,7 +302,13 @@ func (p *PtySession) ShellName() string {
 
 // NewPtySession creates a new PTY session with a login shell
 func NewPtySession(cols, rows uint16, startDir string) (*PtySession, error) {
-	return newPtySession(cols, rows, startDir, nil)
+	return newPtySession(cols, rows, 0, 0, startDir, nil)
+}
+
+// NewPtySessionSized starts command (a shell when empty) with the full
+// winsize, including the pixel size of the text area, set from the start.
+func NewPtySessionSized(cols, rows uint16, pxW, pxH int, startDir string, command []string) (*PtySession, error) {
+	return newPtySession(cols, rows, pxW, pxH, startDir, command)
 }
 
 // NewPtySessionCommand creates a PTY session running `command` instead of an
@@ -270,10 +319,10 @@ func NewPtySessionCommand(cols, rows uint16, startDir string, command []string) 
 	if len(command) == 0 {
 		return NewPtySession(cols, rows, startDir)
 	}
-	return newPtySession(cols, rows, startDir, command)
+	return newPtySession(cols, rows, 0, 0, startDir, command)
 }
 
-func newPtySession(cols, rows uint16, startDir string, command []string) (*PtySession, error) {
+func newPtySession(cols, rows uint16, pxW, pxH int, startDir string, command []string) (*PtySession, error) {
 	// Load config
 	cfg, err := config.Load()
 	if err != nil {
@@ -395,7 +444,7 @@ func newPtySession(cols, rows uint16, startDir string, command []string) (*PtySe
 	// configured directories prepended.
 	env := os.Environ()
 	env = replaceEnv(env, "PATH", sessionPath)
-	env = replaceEnv(env, "TERM", "xterm-256color")
+	env = replaceEnv(env, "TERM", TermName())
 	env = replaceEnv(env, "COLORTERM", "truecolor")
 	env = replaceEnv(env, "TERM_PROGRAM", "RavenTerminal")
 	env = replaceEnv(env, "TERM_PROGRAM_VERSION", "1.0")
@@ -465,30 +514,56 @@ func newPtySession(cols, rows uint16, startDir string, command []string) (*PtySe
 		cmd.Dir = currentUser.HomeDir
 	}
 
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
-		Cols: cols,
-		Rows: rows,
-	})
+	ptmx, err := pty.StartWithSize(cmd, winsize(cols, rows, pxW, pxH))
 	if err != nil {
 		return nil, err
 	}
 
 	session := &PtySession{
-		cmd:       cmd,
-		pty:       ptmx,
-		exited:    false,
-		shellName: shellBase,
+		cmd:        cmd,
+		pty:        ptmx,
+		shellName:  shellBase,
+		wsig:       make(chan struct{}, 1),
+		writerDone: make(chan struct{}),
+		done:       make(chan struct{}),
+		exitCh:     make(chan struct{}),
 	}
 
-	// Monitor for process exit
 	go func() {
-		cmd.Wait()
-		session.exitedMu.Lock()
-		session.exited = true
-		session.exitedMu.Unlock()
+		defer recoverLog("pty wait")
+		_ = cmd.Wait()
+		session.exitCode = exitStatus(cmd.ProcessState)
+		close(session.exitCh)
 	}()
+	go session.writeLoop()
 
 	return session, nil
+}
+
+func winsize(cols, rows uint16, pxW, pxH int) *pty.Winsize {
+	return &pty.Winsize{Cols: cols, Rows: rows, X: clampU16(pxW), Y: clampU16(pxH)}
+}
+
+func clampU16(v int) uint16 {
+	return uint16(max(0, min(v, 0xffff)))
+}
+
+// exitStatus maps a finished process to a shell-style status: the exit code,
+// or 128+N when killed by signal N.
+func exitStatus(ps *os.ProcessState) int {
+	if ps == nil {
+		return -1
+	}
+	if ws, ok := ps.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+		return 128 + int(ws.Signal())
+	}
+	return ps.ExitCode()
+}
+
+func recoverLog(where string) {
+	if r := recover(); r != nil {
+		fmt.Fprintf(os.Stderr, "raven: recovered panic in %s: %v\n", where, r)
+	}
 }
 
 func replaceEnv(env []string, key, value string) []string {
@@ -652,38 +727,163 @@ func (p *PtySession) Read(buf []byte) (int, error) {
 	return p.pty.Read(buf)
 }
 
-// Write writes to the PTY
+// Write queues data for the child and returns immediately. Data written
+// after the child exited (or after Close) is dropped.
 func (p *PtySession) Write(data []byte) (int, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.pty.Write(data)
+	if p.HasExited() {
+		return 0, ErrExited
+	}
+	select {
+	case <-p.done:
+		return 0, os.ErrClosed
+	default:
+	}
+	if len(data) == 0 {
+		return 0, nil
+	}
+	p.wmu.Lock()
+	if p.wqBytes+len(data) > maxQueuedWrite {
+		p.wmu.Unlock()
+		return 0, ErrWriteQueueFull
+	}
+	p.wq = append(p.wq, bytes.Clone(data))
+	p.wqBytes += len(data)
+	p.wmu.Unlock()
+	select {
+	case p.wsig <- struct{}{}:
+	default:
+	}
+	return len(data), nil
 }
 
-// Resize resizes the PTY
-func (p *PtySession) Resize(cols, rows uint16) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return pty.Setsize(p.pty, &pty.Winsize{
-		Cols: cols,
-		Rows: rows,
-	})
+// writeLoop drains the write queue in chunks, in order. It exits on Close,
+// on child exit, or when the PTY stops accepting writes.
+func (p *PtySession) writeLoop() {
+	defer close(p.writerDone)
+	defer recoverLog("pty writer")
+	for {
+		select {
+		case <-p.wsig:
+		case <-p.done:
+			return
+		case <-p.exitCh:
+			return
+		}
+		for {
+			p.wmu.Lock()
+			if len(p.wq) == 0 {
+				p.wmu.Unlock()
+				break
+			}
+			data := p.wq[0]
+			p.wq[0] = nil
+			p.wq = p.wq[1:]
+			p.wqBytes -= len(data)
+			p.wmu.Unlock()
+			for len(data) > 0 {
+				n, err := p.pty.Write(data[:min(len(data), writeChunk)])
+				if err != nil {
+					p.dropQueue()
+					return
+				}
+				data = data[n:]
+			}
+		}
+	}
+}
+
+func (p *PtySession) dropQueue() {
+	p.wmu.Lock()
+	p.wq, p.wqBytes = nil, 0
+	p.wmu.Unlock()
+}
+
+// Resize sets the PTY winsize: cells plus the text area's pixel size. It is
+// an ioctl, independent of the write queue, so it never waits on the child.
+func (p *PtySession) Resize(cols, rows, pxW, pxH int) error {
+	return pty.Setsize(p.pty, winsize(clampU16(cols), clampU16(rows), pxW, pxH))
+}
+
+// Size reports the current PTY winsize.
+func (p *PtySession) Size() (cols, rows, pxW, pxH int, err error) {
+	ws, err := pty.GetsizeFull(p.pty)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	return int(ws.Cols), int(ws.Rows), int(ws.X), int(ws.Y), nil
 }
 
 // HasExited returns true if the shell process has exited
 func (p *PtySession) HasExited() bool {
-	p.exitedMu.Lock()
-	defer p.exitedMu.Unlock()
-	return p.exited
+	select {
+	case <-p.exitCh:
+		return true
+	default:
+		return false
+	}
 }
 
-// Close closes the PTY session
-func (p *PtySession) Close() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.cmd.Process != nil {
-		p.cmd.Process.Kill()
+// Exited is closed once the child process has exited and been reaped.
+func (p *PtySession) Exited() <-chan struct{} {
+	return p.exitCh
+}
+
+// ExitCode is the child's exit status (128+N when killed by signal N); only
+// meaningful once Exited is closed.
+func (p *PtySession) ExitCode() int {
+	select {
+	case <-p.exitCh:
+		return p.exitCode
+	default:
+		return -1
 	}
-	return p.pty.Close()
+}
+
+// Close hangs up the child's process group and closes the PTY without
+// waiting. Anything still in the group after killGrace is SIGKILLed.
+func (p *PtySession) Close() error {
+	var err error
+	p.closeOnce.Do(func() {
+		close(p.done)
+		if proc := p.cmd.Process; proc != nil && !p.HasExited() {
+			pid := proc.Pid
+			_ = syscall.Kill(-pid, syscall.SIGHUP)
+			reapers.Add(1)
+			go p.reap(pid)
+		}
+		err = p.pty.Close()
+	})
+	return err
+}
+
+// reap waits out the SIGHUP grace period for the child's process group,
+// then SIGKILLs whatever is left of it.
+func (p *PtySession) reap(pid int) {
+	defer reapers.Done()
+	defer recoverLog("pty reap")
+	grace := time.NewTimer(killGrace)
+	defer grace.Stop()
+	select {
+	case <-p.exitCh:
+	case <-grace.C:
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		select {
+		case <-p.exitCh:
+		case <-time.After(2 * time.Second):
+		}
+		return
+	}
+	// The leader is gone; give the rest of its group the same grace.
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	for syscall.Kill(-pid, 0) == nil {
+		select {
+		case <-tick.C:
+		case <-grace.C:
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+			return
+		}
+	}
 }
 
 // Reader returns an io.Reader for the PTY
@@ -691,7 +891,7 @@ func (p *PtySession) Reader() io.Reader {
 	return p.pty
 }
 
-// Writer returns an io.Writer for the PTY
+// Writer returns a non-blocking io.Writer for the PTY.
 func (p *PtySession) Writer() io.Writer {
-	return p.pty
+	return p
 }

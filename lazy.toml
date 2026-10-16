@@ -54,6 +54,16 @@ echo -e "{{green}}[OK]{{nc}} Build successful: ./{{app_name}} ($backend)"
 # The VCS checkout doesn't preserve the executable bit on scripts/, which
 # left install failing with "Permission denied". Every task that runs a
 # script depends on this. No elevation needed: the files belong to the user.
+# Compiles terminfo/xterm-raven.ti into ~/.terminfo (no root). The terminal
+# exports TERM=xterm-raven once the entry resolves, xterm-256color otherwise.
+[commands.terminfo]
+desc = "Install the xterm-raven terminfo entry for the current user (~/.terminfo)"
+run = [
+  "mkdir -p \"$HOME/.terminfo\"",
+  "tic -x -o \"$HOME/.terminfo\" terminfo/xterm-raven.ti",
+  "echo -e \"{{green}}[OK]{{nc}} xterm-raven installed to $HOME/.terminfo\"",
+]
+
 [commands.permission]
 desc = "Make the scripts in scripts/ executable"
 run = [
@@ -295,6 +305,7 @@ echo "  race            Race-detector tests (CI package set)"
 echo "  vuln            govulncheck vulnerability scan"
 echo "  ci              check + race + vuln (local CI equivalent)"
 echo "  test            Run tests"
+echo "  terminfo        Install the xterm-raven terminfo entry (~/.terminfo)"
 echo "  clean           Remove build artifacts"
 echo "  macos-icon      Generate macOS app icon (macOS only)"
 echo "  permission      Make scripts/ executable (runs before script tasks)"

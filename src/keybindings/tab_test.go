@@ -7,7 +7,7 @@ import (
 )
 
 // On macOS, Shift+Tab must reach terminal apps as back-tab (CSI Z) — TUIs
-// like Claude Code bind it — and pane cycling moves to Cmd+Shift+Tab.
+// like Claude Code bind it — and Cmd+Shift+Tab cycles tabs backwards.
 func TestShiftTabMacOS(t *testing.T) {
 	prev := isMacOS
 	defer func() { isMacOS = prev }()
@@ -19,13 +19,13 @@ func TestShiftTabMacOS(t *testing.T) {
 	}
 
 	res = TranslateKey(glfw.KeyTab, glfw.ModShift|glfw.ModSuper, false)
-	if res.Action != ActionNextPane {
-		t.Errorf("macOS Cmd+Shift+Tab = %v, want ActionNextPane", res.Action)
+	if res.Action != ActionPrevTab {
+		t.Errorf("macOS Cmd+Shift+Tab = %v, want ActionPrevTab", res.Action)
 	}
 }
 
 // Linux behaves the same: Shift+Tab is back-tab for the app (nvim binds
-// it), Super+Shift+Tab cycles panes.
+// it), Super+Shift+Tab cycles tabs backwards.
 func TestShiftTabOtherPlatforms(t *testing.T) {
 	prev := isMacOS
 	defer func() { isMacOS = prev }()
@@ -37,22 +37,7 @@ func TestShiftTabOtherPlatforms(t *testing.T) {
 	}
 
 	res = TranslateKey(glfw.KeyTab, glfw.ModShift|glfw.ModSuper, false)
-	if res.Action != ActionNextPane {
-		t.Errorf("Super+Shift+Tab = %v, want ActionNextPane", res.Action)
-	}
-}
-
-// Ctrl+Tab / Ctrl+Shift+Tab tab cycling is unaffected on both platforms.
-func TestCtrlTabCyclingUnchanged(t *testing.T) {
-	prev := isMacOS
-	defer func() { isMacOS = prev }()
-	for _, mac := range []bool{true, false} {
-		isMacOS = mac
-		if res := TranslateKey(glfw.KeyTab, glfw.ModControl, false); res.Action != ActionNextTab {
-			t.Errorf("mac=%v Ctrl+Tab = %v, want ActionNextTab", mac, res.Action)
-		}
-		if res := TranslateKey(glfw.KeyTab, glfw.ModControl|glfw.ModShift, false); res.Action != ActionPrevTab {
-			t.Errorf("mac=%v Ctrl+Shift+Tab = %v, want ActionPrevTab", mac, res.Action)
-		}
+	if res.Action != ActionPrevTab {
+		t.Errorf("Super+Shift+Tab = %v, want ActionPrevTab", res.Action)
 	}
 }

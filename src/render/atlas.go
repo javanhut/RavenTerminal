@@ -1,226 +1,183 @@
 package render
 
 import (
-	"image"
-
 	"github.com/go-gl/gl/v4.1-core/gl"
-	"golang.org/x/image/font"
-	"golang.org/x/image/math/fixed"
 )
 
-// Dynamic glyph atlas. Glyphs are rasterized on demand at their natural ink
-// bounds (with bearings recorded in the Glyph, so wide glyphs like Nerd Font
-// icons are never clipped to the cell box) and shelf-packed into a single RED
-// texture that doubles in size and re-rasterizes when full.
-//
-// Two glyph classes get special treatment, following Ghostty:
-//   - cell-exact glyphs (box drawing, powerline separators) are rasterized
-//     clipped to the cell box so they tile seamlessly across cells;
-//   - icon/symbol glyphs are placed by the draw-time constraint in glyphQuad
-//     (scaled to fit their cell span and centered).
+// Glyph atlas: fixed-size pages, each shelf-packed and mirrored on the CPU,
+// uploaded as the layers of one GL texture array. Adding a page re-uploads the
+// existing pages from their mirrors (no glyph is re-rasterized and no UV
+// moves). When every page is full the least recently drawn page is recycled
+// and the caches drop the glyphs that lived on it, so a full atlas never turns
+// into permanent '?' misses. Mono glyphs use a RED atlas, color emoji an RGBA
+// one; both are sampled by the same batch shader, so text and emoji share one
+// draw call.
 
 const (
-	atlasInitialSize = 1024
-	atlasMaxSize     = 8192
+	monoPageSize  = 2048
+	monoMaxPages  = 4
+	colorPageSize = 1024
+	colorMaxPages = 4
 	// glyphPad is the transparent border around each atlas entry: it stops
 	// LINEAR filtering from bleeding neighboring glyphs in, and absorbs the
 	// occasional pixel of hinting drift outside the reported glyph bounds.
 	glyphPad = 2
 )
 
-// initAtlas allocates an empty RED atlas texture (and CPU mirror) of size×size.
-func (r *Renderer) initAtlas(size int) {
-	r.atlasSize = size
-	r.atlasPix = make([]byte, size*size)
-	r.shelfX, r.shelfY, r.shelfH = 0, 0, 0
-
-	gl.GenTextures(1, &r.fontAtlas)
-	gl.BindTexture(gl.TEXTURE_2D, r.fontAtlas)
-	gl.PixelStorei(gl.UNPACK_ALIGNMENT, 1)
-	gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RED, int32(size), int32(size), 0,
-		gl.RED, gl.UNSIGNED_BYTE, gl.Ptr(r.atlasPix))
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
-	gl.BindTexture(gl.TEXTURE_2D, 0)
+type atlasPage struct {
+	pix                    []byte
+	shelfX, shelfY, shelfH int
+	lastUse                uint64
+	dirtyY0, dirtyY1       int // rows awaiting upload; empty when y0 >= y1
 }
 
-// allocRegion reserves a w×h region using shelf packing, growing the atlas
-// (which re-rasterizes the cache) when full. Returns the region's top-left.
-func (r *Renderer) allocRegion(w, h int) (int, int, bool) {
-	for {
-		if w <= r.atlasSize && h <= r.atlasSize {
-			if r.shelfX+w > r.atlasSize {
-				r.shelfY += r.shelfH
-				r.shelfX, r.shelfH = 0, 0
-			}
-			if r.shelfY+h <= r.atlasSize {
-				px, py := r.shelfX, r.shelfY
-				r.shelfX += w
-				if h > r.shelfH {
-					r.shelfH = h
-				}
-				return px, py, true
-			}
-		}
-		if !r.growAtlas() {
-			return 0, 0, false
+type glyphAtlas struct {
+	size, bpp, maxPages int
+	pages               []*atlasPage
+	clock               uint64
+	stale               bool            // a page drawn from since the last tick was recycled
+	onEvict             func(layer int) // drop cache entries living on layer
+
+	tex       uint32
+	texLayers int
+}
+
+func newGlyphAtlas(size, bpp, maxPages int) *glyphAtlas {
+	return &glyphAtlas{size: size, bpp: bpp, maxPages: max(1, maxPages), clock: 1}
+}
+
+// shelf reserves w×h on the page, or reports false when it does not fit.
+func (p *atlasPage) shelf(w, h, size int) (int, int, bool) {
+	x, y, sh := p.shelfX, p.shelfY, p.shelfH
+	if x+w > size {
+		y += sh
+		x, sh = 0, 0
+	}
+	if y+h > size {
+		return 0, 0, false
+	}
+	p.shelfX, p.shelfY, p.shelfH = x+w, y, max(sh, h)
+	return x, y, true
+}
+
+// alloc reserves a w×h region, adding a page or recycling the least recently
+// used one when needed. Fails only for regions larger than a page.
+func (a *glyphAtlas) alloc(w, h int) (layer, x, y int, ok bool) {
+	if w <= 0 || h <= 0 || w > a.size || h > a.size {
+		return 0, 0, 0, false
+	}
+	for i, p := range a.pages {
+		if x, y, ok := p.shelf(w, h, a.size); ok {
+			p.lastUse = a.clock
+			return i, x, y, true
 		}
 	}
+	if len(a.pages) < a.maxPages {
+		a.pages = append(a.pages, &atlasPage{pix: make([]byte, a.size*a.size*a.bpp), lastUse: a.clock})
+		layer = len(a.pages) - 1
+		x, y, _ = a.pages[layer].shelf(w, h, a.size)
+		return layer, x, y, true
+	}
+	for i, p := range a.pages {
+		if p.lastUse < a.pages[layer].lastUse {
+			layer = i
+		}
+	}
+	p := a.pages[layer]
+	if p.lastUse >= a.clock {
+		a.stale = true
+	}
+	clear(p.pix)
+	p.shelfX, p.shelfY, p.shelfH = 0, 0, 0
+	p.dirtyY0, p.dirtyY1 = 0, a.size
+	if a.onEvict != nil {
+		a.onEvict(layer)
+	}
+	p.lastUse = a.clock
+	x, y, _ = p.shelf(w, h, a.size)
+	return layer, x, y, true
 }
 
-// uploadRegion copies the alpha channel of img into the CPU mirror and uploads
-// just that subregion of the texture.
-func (r *Renderer) uploadRegion(px, py int, img *image.RGBA) {
-	w := img.Rect.Dx()
-	h := img.Rect.Dy()
-	sub := make([]byte, w*h)
+// write copies a tightly packed w×h bitmap into the page mirror.
+func (a *glyphAtlas) write(layer, x, y, w, h int, src []byte) {
+	p := a.pages[layer]
+	row := w * a.bpp
 	for yy := range h {
-		for xx := range w {
-			a := img.Pix[(yy*w+xx)*4+3]
-			sub[yy*w+xx] = a
-			r.atlasPix[(py+yy)*r.atlasSize+(px+xx)] = a
-		}
+		off := ((y+yy)*a.size + x) * a.bpp
+		copy(p.pix[off:off+row], src[yy*row:(yy+1)*row])
 	}
-	gl.BindTexture(gl.TEXTURE_2D, r.fontAtlas)
+	if p.dirtyY0 >= p.dirtyY1 {
+		p.dirtyY0, p.dirtyY1 = y, y+h
+	} else {
+		p.dirtyY0, p.dirtyY1 = min(p.dirtyY0, y), max(p.dirtyY1, y+h)
+	}
+}
+
+// touch marks a page as drawn from in the current frame.
+func (a *glyphAtlas) touch(layer int) {
+	if a != nil && layer < len(a.pages) {
+		a.pages[layer].lastUse = a.clock
+	}
+}
+
+// tick starts a new frame for LRU purposes.
+func (a *glyphAtlas) tick() {
+	if a != nil {
+		a.clock++
+		a.stale = false
+	}
+}
+
+// evictedInFrame reports whether a page used since the last tick was recycled,
+// invalidating UVs recorded since then.
+func (a *glyphAtlas) evictedInFrame() bool { return a != nil && a.stale }
+
+// sync uploads pending pixels to the GL texture array, (re)allocating it when
+// pages were added, and returns the texture.
+func (a *glyphAtlas) sync() uint32 {
+	if a == nil || len(a.pages) == 0 {
+		return 0
+	}
+	internal, format := int32(gl.R8), uint32(gl.RED)
+	if a.bpp == 4 {
+		internal, format = gl.RGBA8, gl.RGBA
+	}
 	gl.PixelStorei(gl.UNPACK_ALIGNMENT, 1)
-	gl.TexSubImage2D(gl.TEXTURE_2D, 0, int32(px), int32(py), int32(w), int32(h),
-		gl.RED, gl.UNSIGNED_BYTE, gl.Ptr(sub))
-	gl.BindTexture(gl.TEXTURE_2D, 0)
+	if a.tex == 0 || a.texLayers < len(a.pages) {
+		if a.tex == 0 {
+			gl.GenTextures(1, &a.tex)
+		}
+		gl.BindTexture(gl.TEXTURE_2D_ARRAY, a.tex)
+		gl.TexImage3D(gl.TEXTURE_2D_ARRAY, 0, internal, int32(a.size), int32(a.size), int32(len(a.pages)), 0,
+			format, gl.UNSIGNED_BYTE, nil)
+		gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+		gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+		gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+		gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+		for i, p := range a.pages {
+			gl.TexSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, int32(i), int32(a.size), int32(a.size), 1,
+				format, gl.UNSIGNED_BYTE, gl.Ptr(p.pix))
+			p.dirtyY0, p.dirtyY1 = 0, 0
+		}
+		a.texLayers = len(a.pages)
+		return a.tex
+	}
+	gl.BindTexture(gl.TEXTURE_2D_ARRAY, a.tex)
+	for i, p := range a.pages {
+		if p.dirtyY0 >= p.dirtyY1 {
+			continue
+		}
+		off := p.dirtyY0 * a.size * a.bpp
+		gl.TexSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, int32(p.dirtyY0), int32(i), int32(a.size), int32(p.dirtyY1-p.dirtyY0), 1,
+			format, gl.UNSIGNED_BYTE, gl.Ptr(p.pix[off:]))
+		p.dirtyY0, p.dirtyY1 = 0, 0
+	}
+	return a.tex
 }
 
-// ensureGlyph returns the atlas entry for char, rasterizing it on first use
-// from the first font in the fallback chain that covers it. Returns ok=false
-// when no font has a glyph for char (so callers can fall back further).
-func (r *Renderer) ensureGlyph(char rune) (Glyph, bool) {
-	if g, ok := r.glyphs[char]; ok {
-		return g, true
+func (a *glyphAtlas) release() {
+	if a != nil && a.tex != 0 {
+		gl.DeleteTextures(1, &a.tex)
+		a.tex, a.texLayers = 0, 0
 	}
-	if r.glyphMisses[char] {
-		return Glyph{}, false
-	}
-	face := r.faceFor(char)
-	if face == nil {
-		r.glyphMisses[char] = true
-		return Glyph{}, false
-	}
-	g, ok := r.rasterizeGlyph(face, char)
-	if !ok {
-		r.glyphMisses[char] = true
-		return Glyph{}, false
-	}
-	r.glyphs[char] = g
-	return g, true
-}
-
-// rasterizeGlyph rasterizes char from face into the atlas. Cell-exact glyphs
-// (box drawing, powerline) are clipped to the cell box; everything else is
-// rasterized at its natural ink bounds with bearings recorded.
-func (r *Renderer) rasterizeGlyph(face font.Face, char rune) (Glyph, bool) {
-	if isCellExact(char) {
-		return r.rasterizeCellGlyph(face, char)
-	}
-
-	bounds, _, ok := face.GlyphBounds(char)
-	if !ok {
-		return Glyph{}, false
-	}
-	w := (bounds.Max.X - bounds.Min.X).Ceil() + 2*glyphPad
-	h := (bounds.Max.Y - bounds.Min.Y).Ceil() + 2*glyphPad
-	if w <= 2*glyphPad || h <= 2*glyphPad {
-		// No ink (e.g. a space from a fallback font): cache a zero-size
-		// glyph so draw sites skip it without re-probing the font chain.
-		return Glyph{}, true
-	}
-
-	px, py, ok := r.allocRegion(w, h)
-	if !ok {
-		return Glyph{}, false
-	}
-
-	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	drawer := &font.Drawer{Dst: img, Src: image.White, Face: face}
-	// Position the dot so the ink lands inside the padded bitmap.
-	drawer.Dot = fixed.Point26_6{
-		X: fixed.I(glyphPad) - bounds.Min.X,
-		Y: fixed.I(glyphPad) - bounds.Min.Y,
-	}
-	drawer.DrawString(string(char))
-	r.uploadRegion(px, py, img)
-
-	return Glyph{
-		X:           float32(px) / float32(r.atlasSize),
-		Y:           float32(py) / float32(r.atlasSize),
-		Width:       float32(w) / float32(r.atlasSize),
-		Height:      float32(h) / float32(r.atlasSize),
-		PixelWidth:  w,
-		PixelHeight: h,
-		// Bitmap placement relative to the pen position (x: from the cell
-		// origin, y: from the baseline; negative y is above the baseline).
-		OffsetX: float32(bounds.Min.X)/64 - glyphPad,
-		OffsetY: float32(bounds.Min.Y)/64 - glyphPad,
-	}, true
-}
-
-// rasterizeCellGlyph rasterizes char clipped to exactly one cell, anchored at
-// the cell box. Box-drawing and powerline glyphs must align to the cell grid
-// to connect seamlessly with neighbors and background rectangles.
-func (r *Renderer) rasterizeCellGlyph(face font.Face, char rune) (Glyph, bool) {
-	if _, ok := face.GlyphAdvance(char); !ok {
-		return Glyph{}, false
-	}
-	w, h := int(r.cellWidth), int(r.cellHeight)
-	if w <= 0 || h <= 0 {
-		return Glyph{}, false
-	}
-
-	px, py, ok := r.allocRegion(w+2*glyphPad, h+2*glyphPad)
-	if !ok {
-		return Glyph{}, false
-	}
-
-	// Draw into a padded bitmap but expose only the inner cell-sized region,
-	// so the transparent border never shows inside the cell.
-	img := image.NewRGBA(image.Rect(0, 0, w+2*glyphPad, h+2*glyphPad))
-	clipped := img.SubImage(image.Rect(glyphPad, glyphPad, glyphPad+w, glyphPad+h)).(*image.RGBA)
-	drawer := &font.Drawer{Dst: clipped, Src: image.White, Face: face}
-	drawer.Dot = fixed.P(glyphPad, glyphPad+r.atlasAscent)
-	drawer.DrawString(string(char))
-	r.uploadRegion(px, py, img)
-
-	return Glyph{
-		X:           float32(px+glyphPad) / float32(r.atlasSize),
-		Y:           float32(py+glyphPad) / float32(r.atlasSize),
-		Width:       float32(w) / float32(r.atlasSize),
-		Height:      float32(h) / float32(r.atlasSize),
-		PixelWidth:  w,
-		PixelHeight: h,
-		OffsetX:     0,
-		OffsetY:     -float32(r.atlasAscent),
-	}, true
-}
-
-// growAtlas doubles the atlas and re-rasterizes the cached glyphs. Returns
-// false if the atlas is already at the maximum size.
-func (r *Renderer) growAtlas() bool {
-	if r.atlasSize >= atlasMaxSize {
-		return false
-	}
-	r.atlasGen++ // all previously recorded UVs become invalid
-	chars := make([]rune, 0, len(r.glyphs))
-	for c := range r.glyphs {
-		chars = append(chars, c)
-	}
-	if r.fontAtlas != 0 {
-		gl.DeleteTextures(1, &r.fontAtlas)
-		r.fontAtlas = 0
-	}
-	r.glyphs = make(map[rune]Glyph)
-	r.asciiCache = [128]asciiGlyphSlot{} // UVs change on repack
-	r.initAtlas(r.atlasSize * 2)
-	for _, c := range chars {
-		r.ensureGlyph(c)
-	}
-	return true
 }

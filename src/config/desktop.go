@@ -80,28 +80,26 @@ func (d DesktopAppearance) AccentHex() string {
 }
 
 // glassThemes are the compositor's glass grounds and text (RavenGUI,
-// huginn-comp/src/theme.rs): value, dark ground, dark text, light ground,
+// huginn-comp/src/theme.rs, raven-glass/src/tint.rs): value, dark ground, dark text, light ground,
 // light text. Black Glass is the terminal's own palette, so it is absent.
 var glassThemes = [][5]string{
 	{"fog", "#6E7D94", "#FFFFFF", "#E5EAF1", "#1C2433"},
 	{"arctic", "#4F7F9F", "#FFFFFF", "#DDEEF8", "#0E2A3C"},
 	{"midnight", "#0E1630", "#E8EEFF", "#E3E7F6", "#101A3A"},
 	{"rose", "#5A3A4E", "#FFF4F8", "#F6E7EE", "#3A1E2C"},
+	{"tokyo-neon", "#0A1A14", "#E6FFF1", "#E2F6EA", "#06291A"},
+	{"clear", "#1C1F26", "#FFFFFF", "#F7F9FC", "#0F1218"},
+	{"ember", "#3A2418", "#FFF3E8", "#F8EBDF", "#3A1F10"},
+	{"nebula", "#24163A", "#F3EAFF", "#EEE6FA", "#22123C"},
 }
 
 // GlassColors returns the glass theme's ground and text (#RRGGBB) for the
 // current light/dark mode. ok is false for Black Glass and for any value
 // this build does not know, which the compositor also draws as black.
 func (d DesktopAppearance) GlassColors() (ground, text string, ok bool) {
-	var b strings.Builder
-	for _, r := range strings.ToLower(d.GlassTheme) {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			b.WriteRune(r)
-		}
-	}
-	want := strings.TrimSuffix(b.String(), "glass")
+	want := strings.TrimSuffix(squashGlass(d.GlassTheme), "glass")
 	for _, t := range glassThemes {
-		if t[0] == want {
+		if squashGlass(t[0]) == want {
 			if d.IsLight() {
 				return t[3], t[4], true
 			}
@@ -109,6 +107,18 @@ func (d DesktopAppearance) GlassColors() (ground, text string, ok bool) {
 		}
 	}
 	return "", "", false
+}
+
+// squashGlass keeps only lowercase ASCII letters and digits, as raven-glass
+// does, so "Tokyo Neon", "tokyo-neon" and "TokyoNeonGlass" all match.
+func squashGlass(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func isHexColor(s string) bool {

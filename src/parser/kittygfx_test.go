@@ -93,7 +93,7 @@ func TestKittyDelete(t *testing.T) {
 func TestKittyQueryReply(t *testing.T) {
 	term := NewTerminal(20, 5)
 	out := captureResponses(term)
-	term.Process(apc("i=42,a=q;")) // query
+	term.Process(apc("i=42,a=q,f=24,s=1,v=1;" + base64.StdEncoding.EncodeToString([]byte{1, 2, 3}))) // query
 	if want := "\x1b_Gi=42;OK\x1b\\"; string(*out) != want {
 		t.Fatalf("query reply = %q, want %q", string(*out), want)
 	}

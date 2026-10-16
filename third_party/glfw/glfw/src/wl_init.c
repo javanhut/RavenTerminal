@@ -39,6 +39,7 @@
 #include <sys/mman.h>
 #include <sys/timerfd.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <wayland-client.h>
 #include <assert.h>
 
@@ -62,9 +63,14 @@ static void registryHandleGlobal(void* userData,
 {
     if (strcmp(interface, "wl_compositor") == 0)
     {
+#ifdef WL_SURFACE_PREFERRED_BUFFER_SCALE_SINCE_VERSION
+        const int compositorVersion = 6;
+#else
+        const int compositorVersion = 3;
+#endif
         _glfw.wl.compositor =
             wl_registry_bind(registry, name, &wl_compositor_interface,
-                             _glfw_min(3, version));
+                             _glfw_min(compositorVersion, version));
     }
     else if (strcmp(interface, "wl_subcompositor") == 0)
     {
@@ -143,6 +149,41 @@ static void registryHandleGlobal(void* userData,
         _glfw.wl.idleInhibitManager =
             wl_registry_bind(registry, name,
                              &zwp_idle_inhibit_manager_v1_interface,
+                             1);
+    }
+    else if (strcmp(interface, "wp_fractional_scale_manager_v1") == 0)
+    {
+        _glfw.wl.fractionalScaleManager =
+            wl_registry_bind(registry, name,
+                             &wp_fractional_scale_manager_v1_interface,
+                             1);
+    }
+    else if (strcmp(interface, "wp_cursor_shape_manager_v1") == 0)
+    {
+        _glfw.wl.cursorShapeManager =
+            wl_registry_bind(registry, name,
+                             &wp_cursor_shape_manager_v1_interface,
+                             1);
+    }
+    else if (strcmp(interface, "xdg_activation_v1") == 0)
+    {
+        _glfw.wl.activationManager =
+            wl_registry_bind(registry, name,
+                             &xdg_activation_v1_interface,
+                             1);
+    }
+    else if (strcmp(interface, "zwp_primary_selection_device_manager_v1") == 0)
+    {
+        _glfw.wl.primarySelectionManager =
+            wl_registry_bind(registry, name,
+                             &zwp_primary_selection_device_manager_v1_interface,
+                             1);
+    }
+    else if (strcmp(interface, "zwp_text_input_manager_v3") == 0)
+    {
+        _glfw.wl.textInputManager =
+            wl_registry_bind(registry, name,
+                             &zwp_text_input_manager_v3_interface,
                              1);
     }
 }
@@ -378,6 +419,18 @@ int _glfwPlatformInit(void)
     // These must be set before any failure checks
     _glfw.wl.keyRepeatTimerfd = -1;
     _glfw.wl.cursorTimerfd = -1;
+    _glfw.wl.emptyEventPipe[0] = _glfw.wl.emptyEventPipe[1] = -1;
+
+    // Consume the launcher's activation token so children don't reuse it
+    _glfw.wl.activationToken = _glfwRavenTakeEnv("XDG_ACTIVATION_TOKEN");
+
+    if (pipe2(_glfw.wl.emptyEventPipe, O_CLOEXEC | O_NONBLOCK) == -1)
+    {
+        _glfwInputError(GLFW_PLATFORM_ERROR,
+                        "Wayland: Failed to create empty event pipe: %s",
+                        strerror(errno));
+        return GLFW_FALSE;
+    }
 
     _glfw.wl.tag = glfwGetVersionString();
 
@@ -633,6 +686,22 @@ int _glfwPlatformInit(void)
         _glfwAddDataDeviceListenerWayland(_glfw.wl.dataDevice);
     }
 
+    if (_glfw.wl.seat && _glfw.wl.primarySelectionManager)
+    {
+        _glfw.wl.primarySelectionDevice =
+            zwp_primary_selection_device_manager_v1_get_device(
+                _glfw.wl.primarySelectionManager, _glfw.wl.seat);
+        _glfwAddPrimarySelectionListenerWayland(_glfw.wl.primarySelectionDevice);
+    }
+
+    if (_glfw.wl.seat && _glfw.wl.textInputManager)
+    {
+        _glfw.wl.textInput =
+            zwp_text_input_manager_v3_get_text_input(_glfw.wl.textInputManager,
+                                                     _glfw.wl.seat);
+        _glfwAddTextInputListenerWayland(_glfw.wl.textInput);
+    }
+
     return GLFW_TRUE;
 }
 
@@ -695,6 +764,32 @@ void _glfwPlatformTerminate(void)
 
     free(_glfw.wl.offers);
 
+    for (unsigned int i = 0; i < _glfw.wl.primaryOfferCount; i++)
+        zwp_primary_selection_offer_v1_destroy(_glfw.wl.primaryOffers[i].offer);
+
+    free(_glfw.wl.primaryOffers);
+
+    if (_glfw.wl.primarySelectionOffer)
+        zwp_primary_selection_offer_v1_destroy(_glfw.wl.primarySelectionOffer);
+    if (_glfw.wl.primarySelectionSource)
+        zwp_primary_selection_source_v1_destroy(_glfw.wl.primarySelectionSource);
+    if (_glfw.wl.primarySelectionDevice)
+        zwp_primary_selection_device_v1_destroy(_glfw.wl.primarySelectionDevice);
+    if (_glfw.wl.primarySelectionManager)
+        zwp_primary_selection_device_manager_v1_destroy(_glfw.wl.primarySelectionManager);
+    if (_glfw.wl.textInput)
+        zwp_text_input_v3_destroy(_glfw.wl.textInput);
+    if (_glfw.wl.textInputManager)
+        zwp_text_input_manager_v3_destroy(_glfw.wl.textInputManager);
+    if (_glfw.wl.cursorShapeDevice)
+        wp_cursor_shape_device_v1_destroy(_glfw.wl.cursorShapeDevice);
+    if (_glfw.wl.cursorShapeManager)
+        wp_cursor_shape_manager_v1_destroy(_glfw.wl.cursorShapeManager);
+    if (_glfw.wl.fractionalScaleManager)
+        wp_fractional_scale_manager_v1_destroy(_glfw.wl.fractionalScaleManager);
+    if (_glfw.wl.activationManager)
+        xdg_activation_v1_destroy(_glfw.wl.activationManager);
+
     if (_glfw.wl.cursorSurface)
         wl_surface_destroy(_glfw.wl.cursorSurface);
     if (_glfw.wl.subcompositor)
@@ -743,8 +838,17 @@ void _glfwPlatformTerminate(void)
         close(_glfw.wl.keyRepeatTimerfd);
     if (_glfw.wl.cursorTimerfd >= 0)
         close(_glfw.wl.cursorTimerfd);
+    for (int i = 0; i < 2; i++)
+    {
+        if (_glfw.wl.emptyEventPipe[i] >= 0)
+            close(_glfw.wl.emptyEventPipe[i]);
+    }
 
     free(_glfw.wl.clipboardString);
+    free(_glfw.wl.primarySelectionString);
+    free(_glfw.wl.textInputPreedit);
+    free(_glfw.wl.textInputCommit);
+    free(_glfw.wl.activationToken);
 }
 
 const char* _glfwPlatformGetVersionString(void)

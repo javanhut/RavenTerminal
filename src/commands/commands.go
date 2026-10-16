@@ -1,152 +1,94 @@
+// Package commands holds the text behind the shell-side helper commands
+// (keybindings, list-fonts, change-font). The shell functions call
+// `raven-terminal --keybindings` / `--list-fonts` and emit OSC 7771 for
+// change-font, so nothing here intercepts typed input.
 package commands
 
 import (
 	"fmt"
-	"github.com/javanhut/RavenTerminal/src/assets/fonts"
 	"runtime"
 	"strings"
+
+	"github.com/javanhut/RavenTerminal/src/assets/fonts"
+	"github.com/javanhut/RavenTerminal/src/keybindings"
 )
 
-// CommandResult represents the result of executing a terminal command
-type CommandResult struct {
-	Handled bool   // Whether the command was handled
-	Output  string // Output to display in terminal
-}
-
-// FontChanger interface for changing fonts
+// FontChanger is implemented by the renderer.
 type FontChanger interface {
 	ChangeFont(name string) error
 	CurrentFont() string
 	GetAvailableFonts() []fonts.FontInfo
 }
 
-// HandleCommand checks if input is a terminal command and handles it
-// Returns (handled, output) - if handled is true, don't send to shell
-func HandleCommand(input string, fontChanger FontChanger) CommandResult {
-	input = strings.TrimSpace(input)
-
-	// Check for keybindings command
-	if input == "keybindings" || input == "raven-keybindings" {
-		return CommandResult{
-			Handled: true,
-			Output:  getKeybindingsHelp(),
-		}
-	}
-
-	// Check for change-font command
-	if strings.HasPrefix(input, "change-font ") || strings.HasPrefix(input, "change-font\t") {
-		args := strings.TrimPrefix(input, "change-font ")
-		args = strings.TrimSpace(args)
-		return handleChangeFont(args, fontChanger)
-	}
-
-	// Check for change-font without args (list fonts)
-	if input == "change-font" {
-		return handleListFonts(fontChanger)
-	}
-
-	// Check for list-fonts command
-	if input == "list-fonts" || input == "fonts" {
-		return handleListFonts(fontChanger)
-	}
-
-	return CommandResult{Handled: false}
-}
-
-func getKeybindingsHelp() string {
-	// Platform-aware modifier: macOS uses Cmd for app shortcuts, others Ctrl+Shift.
-	mod := "Ctrl+Shift"
-	exitKey := "Ctrl+Q"
-	nextTab := "Ctrl+Tab"
-	prevTab := "Ctrl+Shift+Tab"
+// KeybindingsHelp returns the keybinding reference printed by
+// `raven-terminal --keybindings`, built from the same action table as the
+// command palette.
+func KeybindingsHelp() string {
+	leader := "Super or Ctrl+Shift; Leader+Shift = Super+Shift or Ctrl+Shift+Alt"
 	if runtime.GOOS == "darwin" {
-		mod = "Cmd"
-		exitKey = "Cmd+Q"
-		nextTab = "Cmd+Shift+]"
-		prevTab = "Cmd+Shift+["
+		leader = "Cmd"
 	}
-	return fmt.Sprintf(`
-Raven Terminal - Keybindings
-============================
-
-General:
-  %-15s Exit terminal
-  Shift+Enter     Toggle fullscreen mode
-
-Tabs:
-  %-15s New tab
-  %-15s Close current tab
-  %-15s Jump to tab N
-  %-15s Next tab
-  %-15s Previous tab
-
-Scrolling:`+`
-  Mouse wheel     Scroll up/down (3 lines)
-  Shift+Up        Scroll up 1 line
-  Shift+Down      Scroll down 1 line
-  Shift+PageUp    Scroll up 5 lines
-  Shift+PageDown  Scroll down 5 lines
-
+	var b strings.Builder
+	b.WriteString("Raven Terminal - Keybindings\n============================\n")
+	fmt.Fprintf(&b, "Leader = %s.\nPlain Ctrl/Alt chords always go to the running program.\n\nKeys:\n", leader)
+	rows := append(keybindings.Actions(),
+		keybindings.ActionInfo{Name: "Command palette (actions, settings, themes, fonts)", Chord: "Leader+P"},
+		keybindings.ActionInfo{Name: "Jump to tab N", Chord: "Leader+1..9"},
+		keybindings.ActionInfo{Name: "Scroll 1 line (main screen)", Chord: "Shift+Up / Down"},
+	)
+	for _, a := range rows {
+		fmt.Fprintf(&b, "  %-34s %s\n", a.Chord, a.Name)
+	}
+	b.WriteString(`
 Mouse:
-  Drag            Select text and copy to clipboard
-  Right-click     Copy selection or paste clipboard
+  Drag                               Select text (copies to clipboard and PRIMARY)
+  Alt+drag                           Rectangular (block) selection
+  Leader+click on command output     Select and copy that output (shell integration)
+  Middle-click                       Paste the PRIMARY selection
+  Right-click                        Copy selection or paste clipboard
+  Ctrl+Right-click                   Open the URL under the pointer
+  Mouse wheel                        Scroll 3 lines
 
-Terminal Commands:
-  keybindings     Show this help
-  change-font     List available fonts
-  change-font <name>  Change font (e.g., change-font firacode)
-  list-fonts      List available fonts
-
-`, exitKey, mod+"+T", mod+"+X", mod+"+1..9", nextTab, prevTab)
+Shell commands:
+  keybindings                        Show this help
+  list-fonts                         List available fonts
+  change-font <name>                 Change font (e.g. change-font firacode)
+`)
+	return b.String()
 }
 
-func handleChangeFont(fontName string, fontChanger FontChanger) CommandResult {
-	if fontName == "" {
-		return handleListFonts(fontChanger)
-	}
-
-	fontName = strings.ToLower(strings.TrimSpace(fontName))
-
-	err := fontChanger.ChangeFont(fontName)
-	if err != nil {
-		availableFonts := fontChanger.GetAvailableFonts()
-		var names []string
-		for _, f := range availableFonts {
-			names = append(names, f.Name)
-		}
-		return CommandResult{
-			Handled: true,
-			Output:  fmt.Sprintf("\nError: %v\nAvailable fonts: %s\n\n", err, strings.Join(names, ", ")),
-		}
-	}
-
-	return CommandResult{
-		Handled: true,
-		Output:  fmt.Sprintf("\nFont changed to: %s\n\n", fontName),
-	}
-}
-
-func handleListFonts(fontChanger FontChanger) CommandResult {
-	availableFonts := fontChanger.GetAvailableFonts()
-	currentFont := fontChanger.CurrentFont()
-
+// FontList renders the font list printed by `raven-terminal --list-fonts`,
+// marking the current font.
+func FontList(available []fonts.FontInfo, current string) string {
 	var sb strings.Builder
-	sb.WriteString("\nAvailable Fonts:\n")
-	sb.WriteString("================\n")
-
-	for _, f := range availableFonts {
+	sb.WriteString("Available Fonts:\n================\n")
+	for _, f := range available {
 		marker := "  "
-		if f.Name == currentFont {
+		if f.Name == current {
 			marker = "> "
 		}
-		sb.WriteString(fmt.Sprintf("%s%s (%s)\n", marker, f.Name, f.DisplayName))
+		fmt.Fprintf(&sb, "%s%s (%s)\n", marker, f.Name, f.DisplayName)
 	}
+	sb.WriteString("\nUsage: change-font <name>\nExample: change-font firacode\n")
+	return sb.String()
+}
 
-	sb.WriteString("\nUsage: change-font <name>\n")
-	sb.WriteString("Example: change-font firacode\n\n")
-
-	return CommandResult{
-		Handled: true,
-		Output:  sb.String(),
+// ChangeFont switches the font and returns a user-facing message. An empty
+// name returns the font list.
+func ChangeFont(fc FontChanger, name string) (string, error) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return FontList(fc.GetAvailableFonts(), fc.CurrentFont()), nil
 	}
+	if name == fc.CurrentFont() {
+		return fmt.Sprintf("Font is already: %s\n", name), nil
+	}
+	if err := fc.ChangeFont(name); err != nil {
+		var names []string
+		for _, f := range fc.GetAvailableFonts() {
+			names = append(names, f.Name)
+		}
+		return fmt.Sprintf("Error: %v\nAvailable fonts: %s\n", err, strings.Join(names, ", ")), err
+	}
+	return fmt.Sprintf("Font changed to: %s\n", name), nil
 }

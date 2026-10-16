@@ -33,7 +33,8 @@ func TestSuperLayerEquivalentAcrossPlatforms(t *testing.T) {
 		{"Super+Shift+[ prev tab", glfw.KeyLeftBracket, superShift, ActionPrevTab},
 		{"Super+] next pane", glfw.KeyRightBracket, super, ActionNextPane},
 		{"Super+[ prev pane", glfw.KeyLeftBracket, super, ActionPrevPane},
-		{"Super+Shift+Tab cycle panes", glfw.KeyTab, superShift, ActionNextPane},
+		{"Super+Tab next tab", glfw.KeyTab, super, ActionNextTab},
+		{"Super+Shift+Tab prev tab", glfw.KeyTab, superShift, ActionPrevTab},
 		{"Super+= zoom in", glfw.KeyEqual, super, ActionZoomIn},
 		{"Super+- zoom out", glfw.KeyMinus, super, ActionZoomOut},
 		{"Super+0 zoom reset", glfw.Key0, super, ActionZoomReset},
@@ -69,10 +70,9 @@ func TestLinuxCtrlShiftAliases(t *testing.T) {
 		want KeyAction
 	}{
 		{"Ctrl+Shift+C copy", glfw.KeyC, ActionCopy},
-		{"Ctrl+Shift+P paste", glfw.KeyP, ActionPaste},
+		{"Ctrl+Shift+V paste", glfw.KeyV, ActionPaste},
 		{"Ctrl+Shift+T new tab", glfw.KeyT, ActionNewTab},
-		{"Ctrl+Shift+V split vertical", glfw.KeyV, ActionSplitVertical},
-		{"Ctrl+Shift+H split horizontal", glfw.KeyH, ActionSplitHorizontal},
+		{"Ctrl+Shift+D split vertical", glfw.KeyD, ActionSplitVertical},
 		{"Ctrl+Shift+] next pane", glfw.KeyRightBracket, ActionNextPane},
 		{"Ctrl+Shift+[ prev pane", glfw.KeyLeftBracket, ActionPrevPane},
 		{"Ctrl+Shift+K help", glfw.KeyK, ActionShowHelp},

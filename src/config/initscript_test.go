@@ -258,7 +258,7 @@ func TestInitScriptRshSyntax(t *testing.T) {
 			// function syntax. An installed ravenshell that predates it cannot
 			// judge the generator — skip rather than fail on a stale binary.
 			probe := filepath.Join(t.TempDir(), "probe.rsh")
-			if err := os.WriteFile(probe, []byte("func __probe() {\n  return \"ok\"\n}\nprint __probe()\n"), 0644); err != nil {
+			if err := os.WriteFile(probe, []byte("fn __probe() {\n  return \"ok\"\n}\nprint __probe()\n"), 0644); err != nil {
 				t.Fatal(err)
 			}
 			if out, err := exec.Command(ravenshell, probe).CombinedOutput(); err != nil {

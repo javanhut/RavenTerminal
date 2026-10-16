@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -44,17 +45,28 @@ type App struct {
 	lastInput      time.Time
 	windowFocused  bool
 	blinkInterval  time.Duration
-	lineBuf        *lineBuffer
+	suppressChar   bool // the last key was consumed; drop its char event
 	showHelp       bool
 	resizeMode     bool
 	selection      *mouseSelection
 	report         *mouseReportState
 	tabDrag        tabDragState
 	find           findState
+	ux             uxState
 	lastCursorX    float64
 	lastCursorY    float64
 	haveCursorPos  bool
 	lastAutoScroll time.Time
+
+	// ctx lives as long as the window; background requests derive from it
+	// and are cancelled on shutdown or when a newer request supersedes them.
+	ctx           context.Context
+	cancel        context.CancelFunc
+	searchCancel  context.CancelFunc
+	previewCancel context.CancelFunc
+	aiCancel      context.CancelFunc
+	modelCancel   context.CancelFunc
+	nextBlink     time.Time // next cursor blink edge; zero when not blinking
 
 	// Panels and their async response channels.
 	toast                 *toastState
@@ -108,9 +120,24 @@ type App struct {
 	// when nothing actually changed.
 	fitCols uint16
 	fitRows uint16
-	// ponytail: entries for closed panes are never pruned; bounded by panes
-	// ever opened, a few pointers each.
+	// Pruned with a.panes (prunePanes) when a pane closes.
 	lastGrids map[*tab.Pane]*grid.Grid
+
+	// Terminal integration: events, theme seeding, overlays.
+	applied      *config.Config // last config applied (diffed on reload)
+	configGen    uint64
+	configStale  bool // config.toml changed while the menu was open
+	theme        render.Theme
+	themeSerial  uint64 // bumps when panes need re-seeding
+	panes        map[*tab.Pane]paneState
+	pumpTick     uint64
+	eventRedraw  bool
+	baseTitle    string
+	shownTitle   string
+	pointerCSS   string
+	cursors      map[glfw.StandardCursor]*glfw.Cursor
+	imeRect      [4]int
+	pendingFrame bool // a redraw deferred while ?2026 was held
 }
 
 // newApp builds the process's first window: it owns session restore and
@@ -153,6 +180,16 @@ func newAppWith(tabsFor func(cols, rows uint16) (*tab.TabManager, error)) (*App,
 	// Create window. This also makes the new window's GL context current,
 	// which the renderer below is built against.
 	winConfig := window.DefaultConfig()
+	if cfg, err := config.Load(); err == nil && cfg != nil && cfg.Opacity() < 1 {
+		winConfig.Transparent = true
+	}
+	if windowClass != "" {
+		winConfig.Class = windowClass
+	}
+	if initialTitle != "" {
+		winConfig.Title = initialTitle
+		initialTitle = "" // only the first window takes --title
+	}
 	win, err := window.NewWindow(winConfig)
 	if err != nil {
 		return nil, err
@@ -188,7 +225,6 @@ func newAppWith(tabsFor func(cols, rows uint16) (*tab.TabManager, error)) (*App,
 		lastInput:     time.Now(),
 		windowFocused: true,
 		blinkInterval: 530 * time.Millisecond,
-		lineBuf:       &lineBuffer{},
 		selection:     &mouseSelection{},
 		// lastCol/lastRow start at -1 so the first motion event — including one
 		// over cell (0,0) — is never throttled as "same cell".
@@ -211,6 +247,9 @@ func newAppWith(tabsFor func(cols, rows uint16) (*tab.TabManager, error)) (*App,
 		prevFBWidth:  -1,
 		prevFBHeight: -1,
 		lastGrids:    make(map[*tab.Pane]*grid.Grid),
+		panes:        make(map[*tab.Pane]paneState),
+		baseTitle:    winConfig.Title,
+		shownTitle:   winConfig.Title,
 	}
 
 	a.searchPanel = searchpanel.New()
@@ -223,6 +262,7 @@ func newAppWith(tabsFor func(cols, rows uint16) (*tab.TabManager, error)) (*App,
 
 	a.searchCache = newMemoCache[[]searchpanel.Result]()
 	a.previewCache = newMemoCache[cachedPreview]()
+	a.ctx, a.cancel = context.WithCancel(context.Background())
 
 	return a, nil
 }
@@ -255,29 +295,7 @@ func (a *App) wireSettingsMenu() {
 }
 
 func (a *App) onConfigReload(cfg *config.Config) error {
-	if cfg == nil {
-		return nil
-	}
-	a.searchPanel.SetEnabled(cfg.WebSearch.Enabled)
-	a.aiPanel.SetEnabled(cfg.Ollama.Enabled)
-	a.searchPanel.WidthPercent = cfg.Appearance.PanelWidthPercent
-	a.aiPanel.WidthPercent = cfg.Appearance.PanelWidthPercent
-	a.aiPanel.ShowThinking = cfg.Ollama.ShowThinking
-	a.aiPanel.ThinkingMode = cfg.Ollama.ThinkingMode
-	a.settingsMenu.OllamaModels = nil
-	if a.aiPanel.LoadedURL != cfg.Ollama.URL || a.aiPanel.LoadedModel != cfg.Ollama.Model {
-		a.aiPanel.ModelLoaded = false
-		a.aiPanel.LoadedURL = cfg.Ollama.URL
-		a.aiPanel.LoadedModel = cfg.Ollama.Model
-	}
-	a.renderer.SetThemeByName(cfg.Theme)
-	if err := a.renderer.SetDefaultFontSize(cfg.FontSize); err != nil {
-		return err
-	}
-	a.renderer.SetTextStyleOptions(cfg.Appearance.FauxBold, cfg.Appearance.FauxItalic, cfg.Appearance.Undercurl)
-	applyClipboardReadGate(cfg.AllowClipboardRead)
-	a.fitGrid()
-	return nil
+	return a.applyConfig(a.applied, cfg)
 }
 
 func (a *App) onInitScriptUpdated(initPath string) error {
@@ -305,66 +323,57 @@ func (a *App) onInitScriptUpdated(initPath string) error {
 func (a *App) onOllamaTest(baseURL string) {
 	// Off-thread: a blocking call here would freeze the UI (menu shows
 	// "Testing..." meanwhile); result applied in the main loop.
-	listOllamaModelsAsync(baseURL, 5*time.Second, a.ollamaTestResponses)
+	listOllamaModels(a.baseCtx(), baseURL, 5*time.Second, a.ollamaTestResponses)
 }
 
 func (a *App) onOllamaFetchModels(baseURL string) {
-	listOllamaModelsAsync(baseURL, 8*time.Second, a.ollamaModelsResponses)
+	listOllamaModels(a.baseCtx(), baseURL, 8*time.Second, a.ollamaModelsResponses)
 }
 
 func (a *App) onOllamaLoadModel(baseURL, model string) {
 	// Show loading status immediately
 	a.aiPanel.Status = "Loading model..."
 	a.aiPanel.ModelLoaded = false
-	// Load model in background
-	go func(url, m string) {
-		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second) // 5 min for slow remote APIs
+	reqCtx := a.newRequest(&a.modelCancel)
+	goSafe("ollama model load", func() {
+		ctx, cancel := context.WithTimeout(reqCtx, 300*time.Second) // 5 min for slow remote APIs
 		defer cancel()
-		client := ollama.NewClient(url, m)
-		err := client.LoadModel(ctx)
-		a.modelLoadResponses <- modelLoadResponse{url: url, model: m, err: err}
-	}(baseURL, model)
+		err := ollama.NewClient(baseURL, model).LoadModel(ctx)
+		deliver(reqCtx, a.modelLoadResponses, modelLoadResponse{url: baseURL, model: model, err: err})
+	})
 }
 
 // applyInitialConfig applies the loaded config once at startup, mirroring
 // what OnConfigReload does on later changes.
 func (a *App) applyInitialConfig() {
-	a.currentTheme = ""
 	a.desktopGen = config.DesktopGeneration() // starts the shared desktop.toml watcher
-	if a.settingsMenu.Config != nil {
-		a.currentTheme = a.settingsMenu.Config.Theme
-		a.searchPanel.SetEnabled(a.settingsMenu.Config.WebSearch.Enabled)
-		a.aiPanel.SetEnabled(a.settingsMenu.Config.Ollama.Enabled)
-		a.searchPanel.WidthPercent = a.settingsMenu.Config.Appearance.PanelWidthPercent
-		a.aiPanel.WidthPercent = a.settingsMenu.Config.Appearance.PanelWidthPercent
-		a.aiPanel.ShowThinking = a.settingsMenu.Config.Ollama.ShowThinking
-		a.aiPanel.ThinkingMode = a.settingsMenu.Config.Ollama.ThinkingMode
-		a.aiPanel.LoadedURL = a.settingsMenu.Config.Ollama.URL
-		a.aiPanel.LoadedModel = a.settingsMenu.Config.Ollama.Model
-		a.renderer.SetThemeByName(a.currentTheme)
-		if err := a.renderer.SetDefaultFontSize(a.settingsMenu.Config.FontSize); err == nil {
-			a.fitGrid()
-		}
-		a.renderer.SetTextStyleOptions(a.settingsMenu.Config.Appearance.FauxBold, a.settingsMenu.Config.Appearance.FauxItalic, a.settingsMenu.Config.Appearance.Undercurl)
-		applyClipboardReadGate(a.settingsMenu.Config.AllowClipboardRead)
+	a.configGen = config.ConfigGeneration()   // and the config.toml one
+	if a.settingsMenu.Config == nil {
+		a.applyTheme("")
+		return
 	}
+	a.applyConfig(nil, a.settingsMenu.Config)
 }
 
 func (a *App) registerCallbacks() {
 	a.win.GLFW().SetKeyCallback(a.onKey)
-	a.win.GLFW().SetCharCallback(a.onChar)
+	a.win.GLFW().SetCharModsCallback(a.onChar)
+	// Caps/Num Lock in key mods: keypad navigation and kitty lock bits.
+	a.win.GLFW().SetInputMode(glfw.LockKeyMods, glfw.True)
 	a.win.GLFW().SetFramebufferSizeCallback(a.onFramebufferSize)
 	a.win.GLFW().SetScrollCallback(a.onScroll)
 	a.win.GLFW().SetMouseButtonCallback(a.onMouseButton)
 	a.win.GLFW().SetCursorPosCallback(a.onCursorPos)
 	a.win.GLFW().SetFocusCallback(a.onFocus)
+	a.win.GLFW().SetDropCallback(a.onDrop)
+	a.win.GLFW().SetPreeditCallback(a.onPreedit)
 }
 
 // tick runs one main-loop iteration for this window: state updates, async
 // drains, and a frame (which the redraw triggers may skip). It returns false
 // when the window should close — the user closed it, or every tab exited.
 func (a *App) tick(now time.Time) bool {
-	if a.win.ShouldClose() {
+	if a.win.ShouldClose() || quitRequested.Load() {
 		return false
 	}
 
@@ -388,9 +397,12 @@ func (a *App) tick(now time.Time) bool {
 		}
 		a.fitGrid()
 
+		if gen := config.ConfigGeneration(); gen != a.configGen || (a.configStale && !a.settingsMenu.IsOpen()) {
+			a.configGen = gen
+			a.reloadConfigFromDisk()
+		}
 		if a.settingsMenu.Config != nil && a.settingsMenu.Config.Theme != a.currentTheme {
-			a.renderer.SetThemeByName(a.settingsMenu.Config.Theme)
-			a.currentTheme = a.settingsMenu.Config.Theme
+			a.applyTheme(a.settingsMenu.Config.Theme)
 		}
 		// Desktop appearance changed (Settings rewrote desktop.toml): the
 		// watcher only bumps a counter; the theme is re-applied here, on the
@@ -398,7 +410,7 @@ func (a *App) tick(now time.Time) bool {
 		if gen := config.DesktopGeneration(); gen != a.desktopGen {
 			a.desktopGen = gen
 			if render.FollowsDesktop(a.currentTheme) {
-				a.renderer.SetThemeByName(a.currentTheme)
+				a.applyTheme(a.currentTheme)
 			}
 		}
 		if a.settingsMenu.Config != nil {
@@ -413,6 +425,7 @@ func (a *App) tick(now time.Time) bool {
 		a.drainAIResponses()
 		a.drainModelLoadResponses()
 		a.drainOllamaMenuResponses()
+		a.pumpEvents()
 
 		a.updateCursorBlink(now)
 		a.autoScrollSelection(now)
@@ -423,10 +436,17 @@ func (a *App) tick(now time.Time) bool {
 		if text, ok := tab.DrainClipboard(); ok {
 			glfw.SetClipboardString(text)
 		}
+		if text, ok := tab.DrainPrimary(); ok {
+			glfw.SetPrimarySelectionString(text)
+		}
 		// Answer any pending OSC 52 clipboard read (see requestClipboardRead).
 		select {
-		case reply := <-clipboardReadReq:
-			reply <- glfw.GetClipboardString()
+		case req := <-clipboardReadReq:
+			if req.primary {
+				req.reply <- glfw.GetPrimarySelectionString()
+			} else {
+				req.reply <- glfw.GetClipboardString()
+			}
 		default:
 		}
 	}
@@ -450,6 +470,9 @@ func (a *App) tick(now time.Time) bool {
 // It also subsumes the other re-fit sites — zoom, font size, content scale, tab
 // bar visibility — since all of them land in CalculateGridSize.
 func (a *App) fitGrid() {
+	if cw, ch := a.renderer.CellDimensions(); cw > 0 && ch > 0 {
+		a.tabManager.SetCellPixelSize(int(math.Round(float64(cw))), int(math.Round(float64(ch))))
+	}
 	width, height := a.win.GetFramebufferSize()
 	cols, rows := a.renderer.CalculateGridSize(width, height)
 	if uint16(cols) == a.fitCols && uint16(rows) == a.fitRows {
@@ -461,16 +484,36 @@ func (a *App) fitGrid() {
 
 // idleTimeout is the longest this window is willing to sleep before it needs
 // another frame. The main loop waits for the shortest across all windows.
+// Nothing animating means a ~1s wait: output, input, process exits and
+// background results all wake the loop themselves.
 func (a *App) idleTimeout() float64 {
-	if a.selection.active {
-		return 0.016 // keep edge auto-scroll smooth during a drag
+	now := time.Now()
+	s := idleState{
+		selecting:  a.selection.active,
+		syncActive: a.prevSyncActive,
+		animating: (a.searchPanel.Open && a.searchPanel.Loading) ||
+			(a.aiPanel.Open && a.aiPanel.Loading) || a.prevFingerprint.visible,
+		nextBlink: a.nextBlink,
 	}
-	return 0.03
+	if now.Before(a.toast.expiresAt) {
+		s.toastUntil = a.toast.expiresAt
+	}
+	t := idleTimeoutFor(s, now)
+	if d, ok := a.animationDue(now); ok {
+		t = min(t, d.Seconds())
+	}
+	return t
 }
 
-// shutdown closes one window, saving the session first if it owns it.
+// shutdown closes one window: it saves the session first if it owns it, then
+// hangs up every shell in the window and cancels its background requests.
 func (a *App) shutdown() {
+	defer recoverLog("window shutdown")
 	a.saveSessionIfEnabled()
+	a.tabManager.CloseAll()
+	if a.cancel != nil {
+		a.cancel()
+	}
 	// Destroying GL objects needs this window's own context current.
 	a.win.MakeContextCurrent()
 	a.renderer.Destroy()
@@ -532,9 +575,19 @@ func runApps(first *App) {
 				continue
 			}
 			a.registerCallbacks()
+			a.win.GLFW().Focus() // xdg-activation on Wayland
 			apps = append(apps, a)
 		}
+		for _, owner := range desktopNotifier.takeFocusRequests() {
+			for _, a := range apps {
+				if a == owner {
+					a.win.GLFW().Show()
+					a.win.GLFW().Focus()
+				}
+			}
+		}
 
+		apps = serveIPC(apps)
 		if len(apps) == 0 {
 			break
 		}
@@ -734,9 +787,14 @@ func (a *App) updateCursorBlink(now time.Time) {
 			a.cursorBlinkOn = !a.cursorBlinkOn
 			a.lastBlink = now
 		}
+		a.nextBlink = a.lastBlink.Add(a.blinkInterval)
 	} else {
 		a.cursorBlinkOn = true // solid
 		a.lastBlink = now
+		a.nextBlink = time.Time{}
+		if recentlyTyped && blinkCfg && styleBlinks && a.windowFocused {
+			a.nextBlink = a.lastInput.Add(a.blinkInterval) // blinking resumes then
+		}
 	}
 	a.cursorVisible = a.cursorBlinkOn
 }
@@ -861,9 +919,15 @@ func (a *App) renderFrame(now time.Time) {
 		}
 	}
 
+	// ?2026 held by any visible pane defers pane-driven frames.
 	syncActive := false
-	if activeTab != nil && activeTab.Terminal != nil {
-		syncActive = activeTab.Terminal.SyncActive()
+	if activeTab != nil {
+		for _, pl := range activeTab.GetPaneLayouts() {
+			if pl.Pane != nil && pl.Pane.Terminal != nil && pl.Pane.Terminal.SyncActive() {
+				syncActive = true
+				break
+			}
+		}
 	}
 
 	toastVisible := now.Before(a.toast.expiresAt)
@@ -888,8 +952,9 @@ func (a *App) renderFrame(now time.Time) {
 		FocusChanged:       a.windowFocused != a.prevFocused,
 		ScaleChanged:       scaleChanged,
 		SyncActiveOrEnded:  syncActive || a.prevSyncActive,
-		UIStateChanged:     a.renderer.ConsumeUIDirty(),
+		UIStateChanged:     a.consumeUXDirty() || a.renderer.ConsumeUIDirty() || a.eventRedraw,
 	}
+	a.eventRedraw = false
 	a.prevSyncActive = syncActive
 	a.prevActiveTab = activeTab
 	a.prevDrawCursor = drawCursor
@@ -903,13 +968,17 @@ func (a *App) renderFrame(now time.Time) {
 	a.prevFocused = a.windowFocused
 	a.prevFBWidth, a.prevFBHeight = width, height
 
-	if render.ShouldRedraw(trig) {
+	a.updateIMERect(activeTab, width, height)
+	draw, pending := frameDecision(trig, syncActive, a.pendingFrame)
+	a.pendingFrame = pending
+	if draw {
 		a.win.SetViewport(width, height)
 		if a.settingsMenu.IsOpen() {
 			a.renderer.RenderWithMenu(a.tabManager, width, height, drawCursor, a.settingsMenu)
 		} else {
 			a.renderer.RenderWithHelpAndPanels(a.tabManager, width, height, drawCursor, a.showHelp, a.searchPanel, a.aiPanel)
 		}
+		a.drawUXOverlays(activeTab, width, height)
 		if a.find.open {
 			a.renderer.DrawFindBar(a.find.query, a.findStatus(), width, height)
 		}
@@ -920,13 +989,6 @@ func (a *App) renderFrame(now time.Time) {
 			a.renderer.DrawFingerprintModal(fp.modal, width, height)
 		}
 
-		// Swap buffers. While an app holds synchronized output (?2026),
-		// skip presenting the partial frame but keep polling input so the
-		// UI stays responsive; a watchdog in SyncActive() resumes within
-		// ~100ms (the SyncActiveOrEnded trigger guarantees one presented
-		// frame after release).
-		if !syncActive {
-			a.win.SwapBuffers()
-		}
+		a.win.SwapBuffers()
 	}
 }

@@ -44,12 +44,14 @@ func (a *App) startPreview(result searchpanel.Result) {
 	if a.settingsMenu.Config != nil {
 		proxyURLs = a.settingsMenu.Config.WebSearch.ReaderProxyURLs
 	}
-	go func(id int, url, title string, useProxy bool) {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	reqCtx := a.newRequest(&a.previewCancel)
+	url, title := result.URL, result.Title
+	goSafe("preview fetch", func() {
+		ctx, cancel := context.WithTimeout(reqCtx, 10*time.Second)
 		defer cancel()
-		lines, links, source, proxyErr, err := websearch.FetchText(ctx, url, 12000, useProxy, proxyURLs)
-		a.previewResponses <- previewResponse{id: id, url: url, title: title, lines: lines, links: links, source: source, proxyErr: proxyErr, cacheKey: cacheKey, err: err}
-	}(previewID, result.URL, result.Title, useReaderProxy)
+		lines, links, source, proxyErr, err := websearch.FetchText(ctx, url, 12000, useReaderProxy, proxyURLs)
+		deliver(reqCtx, a.previewResponses, previewResponse{id: previewID, url: url, title: title, lines: lines, links: links, source: source, proxyErr: proxyErr, cacheKey: cacheKey, err: err})
+	})
 }
 
 // runSearch always performs a web search (no direct-URL sniffing); it is
@@ -72,12 +74,13 @@ func (a *App) runSearch(query string) {
 	a.searchPanel.Status = "Searching..."
 	a.searchPanel.StartLoading()
 	searchID := a.searchPanel.SearchID
-	go func(id int, q string) {
-		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	reqCtx := a.newRequest(&a.searchCancel)
+	goSafe("web search", func() {
+		ctx, cancel := context.WithTimeout(reqCtx, 8*time.Second)
 		defer cancel()
-		results, err := websearch.SearchDuckDuckGo(ctx, q, maxSearchResults)
-		a.searchResponses <- searchResponse{id: id, query: q, results: results, err: err}
-	}(searchID, query)
+		results, err := websearch.SearchDuckDuckGo(ctx, query, maxSearchResults)
+		deliver(reqCtx, a.searchResponses, searchResponse{id: searchID, query: query, results: results, err: err})
+	})
 }
 
 func (a *App) startSearch(query string) {
@@ -161,8 +164,12 @@ func (a *App) startAIChat(prompt string) {
 		timeout = time.Duration(cfg.ExtendedTimeout) * time.Second
 	}
 
-	go func(id int, baseURL, model string, messages []ollama.Message, loadModel bool, thinkingEnabled bool, thinkingBudget int, useTools bool, toolCfg aitools.Config) {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	reqCtx := a.newRequest(&a.aiCancel)
+	send := func(r aiResponse) bool { return deliver(reqCtx, a.aiResponses, r) }
+	goSafe("ollama chat", func() {
+		id, baseURL, model, loadModel := requestID, cfg.URL, cfg.Model, needLoad
+		thinkingEnabled, thinkingBudget, useTools := cfg.ThinkingMode, cfg.ThinkingBudget, toolsEnabled
+		ctx, cancel := context.WithTimeout(reqCtx, timeout)
 		defer cancel()
 
 		client := ollama.NewClient(baseURL, model)
@@ -174,14 +181,18 @@ func (a *App) startAIChat(prompt string) {
 
 		loadSuccess := false
 		if loadModel {
-			a.aiResponses <- aiResponse{id: id, token: "", done: false} // Signal streaming start
+			if !send(aiResponse{id: id, token: "", done: false}) { // Signal streaming start
+				return
+			}
 			if err := client.LoadModel(ctx); err != nil {
-				a.aiResponses <- aiResponse{id: id, err: err, done: true}
+				send(aiResponse{id: id, err: err, done: true})
 				return
 			}
 			loadSuccess = true
 			// Signal: model loaded, now thinking
-			a.aiResponses <- aiResponse{id: id, token: "", done: false, loaded: true}
+			if !send(aiResponse{id: id, token: "", done: false, loaded: true}) {
+				return
+			}
 		}
 
 		var toolDefs []ollama.ToolDef
@@ -201,7 +212,7 @@ func (a *App) startAIChat(prompt string) {
 		}
 
 		onToken := func(token string) {
-			a.aiResponses <- aiResponse{id: id, token: token, done: false}
+			send(aiResponse{id: id, token: token, done: false})
 		}
 
 		// Agent loop: stream a response; if the model calls tools, run
@@ -218,7 +229,7 @@ func (a *App) startAIChat(prompt string) {
 				toolDefs = nil
 				result, err = client.ChatStreamWithTools(ctx, messages, nil, onToken, nil)
 			}
-			if err != nil || len(result.ToolCalls) == 0 || round >= maxToolRounds {
+			if err != nil || len(result.ToolCalls) == 0 || round >= maxToolRounds || reqCtx.Err() != nil {
 				break
 			}
 
@@ -229,7 +240,7 @@ func (a *App) startAIChat(prompt string) {
 			})
 			for _, call := range result.ToolCalls {
 				name := call.Function.Name
-				a.aiResponses <- aiResponse{id: id, toolNote: name + summarizeToolArgs(call.Function.Arguments)}
+				send(aiResponse{id: id, toolNote: name + summarizeToolArgs(call.Function.Arguments)})
 				output, terr := registry.Execute(ctx, name, call.Function.Arguments)
 				if terr != nil {
 					output = "Error: " + terr.Error()
@@ -241,6 +252,6 @@ func (a *App) startAIChat(prompt string) {
 				})
 			}
 		}
-		a.aiResponses <- aiResponse{id: id, thinking: result.Thinking, err: err, done: true, loaded: loadSuccess}
-	}(requestID, cfg.URL, cfg.Model, messages, needLoad, cfg.ThinkingMode, cfg.ThinkingBudget, toolsEnabled, toolCfg)
+		send(aiResponse{id: id, thinking: result.Thinking, err: err, done: true, loaded: loadSuccess})
+	})
 }

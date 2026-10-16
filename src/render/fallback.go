@@ -26,6 +26,8 @@ import (
 type fallbackFont struct {
 	name string // embedded font name ("" for system fonts), used to skip the active font
 	font *opentype.Font
+	data []byte
+	ttc  bool
 }
 
 // initEmbeddedFallbacks parses all embedded fonts once. Called lazily from
@@ -40,31 +42,36 @@ func (r *Renderer) initEmbeddedFallbacks() {
 		if err != nil {
 			continue
 		}
-		r.fallbackFonts = append(r.fallbackFonts, fallbackFont{name: fi.Name, font: f})
+		r.fallbackFonts = append(r.fallbackFonts, fallbackFont{name: fi.Name, font: f, data: fi.Data})
 	}
 }
 
+// addFallback creates a face for ff at the current size and appends it to the
+// chain, reporting success.
+func (r *Renderer) addFallback(ff fallbackFont) bool {
+	face, err := opentype.NewFace(ff.font, r.faceOptions())
+	if err != nil {
+		return false
+	}
+	r.fallbackFaces = append(r.fallbackFaces, face)
+	r.fallbackSrcs = append(r.fallbackSrcs, r.newFontSrc(ff.font, face, ff.data, ff.ttc))
+	return true
+}
+
 // rebuildFallbackFaces (re)creates fallback faces at the current font size,
-// skipping the active font (it is always tried first via r.face).
+// skipping the active font (it is always tried first as the primary).
 func (r *Renderer) rebuildFallbackFaces() {
 	r.initEmbeddedFallbacks()
 	for _, f := range r.fallbackFaces {
 		f.Close()
 	}
 	r.fallbackFaces = r.fallbackFaces[:0]
+	r.fallbackSrcs = r.fallbackSrcs[:0]
 	for _, ff := range r.fallbackFonts {
 		if ff.name != "" && ff.name == r.currentFont {
 			continue
 		}
-		face, err := opentype.NewFace(ff.font, &opentype.FaceOptions{
-			Size:    float64(r.fontSize),
-			DPI:     r.fontDPI(),
-			Hinting: font.HintingFull,
-		})
-		if err != nil {
-			continue
-		}
-		r.fallbackFaces = append(r.fallbackFaces, face)
+		r.addFallback(ff)
 	}
 }
 
@@ -101,7 +108,8 @@ func (r *Renderer) addFallbackFile(path string) int {
 		return 0
 	}
 	var f *opentype.Font
-	if filepath.Ext(path) == ".ttc" {
+	ttc := filepath.Ext(path) == ".ttc"
+	if ttc {
 		coll, err := opentype.ParseCollection(data)
 		if err != nil {
 			return 0
@@ -113,16 +121,11 @@ func (r *Renderer) addFallbackFile(path string) int {
 	} else if f, err = opentype.Parse(data); err != nil {
 		return 0
 	}
-	r.fallbackFonts = append(r.fallbackFonts, fallbackFont{font: f})
-	face, err := opentype.NewFace(f, &opentype.FaceOptions{
-		Size:    float64(r.fontSize),
-		DPI:     r.fontDPI(),
-		Hinting: font.HintingFull,
-	})
-	if err != nil {
+	ff := fallbackFont{font: f, data: data, ttc: ttc}
+	r.fallbackFonts = append(r.fallbackFonts, ff)
+	if !r.addFallback(ff) {
 		return 0
 	}
-	r.fallbackFaces = append(r.fallbackFaces, face)
 	return 1
 }
 
@@ -142,7 +145,7 @@ var fontconfigMatch = func(char rune) (string, error) {
 // fonts nor the fixed system list cover char, ask fontconfig which installed
 // font does and add that font to the chain. Each rune is looked up at most
 // once per session, and a missing fc-match disables the lookup entirely.
-func (r *Renderer) fontconfigFallback(char rune) font.Face {
+func (r *Renderer) fontconfigFallback(char rune) *fontSrc {
 	if r.fontconfigOff {
 		return nil
 	}
@@ -163,15 +166,15 @@ func (r *Renderer) fontconfigFallback(char rune) font.Face {
 	if path == "" || strings.Contains(strings.ToLower(filepath.Base(path)), "emoji") {
 		return nil
 	}
-	n := len(r.fallbackFaces)
+	n := len(r.fallbackSrcs)
 	if r.addFallbackFile(path) == 0 {
 		return nil
 	}
 	// The new face may cover runes previously recorded as missing.
 	r.glyphMisses = make(map[rune]bool)
 	r.asciiCache = [128]asciiGlyphSlot{}
-	if f := r.fallbackFaces[n]; hasGlyph(f, char) {
-		return f
+	if s := r.fallbackSrcs[n]; s.gid(char) != 0 {
+		return s
 	}
 	return nil
 }
@@ -207,33 +210,34 @@ func systemFallbackPaths() []string {
 	}
 }
 
-// faceFor returns the first face in the fallback chain that has a glyph for
+// srcFor returns the first font in the fallback chain that has a glyph for
 // char: the active font, then embedded fallbacks, then system fonts (loaded
 // on first use), then whatever installed font fontconfig says covers it.
-func (r *Renderer) faceFor(char rune) font.Face {
-	if r.face != nil {
-		if _, ok := r.face.GlyphAdvance(char); ok {
-			return r.face
-		}
+func (r *Renderer) srcFor(char rune) *fontSrc {
+	if r.primary.gid(char) != 0 {
+		return r.primary
 	}
-	for _, f := range r.fallbackFaces {
-		if _, ok := f.GlyphAdvance(char); ok {
-			return f
+	for _, s := range r.fallbackSrcs {
+		if s.gid(char) != 0 {
+			return s
 		}
 	}
 	if !r.systemFallbacksLoaded {
-		n := len(r.fallbackFaces)
+		n := len(r.fallbackSrcs)
 		r.loadSystemFallbacks()
-		for _, f := range r.fallbackFaces[n:] {
-			if _, ok := f.GlyphAdvance(char); ok {
-				return f
+		for _, s := range r.fallbackSrcs[n:] {
+			if s.gid(char) != 0 {
+				return s
 			}
 		}
 	}
 	return r.fontconfigFallback(char)
 }
 
-func hasGlyph(f font.Face, char rune) bool {
-	_, ok := f.GlyphAdvance(char)
-	return ok
+// faceFor is srcFor's x/image face, or nil when no font covers char.
+func (r *Renderer) faceFor(char rune) font.Face {
+	if s := r.srcFor(char); s != nil {
+		return s.face
+	}
+	return nil
 }

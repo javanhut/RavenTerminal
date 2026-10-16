@@ -1,6 +1,7 @@
 package grid
 
 import (
+	"strings"
 	"unicode"
 	"unicode/utf8"
 
@@ -79,5 +80,9 @@ func ClusterWidth(cluster string) int {
 	if cluster == "" {
 		return 0
 	}
-	return uniseg.StringWidth(cluster)
+	w := uniseg.StringWidth(cluster)
+	if base, _ := utf8.DecodeRuneInString(cluster); strings.ContainsRune(cluster, 0xFE0F) {
+		w = max(w, emojiKeycapWidth(base))
+	}
+	return w
 }

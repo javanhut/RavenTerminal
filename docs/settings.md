@@ -1,29 +1,30 @@
 # Raven Terminal Settings
 
-## Built-in Commands
+## Shell Commands
 
-Raven Terminal includes several built-in commands:
+The generated shell integration (bash, zsh, fish and ravenshell) defines:
 
-| Command              | Description                |
-|----------------------|----------------------------|
-| `keybindings`        | Show keybinding help       |
-| `list-fonts`         | List available fonts       |
-| `change-font <name>` | Change to specified font   |
+| Command              | Description                                   |
+|----------------------|-----------------------------------------------|
+| `keybindings`        | Print the keybindings (`raven-terminal --keybindings`) |
+| `list-fonts`         | Print the available fonts (`raven-terminal --list-fonts`) |
+| `change-font <name>` | Switch the running terminal's font (OSC 7771); no argument lists fonts |
 
-**Command aliases:**
-- `raven-keybindings` - Alias for `keybindings`
-- `fonts` - Alias for `list-fonts`
+They are ordinary shell functions; the terminal does not intercept typed
+input.
 
 ### Available Fonts
 
-- `firacode` - FiraCode Nerd Font
+- `jetbrains` - JetBrains Mono Nerd Font
+- `firacode` - Fira Code Nerd Font
 - `hack` - Hack Nerd Font
-- `jetbrainsmono` - JetBrains Mono Nerd Font
-- `ubuntumono` - Ubuntu Mono Nerd Font
+- `ubuntu` - Ubuntu Mono Nerd Font
+
+All four ship regular, bold, italic and bold-italic faces.
 
 ## Opening Settings
 
-Press `Ctrl+Shift+S` to open the settings menu.
+Press Leader+S (Super+S or Ctrl+Shift+S on Linux, Cmd+S on macOS) to open the settings menu.
 
 ## Settings Menu Navigation
 
@@ -104,8 +105,48 @@ On first run, a default configuration is created automatically.
 ### Theme
 
 ```toml
-theme = "raven-blue" # "raven-blue", "crow-black", "magpie-black-white-grey", "catppuccin-mocha"
+theme = "raven" # "raven" (follow the desktop), "raven-blue", "crow-black",
+                # "magpie-black-white-grey", "catppuccin-mocha", "ghostty"
+font_size = 15.0
 ```
+
+Applications see the theme's colours through OSC 4/10/11/12 queries and get
+dark/light change reports (mode 2031).
+
+### Terminal Behaviour
+
+```toml
+scrollback_lines = 10000      # history per pane; 0 disables scrollback
+bell = "visual"               # "visual" (flash, plus urgency when unfocused), "attention", "none"
+notifications = true          # desktop notifications from apps (OSC 9, 99, 777)
+notify_command_after = 10     # notify when a command that ran this many seconds
+                              # finishes while unfocused (0 = never; needs shell integration)
+allow_clipboard_read = false  # let apps read the clipboard via OSC 52 (writes always work)
+restore_session = false       # reopen the previous run's tabs, splits and directories
+fingerprint_sudo = true       # show RavenLinux's sudo fingerprint prompt as a modal
+```
+
+### Appearance
+
+```toml
+[appearance]
+cursor_style = "block"        # "block", "underline", "bar" (apps can change it with DECSCUSR)
+cursor_blink = true
+panel_width_percent = 35.0    # web search / AI panel width (25-50)
+faux_bold = true              # bold text (real bold face, synthesized when missing)
+faux_italic = true            # italic text (real italic face, synthesized when missing)
+undercurl = true              # curly, dotted and dashed underlines (SGR 4:3..4:5) and SGR 58 colours
+ligatures = true              # programming ligatures (=>, !=, ...)
+text_gamma = 1.7              # extra gamma for text darker than the background (1 = off)
+text_contrast = 1.0           # text coverage multiplier (1 = off)
+marks_gutter = true           # mark each shell prompt (OSC 133) in the left gutter
+reduced_motion = false        # steady bell tint instead of a fading flash, no blinking text, static progress bars
+background_opacity = 1.0      # 0.1-1; below 1 the window is translucent
+```
+
+Turning `background_opacity` below 1 while the terminal is running applies to
+windows opened afterwards (the transparent framebuffer is chosen when a window
+is created); going back to 1 applies at once.
 
 ### Shell Settings
 
@@ -315,11 +356,11 @@ The generated script includes:
 
 ## Applying Changes
 
-Most settings require opening a new tab to take effect. The status message will indicate when this is needed.
-
-To apply changes immediately to the init script:
-1. Save your changes in the menu
-2. Open a new tab
+`config.toml` is watched: saving it (from the settings menu or an editor)
+applies theme, font size, text style, scrollback, bell, notifications, cursor
+and panel settings to every open window without a restart. Shell, prompt,
+script and alias changes are written to the generated init script and take
+effect in new tabs.
 
 ## Migrating from Other Terminals
 

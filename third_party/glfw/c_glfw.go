@@ -8,5 +8,6 @@ package glfw
 #include "glfw/src/vulkan.c"
 #include "glfw/src/window.c"
 #include "glfw/src/osmesa_context.c"
+#include "glfw/src/raven.c"
 */
 import "C"

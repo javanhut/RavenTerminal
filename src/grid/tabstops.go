@@ -72,3 +72,17 @@ func (g *Grid) FillScreenLocked(r rune) {
 		}
 	}
 }
+
+// resizeTabStops keeps custom tab stops across a width change; columns new to
+// the grid get the default every-8th stops.
+func (g *Grid) resizeTabStops(cols int) {
+	if g.tabStops == nil {
+		return
+	}
+	ts := make([]bool, cols)
+	n := copy(ts, g.tabStops)
+	for c := max(8, (n+7)/8*8); c < cols; c += 8 {
+		ts[c] = true
+	}
+	g.tabStops = ts
+}
