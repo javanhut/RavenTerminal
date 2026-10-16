@@ -3,6 +3,7 @@ package parser
 import (
 	"bytes"
 
+	"github.com/javanhut/RavenTerminal/src/grid"
 	"github.com/javanhut/RavenTerminal/src/images"
 	"github.com/javanhut/RavenTerminal/src/sixel"
 )
@@ -112,7 +113,20 @@ func (t *Terminal) dispatchEscIntermediate(inter []byte, final byte) {
 	case '-', '.', '/': // 96-character sets into G1..G3
 		t.ctl.g[inter[0]-','] = charsetASCII
 	case '#':
-		if len(inter) == 1 && final == '8' { // DECALN
+		if len(inter) != 1 {
+			return
+		}
+		switch final {
+		case '3':
+			t.Grid.SetLineSizeLocked(grid.LineDoubleTop)
+		case '4':
+			t.Grid.SetLineSizeLocked(grid.LineDoubleBottom)
+		case '5':
+			t.Grid.SetLineSizeLocked(grid.LineSingle)
+		case '6':
+			t.Grid.SetLineSizeLocked(grid.LineDoubleWidth)
+		}
+		if final == '8' { // DECALN
 			t.Grid.FillScreenLocked('E')
 			t.Grid.RestoreScrollRegionLocked(1, t.Grid.Rows)
 			t.resetLRMargins()
@@ -240,16 +254,16 @@ func (t *Terminal) finishDCS() {
 // the image, scrolling as needed; with ?8452 it ends right of the image. With
 // DECSDM set the image is drawn at the top-left and the cursor stays put.
 func (t *Terminal) handleSixel(buf []byte) {
-	q := bytes.IndexByte(buf, 'q')
-	if q < 0 {
+	before, after, ok := bytes.Cut(buf, []byte{'q'})
+	if !ok {
 		return
 	}
 	var params []int
-	for p := range bytes.SplitSeq(buf[:q], []byte{';'}) {
+	for p := range bytes.SplitSeq(before, []byte{';'}) {
 		n, _ := atoiBytes(p)
 		params = append(params, n)
 	}
-	img, err := sixel.Decode(params, buf[q+1:])
+	img, err := sixel.Decode(params, after)
 	if err != nil || img.Width == 0 || img.Height == 0 {
 		return
 	}

@@ -81,7 +81,7 @@ func TestKeybindingsHelpListsEveryAction(t *testing.T) {
 }
 
 func TestChangeFontSkipsCurrentFont(t *testing.T) {
-	f := &countingFonts{fakeFonts: fakeFonts{got: "firacode"}}
+	f := &countingFonts{got: "firacode"}
 	if _, err := ChangeFont(f, " FiraCode "); err != nil {
 		t.Fatal(err)
 	}

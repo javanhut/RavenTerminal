@@ -37,16 +37,27 @@ func (b *rectBatch) addRect(x, y, w, h float32, c [4]float32) {
 }
 
 // glyphBatch accumulates textured glyph quads: 6 vertices/quad,
-// glyphVertFloats floats/vertex (x, y, u, v, r, g, b, a, layer). layer >= 0
+// glyphVertFloats floats/vertex (x, y, u, v, r, g, b, a, layer, bg). layer >= 0
 // samples that page of the mono atlas tinted by the color; layer < 0 samples
-// page -layer-1 of the color-emoji atlas untinted.
+// page -layer-1 of the color-emoji atlas untinted. bg is the luminance of the
+// background behind the glyph (for gamma/contrast), negative for the theme's.
 type glyphBatch struct {
 	verts []float32
+	bgY   float32
+	bgSet bool
 }
 
-const glyphVertFloats = 9
+const glyphVertFloats = 10
 
 func (b *glyphBatch) reset() { b.verts = b.verts[:0] }
+
+// setBg sets the background later quads are composed against.
+func (b *glyphBatch) setBg(c [4]float32) { b.bgY, b.bgSet = textLuma(c), true }
+
+// clearBg makes later quads compose against the theme background.
+func (b *glyphBatch) clearBg() { b.bgSet = false }
+
+func textLuma(c [4]float32) float32 { return 0.2126*c[0] + 0.7152*c[1] + 0.0722*c[2] }
 
 // addGlyph appends a quad covering screen rect [x,y2]..[x2,y] (y is the cell
 // baseline-bottom; the glyph extends upward by its pixel height) with the given
@@ -59,13 +70,17 @@ func (b *glyphBatch) addGlyph(x, y, w, h, tx, ty, tw, th float32, c [4]float32, 
 func (b *glyphBatch) addGlyphL(x, y, w, h, tx, ty, tw, th float32, c [4]float32, shear, l float32) {
 	yTop := y - h
 	x2 := x + w
+	bg := float32(-1)
+	if b.bgSet {
+		bg = b.bgY
+	}
 	b.verts = append(b.verts,
-		x+shear, yTop, tx, ty, c[0], c[1], c[2], c[3], l,
-		x2+shear, yTop, tx+tw, ty, c[0], c[1], c[2], c[3], l,
-		x2, y, tx+tw, ty+th, c[0], c[1], c[2], c[3], l,
-		x+shear, yTop, tx, ty, c[0], c[1], c[2], c[3], l,
-		x2, y, tx+tw, ty+th, c[0], c[1], c[2], c[3], l,
-		x, y, tx, ty+th, c[0], c[1], c[2], c[3], l,
+		x+shear, yTop, tx, ty, c[0], c[1], c[2], c[3], l, bg,
+		x2+shear, yTop, tx+tw, ty, c[0], c[1], c[2], c[3], l, bg,
+		x2, y, tx+tw, ty+th, c[0], c[1], c[2], c[3], l, bg,
+		x+shear, yTop, tx, ty, c[0], c[1], c[2], c[3], l, bg,
+		x2, y, tx+tw, ty+th, c[0], c[1], c[2], c[3], l, bg,
+		x, y, tx, ty+th, c[0], c[1], c[2], c[3], l, bg,
 	)
 }
 
@@ -144,25 +159,30 @@ func (r *Renderer) initBatches() error {
 		layout (location = 1) in vec2 aTex;
 		layout (location = 2) in vec4 aColor;
 		layout (location = 3) in float aLayer;
+		layout (location = 4) in float aBg;
 		uniform mat4 projection;
 		out vec2 TexCoords;
 		out vec4 vColor;
 		flat out float vLayer;
+		flat out float vBg;
 		void main() {
 			gl_Position = projection * vec4(aPos, 0.0, 1.0);
 			TexCoords = aTex;
 			vColor = aColor;
 			vLayer = aLayer;
+			vBg = aBg;
 		}
 	` + "\x00"
 	// Mono coverage gets kitty-style composition: an extra gamma that grows
 	// as the text gets darker than the background it is drawn on (sRGB
 	// blending otherwise thins dark-on-light text), times a contrast factor.
+	// The background is the cell's own (vBg), or the theme's when negative.
 	glyphFrag := `
 		#version 410 core
 		in vec2 TexCoords;
 		in vec4 vColor;
 		flat in float vLayer;
+		flat in float vBg;
 		out vec4 FragColor;
 		uniform sampler2DArray text;
 		uniform sampler2DArray emoji;
@@ -177,7 +197,8 @@ func (r *Renderer) initBatches() error {
 				return;
 			}
 			float a = texture(text, vec3(TexCoords, vLayer)).r;
-			float t = clamp((1.0 - dot(vColor.rgb, Y) + dot(bgColor, Y)) * 0.5, 0.0, 1.0);
+			float bgY = vBg < 0.0 ? dot(bgColor, Y) : vBg;
+			float t = clamp((1.0 - dot(vColor.rgb, Y) + bgY) * 0.5, 0.0, 1.0);
 			a = clamp(mix(a, pow(a, 1.0 / textGamma), t) * textContrast, 0.0, 1.0);
 			FragColor = vec4(vColor.rgb, vColor.a * a);
 		}
@@ -205,7 +226,8 @@ func (r *Renderer) initBatches() error {
 	gl.BindBuffer(gl.ARRAY_BUFFER, 0)
 	gl.BindVertexArray(0)
 
-	// Glyph batch VAO/VBO: vec2 pos + vec2 tex + vec4 color + float layer.
+	// Glyph batch VAO/VBO: vec2 pos + vec2 tex + vec4 color + float layer +
+	// float background luminance.
 	gl.GenVertexArrays(1, &r.glyphBatchVAO)
 	gl.GenBuffers(1, &r.glyphBatchVBO)
 	gl.BindVertexArray(r.glyphBatchVAO)
@@ -219,6 +241,8 @@ func (r *Renderer) initBatches() error {
 	gl.VertexAttribPointerWithOffset(2, 4, gl.FLOAT, false, stride, 4*4)
 	gl.EnableVertexAttribArray(3)
 	gl.VertexAttribPointerWithOffset(3, 1, gl.FLOAT, false, stride, 8*4)
+	gl.EnableVertexAttribArray(4)
+	gl.VertexAttribPointerWithOffset(4, 1, gl.FLOAT, false, stride, 9*4)
 	gl.BindBuffer(gl.ARRAY_BUFFER, 0)
 	gl.BindVertexArray(0)
 

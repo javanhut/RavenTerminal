@@ -382,17 +382,19 @@ func (g *Grid) writeCharLocked(c rune, sr *styleRef, link uint16) {
 	}
 
 	// Handle auto-wrap if at end of line
-	if g.CursorCol >= g.Cols {
+	lim := g.rowLimit(g.rows[g.CursorRow])
+	if g.CursorCol >= lim {
 		if g.autoWrap {
 			g.cursorNewline()
+			lim = g.rowLimit(g.rows[g.CursorRow])
 		} else {
 			// No auto-wrap: stay at last column, overwrite
-			g.CursorCol = g.Cols - 1
+			g.CursorCol = lim - 1
 		}
 	}
 
 	// Check if wide character fits on current line
-	if charWidth == 2 && g.CursorCol >= g.Cols-1 {
+	if charWidth == 2 && g.CursorCol >= lim-1 {
 		if g.autoWrap {
 			// Wide char at last column - fill with space and wrap. The pad
 			// takes the incoming character's style (not the previous one, as
@@ -406,6 +408,7 @@ func (g *Grid) writeCharLocked(c rune, sr *styleRef, link uint16) {
 			// reflow can rejoin it on resize (dropping the pad).
 			pr.flags |= RowSoftWrapped | RowWidePad
 			g.cursorNewline()
+			lim = g.rowLimit(g.rows[g.CursorRow])
 		} else {
 			// No auto-wrap: treat wide char as single width at last column
 			charWidth = 1
@@ -416,6 +419,9 @@ func (g *Grid) writeCharLocked(c rune, sr *styleRef, link uint16) {
 	// so index the row's cell slice directly (as fillSpan does) instead of
 	// decoding a linear index with per-cell div/mod in cellAt/putCellStyled.
 	row := g.rows[g.CursorRow]
+	if len(row.sized) > 0 {
+		g.dropSized(g.CursorRow, g.CursorCol, g.CursorCol+charWidth)
+	}
 	if row.cells[g.CursorCol].Width != CellWidthNormal ||
 		(charWidth == 2 && g.CursorCol+1 < g.Cols && row.cells[g.CursorCol+1].Width != CellWidthNormal) {
 		g.clearOrphans(row, g.CursorCol, charWidth)
@@ -430,11 +436,11 @@ func (g *Grid) writeCharLocked(c rune, sr *styleRef, link uint16) {
 	}
 
 	// If we advanced past the last column, set wrap pending (DECAWM behavior)
-	if g.CursorCol >= g.Cols {
+	if g.CursorCol >= lim {
 		if g.autoWrap {
 			g.wrapPending = true
 		}
-		g.CursorCol = g.Cols - 1
+		g.CursorCol = lim - 1
 	}
 
 	// Save for REP sequence
@@ -474,16 +480,22 @@ func (g *Grid) writeByteLocked(b byte, sr *styleRef, link uint16) {
 	}
 
 	// Handle auto-wrap if at end of line
-	if g.CursorCol >= g.Cols {
+	row := g.rows[g.CursorRow]
+	lim := g.rowLimit(row)
+	if g.CursorCol >= lim {
 		if g.autoWrap {
 			g.cursorNewline()
+			row = g.rows[g.CursorRow]
+			lim = g.rowLimit(row)
 		} else {
 			// No auto-wrap: stay at last column, overwrite
-			g.CursorCol = g.Cols - 1
+			g.CursorCol = lim - 1
 		}
 	}
 
-	row := g.rows[g.CursorRow]
+	if len(row.sized) > 0 {
+		g.dropSized(g.CursorRow, g.CursorCol, g.CursorCol+1)
+	}
 	if row.cells[g.CursorCol].Width != CellWidthNormal {
 		g.clearOrphans(row, g.CursorCol, 1)
 	}
@@ -491,11 +503,11 @@ func (g *Grid) writeByteLocked(b byte, sr *styleRef, link uint16) {
 	g.CursorCol++
 
 	// If we advanced past the last column, set wrap pending (DECAWM behavior)
-	if g.CursorCol >= g.Cols {
+	if g.CursorCol >= lim {
 		if g.autoWrap {
 			g.wrapPending = true
 		}
-		g.CursorCol = g.Cols - 1
+		g.CursorCol = lim - 1
 	}
 
 	// Save for REP sequence
@@ -636,6 +648,7 @@ func (g *Grid) TabLocked() {
 		next = g.Cols - 1
 	}
 	g.CursorCol = next
+	g.clampCursorCol()
 }
 
 // MoveCursor moves the cursor by the given delta, handling wide cells
@@ -668,6 +681,7 @@ func (g *Grid) MoveCursorLocked(dCol, dRow int) {
 	if g.CursorRow >= g.Rows {
 		g.CursorRow = g.Rows - 1
 	}
+	g.clampCursorCol()
 }
 
 // SetCursorPos sets the cursor to an absolute position (1-based)
@@ -697,6 +711,7 @@ func (g *Grid) SetCursorPosLocked(col, row int) {
 	if g.CursorRow >= g.Rows {
 		g.CursorRow = g.Rows - 1
 	}
+	g.clampCursorCol()
 }
 
 // scrollUpInternal scrolls the grid up by one line (internal, no lock)
@@ -1328,9 +1343,10 @@ func (g *Grid) ClearToEndWithBg(bg Color) {
 func (g *Grid) ClearToEndWithBgLocked(bg Color) {
 	// Clear rest of current line
 	g.fillSpan(g.CursorRow, g.CursorCol, g.Cols, bg)
-	// Clear lines below
+	// Clear lines below; a fully erased line becomes single width (xterm)
 	for row := g.CursorRow + 1; row < g.Rows; row++ {
 		g.fillSpan(row, 0, g.Cols, bg)
+		g.clearLineSize(row)
 	}
 }
 
@@ -1347,6 +1363,7 @@ func (g *Grid) ClearToStartWithBgLocked(bg Color) {
 	// Clear lines above
 	for row := 0; row < g.CursorRow; row++ {
 		g.fillSpan(row, 0, g.Cols, bg)
+		g.clearLineSize(row)
 	}
 	// Clear start of current line
 	g.fillSpan(g.CursorRow, 0, g.CursorCol+1, bg)
@@ -1401,6 +1418,7 @@ func (g *Grid) DeleteChars(n int) {
 // DeleteCharsLocked is DeleteChars without locking; the caller must hold g.mu
 // (see LockBatch).
 func (g *Grid) DeleteCharsLocked(n int) {
+	g.clearSized(g.CursorRow)
 
 	// Clamp to the space right of the cursor; an oversized count would index
 	// negative columns in the shift/clear loops below.
@@ -1449,6 +1467,7 @@ func (g *Grid) InsertChars(n int) {
 // InsertCharsLocked is InsertChars without locking; the caller must hold g.mu
 // (see LockBatch).
 func (g *Grid) InsertCharsLocked(n int) {
+	g.clearSized(g.CursorRow)
 
 	if n > g.Cols-g.CursorCol {
 		n = g.Cols - g.CursorCol
@@ -1517,11 +1536,15 @@ func (g *Grid) DeleteLinesWithBgLocked(n int, bg Color) {
 			g.moveCell(g.index(col, row), g.index(col, row+n))
 		}
 		g.rows[row].flags = g.rows[row].flags&^rowWrapFlags | g.rows[row+n].flags&rowWrapFlags
+		g.rows[row].size = g.rows[row+n].size
+		g.rows[row].sized = g.rows[row+n].sized
 	}
 
 	// Clear bottom n lines of the scroll region with background color
 	for row := bottom - n + 1; row <= bottom; row++ {
+		g.rows[row].sized = nil
 		g.fillSpan(row, 0, g.Cols, bg)
+		g.rows[row].size = LineSingle
 	}
 }
 
@@ -1561,11 +1584,15 @@ func (g *Grid) InsertLinesWithBgLocked(n int, bg Color) {
 			g.moveCell(g.index(col, row), g.index(col, row-n))
 		}
 		g.rows[row].flags = g.rows[row].flags&^rowWrapFlags | g.rows[row-n].flags&rowWrapFlags
+		g.rows[row].size = g.rows[row-n].size
+		g.rows[row].sized = g.rows[row-n].sized
 	}
 
 	// Clear n lines at cursor position with background color
 	for row := g.CursorRow; row < g.CursorRow+n && row <= bottom; row++ {
+		g.rows[row].sized = nil
 		g.fillSpan(row, 0, g.Cols, bg)
+		g.rows[row].size = LineSingle
 	}
 }
 
@@ -1622,6 +1649,8 @@ func (g *Grid) ResizeTracking(cols, rows int, pts ...*Point) {
 		nr := g.blankRowN(cols, g.eraseBg)
 		if row < keepRows && keepCols > 0 {
 			src := g.rows[row]
+			nr.size = src.size
+			nr.sized = keepSizedFitting(src.sized, cols)
 			// nr is uniformly filled by blankRowN, so the refs on the
 			// overwritten prefix drop in one call; the copied-in source
 			// styles are retained per run of equal ids.
@@ -1681,6 +1710,7 @@ func (g *Grid) ResizeTracking(cols, rows int, pts ...*Point) {
 	if g.CursorRow >= rows {
 		g.CursorRow = rows - 1
 	}
+	g.clampCursorCol()
 }
 
 // GetCursor returns the current cursor position

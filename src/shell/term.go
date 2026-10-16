@@ -32,7 +32,7 @@ func terminfoDirs() []string {
 	if home, err := os.UserHomeDir(); err == nil {
 		dirs = append(dirs, filepath.Join(home, ".terminfo"))
 	}
-	for _, d := range strings.Split(os.Getenv("TERMINFO_DIRS"), ":") {
+	for d := range strings.SplitSeq(os.Getenv("TERMINFO_DIRS"), ":") {
 		if d != "" {
 			dirs = append(dirs, d)
 		}

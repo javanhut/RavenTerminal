@@ -88,8 +88,13 @@ func (g *Grid) reflow(newCols, newRows int, pts []*Point) {
 	var alloc reflowAlloc
 	out := make([]*Row, 0, len(seq)+len(seq)/2+newRows)
 	for i := 0; i < len(seq); {
+		if seq[i].size != LineSingle {
+			out = g.reflowSized(seq[i], i, newCols, trk, &alloc, out)
+			i++
+			continue
+		}
 		j := i
-		for j < len(seq)-1 && seq[j].flags&RowSoftWrapped != 0 {
+		for j < len(seq)-1 && seq[j].flags&RowSoftWrapped != 0 && seq[j+1].size == LineSingle {
 			j++
 		}
 		out = g.reflowLine(seq[i:j+1], i, newCols, trk, &alloc, out)
@@ -142,6 +147,9 @@ func (g *Grid) reflow(newCols, newRows int, pts []*Point) {
 	g.CursorRow = clampInt(c.newAbs-activeStart, 0, newRows-1)
 	g.CursorCol = clampInt(c.newCol, 0, newCols-1)
 	g.wrapPending = c.newPend && g.CursorRow == c.newAbs-activeStart
+	if lim := max(newCols/2, 1); g.rows[g.CursorRow].size != LineSingle && g.CursorCol >= lim {
+		g.CursorCol = lim - 1
+	}
 	for k, p := range pts {
 		t := trk[2+k]
 		p.Row = clampInt(t.newAbs-activeStart, 0, newRows-1)
@@ -228,7 +236,7 @@ func (g *Grid) reflowLine(src []*Row, base, newCols int, trk []reflowTracker, al
 		return src[kk].cells[x-ks]
 	}
 
-	pos := 0
+	pos, start := 0, len(out)
 	for first := true; first || pos < L; first = false {
 		end := min(pos+newCols, L)
 		if end < L && end-pos > 1 && at(end-1).Width == CellWidthWide {
@@ -288,7 +296,43 @@ func (g *Grid) reflowLine(src []*Row, base, newCols int, trk []reflowTracker, al
 		out = append(out, r)
 		pos = end
 	}
+	if len(src) == 1 && len(out) == start+1 {
+		out[start].sized = keepSizedFitting(src[0].sized, newCols)
+	}
 	return out
+}
+
+// reflowSized carries a double-width or double-height row through a reflow
+// unsplit: its content is cut to the new usable width (half the columns) and
+// it keeps its line attribute.
+func (g *Grid) reflowSized(src *Row, base, newCols int, trk []reflowTracker, alloc *reflowAlloc, out []*Row) []*Row {
+	lim := max(newCols/2, 1)
+	n := effLen(src)
+	for n > 0 && isBlankStored(src.cells[n-1]) {
+		n--
+	}
+	if n > lim {
+		n = lim
+		if src.cells[n-1].Width == CellWidthWide {
+			n-- // never keep half of a wide char
+		}
+	}
+	for _, sc := range src.cells[n:] {
+		g.styles.release(sc.Style)
+	}
+	r := alloc.row(n)
+	copy(r.cells, src.cells[:n])
+	r.flags = RowDirty | src.flags&RowHasCluster
+	r.mark, r.exit, r.size = src.mark, src.exit, src.size
+	r.sized = keepSizedFitting(src.sized, lim)
+	for t := range trk {
+		if tt := &trk[t]; !tt.found && tt.abs == base {
+			tt.found = true
+			tt.newAbs = len(out)
+			tt.newCol = min(tt.col, lim-1)
+		}
+	}
+	return append(out, r)
 }
 
 // rowIsBlank reports whether every cell in a row is an unstyled, link-free blank.

@@ -127,6 +127,8 @@ type Terminal struct {
 	altImages    *images.Store
 	apcBuf       []byte
 	pendingKitty *kittyTransmit
+	animStore    *images.Store // store and animation generation last rendered
+	animGen      uint64
 	// Dynamic colors: OSC 10/11/12 foreground/background/cursor and OSC 4 palette
 	// overrides. Zero value (ColorDefault) means "not overridden".
 	fgColor         grid.Color

@@ -130,7 +130,11 @@ func (r *Renderer) ensureColorGlyph(ch rune) (colorGlyph, bool) {
 // colorGlyphAt returns the atlas entry for a color glyph scaled to fit span
 // cells, decoding and uploading it on first use.
 func (r *Renderer) colorGlyphAt(gid uint32, span int) (Glyph, bool) {
-	side := int(min(r.cellHeight, float32(span)*r.cellWidth))
+	return r.colorGlyphSized(gid, int(min(r.cellHeight, float32(span)*r.cellWidth)))
+}
+
+// colorGlyphSized is colorGlyphAt for a glyph fitted to a side x side box.
+func (r *Renderer) colorGlyphSized(gid uint32, side int) (Glyph, bool) {
 	if side <= 0 || r.colorFace == nil {
 		return Glyph{}, false
 	}
@@ -175,22 +179,35 @@ func (r *Renderer) colorGlyphAt(gid uint32, span int) (Glyph, bool) {
 }
 
 // colorCluster shapes an emoji sequence with the color font and returns its
-// glyph when the font has one (ZWJ sequences, flags and keycaps are
-// ligatures there). A sequence the font lacks draws its first emoji.
+// glyph, centered over the span, when the font has one (ZWJ sequences, flags
+// and keycaps are ligatures there). A sequence the font has no glyph for (an
+// unknown ZWJ sequence) draws its component emoji side by side, each scaled
+// to an equal share of the span.
 func (r *Renderer) colorCluster(text []rune, span int) []placedGlyph {
 	if r.colorFace == nil {
 		return nil
 	}
+	var gids []uint32
 	for _, sg := range r.shapeRunes(r.colorFace, text, fixed.I(128)) {
-		if sg.gid == 0 || !r.hasColorBitmap(gtfont.GID(sg.gid)) {
-			continue
+		if sg.gid != 0 && r.hasColorBitmap(gtfont.GID(sg.gid)) {
+			gids = append(gids, sg.gid)
 		}
-		if g, ok := r.colorGlyphAt(sg.gid, span); ok {
-			return []placedGlyph{{g: g}}
-		}
+	}
+	if len(gids) == 0 {
 		return nil
 	}
-	return nil
+	slot := float32(span) * r.cellWidth / float32(len(gids))
+	side := int(min(r.cellHeight, slot))
+	out := make([]placedGlyph, 0, len(gids))
+	for i, gid := range gids {
+		g, ok := r.colorGlyphSized(gid, side)
+		if !ok {
+			return nil
+		}
+		w, h := float32(g.PixelWidth), float32(g.PixelHeight)
+		out = append(out, placedGlyph{g: g, dx: float32(i)*slot + (slot-w)/2, dy: (r.cellHeight - h) / 2})
+	}
+	return out
 }
 
 // drawColorGlyph draws a color glyph fitted to the cell height and centered

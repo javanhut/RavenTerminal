@@ -55,7 +55,7 @@ func TestTextRangeAndAbsSelection(t *testing.T) {
 
 func TestScrollViewToAbs(t *testing.T) {
 	g := NewGrid(10, 3)
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		writeLines(g, "x")
 		g.CarriageReturn()
 		g.Newline()

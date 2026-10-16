@@ -110,7 +110,9 @@ func referenceBuildGridBatches(r *Renderer, snap *grid.Snapshot, offsetX, offset
 			}
 			if snap.Selected(col, row) {
 				rb.addRect(x, y, r.cellWidth+0.5, r.cellHeight, r.theme.Selection)
+				bgColor = mixColor(bgColor, r.theme.Selection, r.theme.Selection[3])
 			}
+			gb.setBg(bgColor)
 
 			if cell.Width == grid.CellWidthContinuation {
 				continue

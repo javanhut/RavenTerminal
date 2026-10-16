@@ -453,15 +453,15 @@ func BenchmarkBuildGridBatchesShaped(b *testing.B) {
 func TestDrawCellGlyphUsesClusterAndStyle(t *testing.T) {
 	r := newFontRenderer(t, "jetbrains")
 	var proj [16]float32
-	r.drawCellGlyph(0, 0, cellOf('q', 0, 0x301), [4]float32{0, 0, 0, 1}, proj)
+	r.drawCellGlyph(0, 0, []grid.Cell{cellOf('q', 0, 0x301)}, 0, [4]float32{0, 0, 0, 1}, r.cursorColor(), proj)
 	if n := len(r.uiGlyphs.verts) / (6 * glyphVertFloats); n != 2 {
 		t.Errorf("cursor cluster drew %d quads, want 2", n)
 	}
 	r.uiGlyphs.reset()
-	r.drawCellGlyph(0, 0, cellOf('a', grid.FlagBold), [4]float32{0, 0, 0, 1}, proj)
+	r.drawCellGlyph(0, 0, []grid.Cell{cellOf('a', grid.FlagBold)}, 0, [4]float32{0, 0, 0, 1}, r.cursorColor(), proj)
 	bold := append([]float32(nil), r.uiGlyphs.verts...)
 	r.uiGlyphs.reset()
-	r.drawCellGlyph(0, 0, cellOf('a', 0), [4]float32{0, 0, 0, 1}, proj)
+	r.drawCellGlyph(0, 0, []grid.Cell{cellOf('a', 0)}, 0, [4]float32{0, 0, 0, 1}, r.cursorColor(), proj)
 	if len(bold) == 0 || bold[2] == r.uiGlyphs.verts[2] {
 		t.Errorf("cursor over bold text drew the regular glyph")
 	}

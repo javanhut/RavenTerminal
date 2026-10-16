@@ -47,6 +47,7 @@ func (a *App) updateIMERect(active *tab.Tab, fbW, fbH int) {
 
 func (a *App) onPreedit(_ *glfw.Window, text string, caretBytes int) {
 	a.renderer.SetPreedit(text, caretBytes)
+	ipcNotePreedit(a, text, caretBytes)
 }
 
 // onDrop pastes dropped files' shell-quoted paths into the focused pane.

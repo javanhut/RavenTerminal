@@ -1,6 +1,8 @@
 package parser
 
 import (
+	"time"
+
 	"github.com/javanhut/RavenTerminal/src/grid"
 	"github.com/javanhut/RavenTerminal/src/images"
 )
@@ -27,6 +29,9 @@ type RenderFrame struct {
 	Placements []*images.Placement
 	Virtuals   []*images.Placement
 	Images     map[images.ImageID]*images.Image
+	// NextAnimFrame is when a placed kitty animation next changes frame
+	// (zero when none is running); Images already hold the current frames.
+	NextAnimFrame time.Time
 }
 
 // RenderFrame fills f, reusing its Images map. Placements whose rows were
@@ -34,6 +39,12 @@ type RenderFrame struct {
 func (t *Terminal) RenderFrame(f *RenderFrame) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	store := t.activeImages()
+	f.NextAnimFrame = store.Tick(time.Now())
+	if gen := store.AnimGeneration(); store != t.animStore || gen != t.animGen {
+		t.animStore, t.animGen = store, gen
+		t.Grid.MarkScreenDirty()
+	}
 	s := t.Grid.Snapshot(t.snapPrev)
 	s.CursorVisible = t.cursorVisible
 	t.snapPrev = s
@@ -46,7 +57,6 @@ func (t *Terminal) RenderFrame(f *RenderFrame) {
 	f.CellW, f.CellH = t.cellSize()
 	f.ProgressState, f.ProgressValue = t.osc.progressState, t.osc.progressValue
 
-	store := t.activeImages()
 	store.PrunePlacementsBelow(f.MinAbs)
 	f.ImageStore = store
 	f.Placements = store.Placements()
@@ -57,7 +67,7 @@ func (t *Terminal) RenderFrame(f *RenderFrame) {
 		f.Images = make(map[images.ImageID]*images.Image, len(ids))
 	}
 	for _, id := range ids {
-		if img, ok := store.Get(id); ok {
+		if img := store.Display(id); img != nil {
 			f.Images[id] = img
 		}
 	}

@@ -3,6 +3,7 @@ package parser
 import (
 	"encoding/base64"
 	"fmt"
+	"maps"
 	"net/url"
 	"strconv"
 	"strings"
@@ -47,6 +48,7 @@ type oscState struct {
 	altPointer                   []string
 	bel                          bool
 	userVars                     map[string]string
+	colors                       colorStack
 }
 
 type pendingNotify struct {
@@ -285,7 +287,7 @@ func (t *Terminal) EffectiveColors() (palette [256][3]uint8, fg, bg, cursor [3]u
 // multi-value form where successive values address the following codes.
 func (t *Terminal) handleDynamicColors(code, value string) {
 	n, _ := strconv.Atoi(code)
-	for _, spec := range strings.Split(value, ";") {
+	for spec := range strings.SplitSeq(value, ";") {
 		if n > 12 {
 			return
 		}
@@ -330,7 +332,7 @@ func (t *Terminal) handleOSC4(value string) {
 // resetPalette implements OSC 104: reset listed indices, or all when none.
 func (t *Terminal) resetPalette(value string) {
 	reset := false
-	for _, s := range strings.Split(value, ";") {
+	for s := range strings.SplitSeq(value, ";") {
 		if idx, err := strconv.Atoi(s); err == nil {
 			delete(t.paletteOverride, idx)
 			reset = true
@@ -376,7 +378,7 @@ func (t *Terminal) handleOSC8(value string) {
 		return
 	}
 	key := ""
-	for _, kv := range strings.Split(params, ":") {
+	for kv := range strings.SplitSeq(params, ":") {
 		if v, ok := strings.CutPrefix(kv, "id="); ok {
 			key = v
 		}
@@ -507,6 +509,7 @@ func (t *Terminal) resetOSC() {
 		t.setProgress(0, 0)
 	}
 	t.osc.notify = nil
+	t.osc.colors = colorStack{}
 	t.osc.altPointer = nil
 	if len(t.osc.pointer) > 0 {
 		t.osc.pointer = nil
@@ -519,7 +522,7 @@ func (t *Terminal) resetOSC() {
 func (t *Terminal) handleOSC99(value string) {
 	meta, payload, _ := strings.Cut(value, ";")
 	id, done, kind, enc, urgency := "", true, "title", false, -1
-	for _, kv := range strings.Split(meta, ":") {
+	for kv := range strings.SplitSeq(meta, ":") {
 		k, v, _ := strings.Cut(kv, "=")
 		switch k {
 		case "i":
@@ -686,7 +689,7 @@ func (t *Terminal) handleOSC22(value string) {
 	switch op {
 	case '?':
 		var ans []string
-		for _, n := range strings.Split(value, ",") {
+		for n := range strings.SplitSeq(value, ",") {
 			switch n {
 			case "__current__":
 				ans = append(ans, cmpOr(t.currentPointer(), "default"))
@@ -703,7 +706,7 @@ func (t *Terminal) handleOSC22(value string) {
 		t.reply("\x1b]22;" + strings.Join(ans, ",") + t.oscEnd())
 		return
 	case '>':
-		for _, n := range strings.Split(value, ",") {
+		for n := range strings.SplitSeq(value, ",") {
 			if s, ok := normalizePointer(n); ok && len(*st) < maxPointerStack {
 				*st = append(*st, s)
 			}
@@ -717,7 +720,7 @@ func (t *Terminal) handleOSC22(value string) {
 			*st = nil
 			break
 		}
-		for _, n := range strings.Split(value, ",") {
+		for n := range strings.SplitSeq(value, ",") {
 			if s, ok := normalizePointer(n); ok {
 				if len(*st) == 0 {
 					*st = append(*st, s)
@@ -799,24 +802,24 @@ func (t *Terminal) UserVars() map[string]string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	out := make(map[string]string, len(t.osc.userVars))
-	for k, v := range t.osc.userVars {
-		out[k] = v
-	}
+	maps.Copy(out, t.osc.userVars)
 	return out
 }
 
 // --- OSC 66 text sizing ---
 
-// handleOSC66 implements kitty text sizing: s (scale, 1-7) and w (width in
-// cells, 0 = natural). The text occupies s*w cells on s rows; it is drawn at
-// 1x on the first row and the rows below are blanked.
+// handleOSC66 implements kitty text sizing: s (scale, 1-7), w (width in
+// cells, 0 = natural), n/d (fractional scale), v/h (alignment of fractionally
+// scaled text). The text occupies s*w cells on s rows; the cells hold it at
+// 1x for copying and the block is recorded on each row for the renderer.
 func (t *Terminal) handleOSC66(value string) {
 	meta, text, ok := strings.Cut(value, ";")
 	if !ok || text == "" || len(text) > maxSizedText {
 		return
 	}
-	s, w := 1, 0
-	for _, kv := range strings.Split(meta, ":") {
+	st := grid.SizedText{Scale: 1}
+	w := 0
+	for kv := range strings.SplitSeq(meta, ":") {
 		k, v, _ := strings.Cut(kv, "=")
 		n, err := strconv.Atoi(v)
 		if err != nil {
@@ -824,10 +827,25 @@ func (t *Terminal) handleOSC66(value string) {
 		}
 		switch k {
 		case "s":
-			s = min(max(n, 1), 7)
+			st.Scale = min(max(n, 1), 7)
 		case "w":
 			w = min(max(n, 0), 7)
+		case "n":
+			st.Num = min(max(n, 0), 15)
+		case "d":
+			st.Den = min(max(n, 0), 15)
+		case "v":
+			if n >= 0 && n <= 2 {
+				st.VAlign = n
+			}
+		case "h":
+			if n >= 0 && n <= 2 {
+				st.HAlign = n
+			}
 		}
+	}
+	if st.Num == 0 || st.Den == 0 || st.Num >= st.Den {
+		st.Num, st.Den = 0, 0
 	}
 	var runes []rune
 	natural := 0
@@ -843,28 +861,28 @@ func (t *Terminal) handleOSC66(value string) {
 		cells = natural
 	}
 	g := t.Grid
-	total := min(s*cells, g.Cols)
+	total := min(st.Scale*cells, g.Cols)
 	if total == 0 {
 		return
 	}
-	if s > 1 {
-		if g.CursorCol+total > g.Cols {
-			g.CarriageReturnLocked()
-			g.NewlineLocked()
-		}
-		for i := 1; i < s; i++ {
-			g.NewlineLocked()
-		}
-		g.MoveCursorLocked(0, -(s - 1))
-		col, row := g.CursorCol, g.CursorRow
-		for i := 1; i < s; i++ {
-			g.SetCursorPosLocked(col+1, row+i+1)
-			for range total {
-				g.WriteCharLocked(' ', t.currentFg, t.currentBg, t.currentFlags, 0, 0, grid.Color{})
-			}
-		}
-		g.SetCursorPosLocked(col+1, row+1)
+	if g.WrapPendingLocked() && g.GetAutoWrapLocked() || g.CursorCol+total > g.Cols {
+		g.CarriageReturnLocked()
+		g.NewlineLocked()
 	}
+	if st.Scale > 1 {
+		for i := 1; i < st.Scale; i++ {
+			g.NewlineLocked()
+		}
+		g.MoveCursorLocked(0, -(st.Scale - 1))
+	}
+	col, row := g.CursorCol, g.CursorRow
+	for i := 1; i < st.Scale; i++ {
+		g.SetCursorPosLocked(col+1, row+i+1)
+		for range total {
+			g.WriteCharLocked(' ', t.currentFg, t.currentBg, t.currentFlags, 0, 0, grid.Color{})
+		}
+	}
+	g.SetCursorPosLocked(col+1, row+1)
 	used := 0
 	for _, r := range runes {
 		rw := grid.RuneWidth(r)
@@ -877,6 +895,8 @@ func (t *Terminal) handleOSC66(value string) {
 	for ; used < total; used++ {
 		t.printRune(' ')
 	}
+	st.Cells, st.Text = total, string(runes)
+	g.PutSizedTextLocked(col, row, st)
 }
 
 func parseOSC7Path(value string) string {

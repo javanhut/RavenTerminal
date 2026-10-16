@@ -218,10 +218,7 @@ func (t *Terminal) csiPlain(final byte, params []int) {
 		t.handleDSR(params, false)
 	case 'r': // DECSTBM
 		top := t.getParam(params, 0, 1)
-		bottom := t.getParam(params, 1, g.Rows)
-		if bottom > g.Rows {
-			bottom = g.Rows
-		}
+		bottom := min(t.getParam(params, 1, g.Rows), g.Rows)
 		if top < bottom {
 			g.RestoreScrollRegionLocked(top, bottom)
 			t.home()
@@ -319,6 +316,12 @@ func (t *Terminal) csiIntermediate(inter, final byte, params []int) {
 		t.softReset()
 	case inter == '$' && final == 'p': // DECRQM (ANSI)
 		t.handleDECRQM(params, false)
+	case inter == '#' && final == 'P': // XTPUSHCOLORS
+		t.pushColors(t.getParam(params, 0, 0))
+	case inter == '#' && final == 'Q': // XTPOPCOLORS
+		t.popColors(t.getParam(params, 0, 0))
+	case inter == '#' && final == 'R': // XTREPORTCOLORS
+		t.reportColors()
 	}
 }
 

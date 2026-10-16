@@ -133,9 +133,7 @@ func TestWriteSessionAtomic(t *testing.T) {
 	path := filepath.Join(dir, "session.json")
 	var wg sync.WaitGroup
 	for i := range 32 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			s := session{ActiveIndex: i}
 			for j := 0; j <= i; j++ {
 				s.Tabs = append(s.Tabs, tab.Layout{Dir: fmt.Sprintf("/dir/%d/%d", i, j)})
@@ -143,7 +141,7 @@ func TestWriteSessionAtomic(t *testing.T) {
 			if err := writeSession(path, s); err != nil {
 				t.Error(err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	got, err := readSession(path)

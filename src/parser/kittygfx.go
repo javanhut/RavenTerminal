@@ -101,7 +101,7 @@ func (t *Terminal) handleAPC(buf []byte) {
 	}
 
 	switch ctrl["a"] {
-	case "", "t", "T", "q":
+	case "", "t", "T", "q", "f":
 		if ctrl["m"] == "1" {
 			t.pendingKitty = &kittyTransmit{ctrl: ctrl}
 			t.pendingKitty.buf.Write(data)
@@ -112,6 +112,10 @@ func (t *Terminal) handleAPC(buf []byte) {
 		t.kittyPlace(ctrl)
 	case "d":
 		t.kittyDelete(ctrl)
+	case "a":
+		t.kittyAnimate(ctrl)
+	case "c":
+		t.kittyCompose(ctrl)
 	default:
 		t.kittyReply(ctrl, images.ImageID(ctrlInt(ctrl, "i", 0)), kerr("EINVAL", "unsupported action"))
 	}
@@ -149,6 +153,10 @@ func ctrlInt(m map[string]string, key string, def int) int {
 // kittyFinishTransmit loads, decodes and stores (or for a=q only validates)
 // a complete transmission.
 func (t *Terminal) kittyFinishTransmit(ctrl map[string]string, data []byte) {
+	if ctrl["a"] == "f" {
+		t.kittyFrame(ctrl, data)
+		return
+	}
 	img, err := loadKittyImage(ctrl, data)
 	if ctrl["a"] == "q" {
 		t.kittyReply(ctrl, images.ImageID(ctrlInt(ctrl, "i", 0)), err)
@@ -354,29 +362,29 @@ func (t *Terminal) placeImage(img *images.Image, ctrl map[string]string) error {
 	cols, rows = min(cols, maxKittyCells), min(rows, maxKittyCells)
 	virtual := ctrl["U"] == "1"
 	col, _ := t.Grid.GetCursorLocked()
-	anchorCol, anchorRow := col, t.Grid.AbsoluteCursorRowLocked()
-	relative := false
-	if pid := ctrlInt(ctrl, "P", 0); pid > 0 {
-		parent := t.findPlacement(images.ImageID(pid), uint32(ctrlInt(ctrl, "Q", 0)))
-		if parent == nil {
-			return kerr("ENOPARENT", "parent placement not found")
-		}
-		anchorCol = max(parent.AnchorCol+ctrlInt(ctrl, "H", 0), 0)
-		anchorRow = parent.AnchorAbsRow + ctrlInt(ctrl, "V", 0)
-		relative = true
-	}
-	t.activeImages().Place(&images.Placement{
+	p := &images.Placement{
 		ImageID:      img.ID,
 		PlacementID:  uint32(ctrlInt(ctrl, "p", 0)),
-		AnchorAbsRow: anchorRow,
-		AnchorCol:    anchorCol,
+		AnchorAbsRow: t.Grid.AbsoluteCursorRowLocked(),
+		AnchorCol:    col,
 		Cols:         cols,
 		Rows:         rows,
 		ZIndex:       ctrlInt(ctrl, "z", 0),
 		SrcX:         sx, SrcY: sy, SrcW: sw, SrcH: sh,
 		OffsetX: ox, OffsetY: oy,
 		Virtual: virtual,
-	})
+	}
+	relative := false
+	if pid := ctrlInt(ctrl, "P", 0); pid > 0 && !virtual {
+		p.ParentImage, p.ParentPlacement = images.ImageID(pid), uint32(ctrlInt(ctrl, "Q", 0))
+		p.RelCol, p.RelRow = ctrlInt(ctrl, "H", 0), ctrlInt(ctrl, "V", 0)
+		if err := t.activeImages().PlaceRelative(p); err != nil {
+			return err
+		}
+		relative = true
+	} else {
+		t.activeImages().Place(p)
+	}
 	t.Grid.MarkScreenDirtyLocked()
 	if virtual || relative || ctrl["C"] == "1" {
 		return nil
@@ -387,15 +395,6 @@ func (t *Terminal) placeImage(img *images.Image, ctrl map[string]string) error {
 	}
 	_, row := t.Grid.GetCursorLocked()
 	t.Grid.SetCursorLocked(min(col+cols, t.Grid.Cols-1), row)
-	return nil
-}
-
-func (t *Terminal) findPlacement(id images.ImageID, pid uint32) *images.Placement {
-	for _, p := range t.activeImages().Placements() {
-		if p.ImageID == id && p.PlacementID == pid {
-			return p
-		}
-	}
 	return nil
 }
 
@@ -481,9 +480,10 @@ func (t *Terminal) kittyReply(ctrl map[string]string, id images.ImageID, err err
 	}
 	msg := "OK"
 	if err != nil {
-		var ke *kittyError
-		if errors.As(err, &ke) {
+		if ke, ok := errors.AsType[*kittyError](err); ok {
 			msg = ke.Error()
+		} else if ie, ok := errors.AsType[*images.Error](err); ok {
+			msg = ie.Error()
 		} else {
 			msg = "EINVAL:" + err.Error()
 		}

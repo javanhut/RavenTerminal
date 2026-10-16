@@ -15,7 +15,7 @@ func terminfoCaps(t *testing.T) map[string]*string {
 		t.Fatal(err)
 	}
 	var body strings.Builder
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		if s := strings.TrimSpace(line); s != "" && !strings.HasPrefix(s, "#") {
 			body.WriteString(s)
 		}

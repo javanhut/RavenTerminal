@@ -297,7 +297,10 @@ func (a *App) runPaletteEntry(t *tab.Tab, e paletteEntry) {
 	}
 }
 
-// drawUXOverlays draws the open overlay and the zoom/broadcast badges.
+// terminalCursorAllowed is false while an overlay draws its own cursor.
+func (a *App) terminalCursorAllowed() bool { return a.ux.copy == nil }
+
+// drawUXOverlays draws the open overlay and the broadcast frame.
 func (a *App) drawUXOverlays(t *tab.Tab, width, height int) {
 	if t == nil {
 		return
@@ -306,15 +309,8 @@ func (a *App) drawUXOverlays(t *tab.Tab, width, height int) {
 	if (a.ux.hints != nil && a.ux.hints.pane != pane) || (a.ux.copy != nil && a.ux.copy.pane != pane) {
 		a.closeUX()
 	}
-	var badges []string
-	if t.Zoomed() {
-		badges = append(badges, "ZOOM")
-	}
 	if t.Broadcasting() {
-		badges = append(badges, "BROADCAST")
-		a.renderer.DrawPaneBadges(t, nil, badges, true, width, height)
-	} else if len(badges) > 0 {
-		a.renderer.DrawPaneBadges(t, pane, badges, false, width, height)
+		a.renderer.DrawBroadcastFrame(t, width, height)
 	}
 	switch {
 	case a.ux.hints != nil:

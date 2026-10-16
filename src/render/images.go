@@ -412,6 +412,9 @@ func (r *Renderer) prepareImages(f *parser.RenderFrame, offX, offY, paneW, paneH
 	pi := &r.paneImgs
 	pi.frame, pi.offX, pi.offY, pi.paneW, pi.paneH = f, offX, offY, paneW, paneH
 	pi.below, pi.under, pi.over = splitLayers(f.Placements, pi.below, pi.under, pi.over)
+	if !f.NextAnimFrame.IsZero() {
+		r.animUntil(f.NextAnimFrame) // a running kitty animation
+	}
 	if f.ImageStore != nil {
 		r.imageCache().sweepStore(f.ImageStore, f.Images)
 	}
@@ -444,8 +447,8 @@ func (r *Renderer) drawPlaceholders(proj [16]float32) {
 	}
 	for _, ph := range r.placeholders {
 		var p *images.Placement
-		for i := len(pi.frame.Virtuals) - 1; i >= 0; i-- {
-			v := pi.frame.Virtuals[i]
+		for _, v := range slices.Backward(pi.frame.Virtuals) {
+
 			if uint32(v.ImageID) == ph.info.id && (ph.info.pid == 0 || v.PlacementID == ph.info.pid) {
 				p = v
 				break

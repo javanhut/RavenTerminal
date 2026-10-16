@@ -6,6 +6,7 @@ import (
 
 	"github.com/javanhut/RavenTerminal/src/grid"
 	"github.com/javanhut/RavenTerminal/src/tab"
+	"github.com/rivo/uniseg"
 )
 
 // Effects are the renderer's visual options (wired from config).
@@ -316,11 +317,16 @@ func (r *Renderer) SetPreedit(text string, cursorBytes int) {
 // shifted left so it stays inside cols.
 func preeditLayout(text string, cursorBytes, cursorCol, cols int) (start, cells, caret int) {
 	caret = -1
-	for i, ch := range text {
-		if i == cursorBytes {
+	for n, state := 0, -1; n < len(text); {
+		cluster, _, _, st := uniseg.FirstGraphemeClusterInString(text[n:], state)
+		w := textCells(cluster)
+		if caret < 0 && cursorBytes >= n && cursorBytes < n+len(cluster) {
 			caret = cells
+			if cursorBytes > n {
+				caret += w // inside a cluster: after it
+			}
 		}
-		cells += runeCells(ch)
+		n, state, cells = n+len(cluster), st, cells+w
 	}
 	if cursorBytes == len(text) && cursorBytes >= 0 {
 		caret = cells
@@ -332,11 +338,8 @@ func preeditLayout(text string, cursorBytes, cursorCol, cols int) (start, cells,
 	return start, cells, caret
 }
 
-func runeCells(ch rune) int {
-	if grid.RuneWidth(ch) == 2 {
-		return 2
-	}
-	return 1
+func (r *Renderer) drawPreeditText(px, py float32, text string, fg [4]float32, proj [16]float32) {
+	r.drawText(px, py+r.cellHeight, text, fg, proj)
 }
 
 func (r *Renderer) drawPreedit(cursorCol, cursorRow, cols int, x, y float32, proj [16]float32) {
@@ -348,11 +351,7 @@ func (r *Renderer) drawPreedit(cursorCol, cursorRow, cols int, x, y float32, pro
 	py := y + float32(cursorRow)*r.cellHeight
 	fg := r.defaultFg()
 	r.drawRect(px, py, float32(cells)*r.cellWidth, r.cellHeight, r.defaultBg(), proj)
-	cx := px
-	for _, ch := range r.preedit {
-		r.drawChar(cx, py+r.cellHeight, ch, fg, proj)
-		cx += float32(runeCells(ch)) * r.cellWidth
-	}
+	r.drawPreeditText(px, py, r.preedit, fg, proj)
 	r.drawRect(px, py+r.cellHeight-2, float32(cells)*r.cellWidth, 1, fg, proj)
 	if caret >= 0 {
 		r.drawRect(px+float32(caret)*r.cellWidth, py, 2, r.cellHeight, r.cursorColor(), proj)

@@ -15,7 +15,6 @@ import (
 	"math"
 	"os"
 	"runtime"
-	"slices"
 	"strings"
 	"time"
 
@@ -345,7 +344,9 @@ type asciiGlyphSlot struct {
 // Renderer handles OpenGL rendering with smooth fonts
 type Renderer struct {
 	theme           Theme
-	cellWidth       float32 // Current cell dimensions (may be zoomed)
+	copyStatusBox   *uiBox   // this frame's copy-mode status, kept clear of the toast
+	rectClip        *clipBox // drawRect clips to this while set
+	cellWidth       float32  // Current cell dimensions (may be zoomed)
 	cellHeight      float32
 	fontSize        float32 // Current font size
 	baseFontSize    float32 // Base font size (16.0)
@@ -426,6 +427,10 @@ type Renderer struct {
 	// immediate decoration draws (block elements, underline, strikethrough),
 	// so pass 2 doesn't re-scan the whole grid.
 	pass2 []pass2Item
+	// scaledGlyphs is scratch for DECDWL/DECDHL rows and OSC 66 sized text,
+	// sizedCells for laying out the latter (scaledrows.go).
+	scaledGlyphs glyphBatch
+	sizedCells   []grid.Cell
 	// atlasGen increments whenever an atlas page drawn from in the current
 	// batch is recycled (invalidating UVs already recorded); renderGridAt uses
 	// it to detect that mid-pass and re-record the batch.
@@ -536,6 +541,42 @@ type pass2Item struct {
 	x, y     float32
 	fg       [4]float32
 	hovered  bool
+	ls       grid.LineSize // DECDWL/DECDHL: decorations span two cells
+}
+
+// drawPass2 draws a cell's block element, underline, strikethrough and
+// overline. On a DECDWL/DECDHL row they are laid out on the doubled cell the
+// glyph fills; a double-height row shows the half of it that falls in the row.
+func (r *Renderer) drawPass2(it *pass2Item, cell grid.Cell, proj [16]float32) {
+	x, y := it.x, it.y
+	cw, ch := r.cellWidth, r.cellHeight
+	switch it.ls {
+	case grid.LineDoubleWidth:
+		r.cellWidth = 2 * cw
+	case grid.LineDoubleTop, grid.LineDoubleBottom:
+		r.cellWidth, r.cellHeight = 2*cw, 2*ch
+		r.rectClip = &clipBox{-math.MaxFloat32, it.y, math.MaxFloat32, it.y + ch}
+		if it.ls == grid.LineDoubleBottom {
+			y -= ch
+		}
+	}
+	defer func() { r.cellWidth, r.cellHeight, r.rectClip = cw, ch, nil }()
+	if isGeometryRune(cell.Char) {
+		r.drawGeometryRune(x, y, cell.Char, it.fg, proj)
+	}
+	if cell.Flags&grid.FlagUnderline != 0 || it.hovered {
+		ulColor := it.fg
+		if !it.hovered && cell.UnderlineColor.Type != grid.ColorDefault {
+			ulColor = r.colorToRGBA(cell.UnderlineColor, false)
+		}
+		r.drawUnderlineStyled(x, y, ulColor, proj, underlineStyleFor(cell, it.hovered, r.undercurl))
+	}
+	if cell.Flags&grid.FlagStrikethrough != 0 {
+		r.drawRect(x, y+r.cellHeight/2, r.cellWidth, 1, it.fg, proj)
+	}
+	if cell.Flags&grid.FlagOverline != 0 {
+		r.drawRect(x, y, r.cellWidth, max32(1, r.cellHeight/18), it.fg, proj)
+	}
 }
 
 // SetTabBarVisible shows or hides the left tab bar (and its reserved layout width).
@@ -831,6 +872,7 @@ func (r *Renderer) RenderWithHelp(tm *tab.TabManager, width, height int, cursorV
 	gl.Clear(gl.COLOR_BUFFER_BIT)
 
 	// Render tab bar
+	r.copyStatusBox = nil
 	r.renderTabBar(tm, width, height, proj)
 
 	// Render terminal content with split pane support
@@ -855,6 +897,7 @@ func (r *Renderer) RenderWithHelpAndPanels(tm *tab.TabManager, width, height int
 	gl.Clear(gl.COLOR_BUFFER_BIT)
 
 	// Render tab bar
+	r.copyStatusBox = nil
 	r.renderTabBar(tm, width, height, proj)
 
 	// Render terminal content with split pane support
@@ -2103,6 +2146,7 @@ func (r *Renderer) RenderWithMenu(tm *tab.TabManager, width, height int, cursorV
 	gl.Clear(gl.COLOR_BUFFER_BIT)
 
 	// Render tab bar
+	r.copyStatusBox = nil
 	r.renderTabBar(tm, width, height, proj)
 
 	// Render terminal content with split pane support
@@ -2594,13 +2638,23 @@ func (r *Renderer) HitTestPane(t *tab.Tab, x, y float64, width, height int) (*ta
 			continue
 		}
 		g := rect.pane.Terminal.GetGrid()
-		col := int((fx - rect.x) / r.cellWidth)
-		row := int((fy - rect.y) / r.cellHeight)
-		col = clampInt(col, 0, g.Cols-1)
-		row = clampInt(row, 0, g.Rows-1)
+		row := clampInt(int((fy-rect.y)/r.cellHeight), 0, g.Rows-1)
+		col := CellColumn(fx-rect.x, r.cellWidth, g.ViewLineSize(row), g.Cols)
 		return rect.pane, col, row, true
 	}
 	return nil, 0, 0, false
+}
+
+// CellColumn maps an x offset into a pane to a column of a row of the given
+// line size: double-width and double-height rows draw each cell two columns
+// wide and use only half the columns.
+func CellColumn(dx, cellW float32, size grid.LineSize, cols int) int {
+	lim := cols
+	if size.Doubled() {
+		cellW *= 2
+		lim = max(cols/2, 1)
+	}
+	return clampInt(int(dx/cellW), 0, lim-1)
 }
 
 // PaneRectFor returns the rect for a specific pane in LOGICAL (cursor
@@ -2906,6 +2960,12 @@ func (r *Renderer) renderTabBar(tm *tab.TabManager, width, height int, proj [16]
 			r.drawTextScaled(badgeX, baseline, badge, badgeClr, proj, g.scale)
 			labelRight = badgeX - 6
 		}
+		for _, tag := range tabTags(t) {
+			w := float32(textCells(tag)) * charW
+			labelRight -= w
+			r.drawTextScaled(labelRight, baseline, tag, [4]float32{0.95, 0.45, 0.15, 1}, proj, g.scale)
+			labelRight -= 6
+		}
 
 		// Directory label, truncated so it never collides with the badge.
 		label := tabLabel(t, home)
@@ -3024,18 +3084,17 @@ func truncateToWidth(s string, maxW, charW float32) string {
 	if maxW <= 0 || charW <= 0 {
 		return ""
 	}
-	runes := []rune(s)
 	maxChars := int(maxW / charW)
 	if maxChars <= 0 {
 		return ""
 	}
-	if len(runes) <= maxChars {
+	if textCells(s) <= maxChars {
 		return s
 	}
 	if maxChars == 1 {
 		return "…"
 	}
-	return string(runes[:maxChars-1]) + "…"
+	return s[:clusterPrefix(s, maxChars-1)] + "…"
 }
 
 // drawRoundedRect draws a filled rectangle with rounded corners of the given radius,
@@ -3135,23 +3194,7 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 	// Items are never hidden cells (filtered in pass 1).
 	for i := range r.pass2 {
 		it := &r.pass2[i]
-		cell := snap.Cells[it.row*cols+it.col]
-		if isGeometryRune(cell.Char) {
-			r.drawGeometryRune(it.x, it.y, cell.Char, it.fg, proj)
-		}
-		if cell.Flags&grid.FlagUnderline != 0 || it.hovered {
-			ulColor := it.fg
-			if !it.hovered && cell.UnderlineColor.Type != grid.ColorDefault {
-				ulColor = r.colorToRGBA(cell.UnderlineColor, false)
-			}
-			r.drawUnderlineStyled(it.x, it.y, ulColor, proj, underlineStyleFor(cell, it.hovered, r.undercurl))
-		}
-		if cell.Flags&grid.FlagStrikethrough != 0 {
-			r.drawRect(it.x, it.y+r.cellHeight/2, r.cellWidth, 1, it.fg, proj)
-		}
-		if cell.Flags&grid.FlagOverline != 0 {
-			r.drawRect(it.x, it.y, r.cellWidth, max32(1, r.cellHeight/18), it.fg, proj)
-		}
+		r.drawPass2(it, snap.Cells[it.row*cols+it.col], proj)
 	}
 	r.drawPlacements(r.paneImgs.over, proj)
 
@@ -3160,6 +3203,11 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 		cursorCol, cursorRow := snap.CursorCol, snap.CursorRow
 		cursorX := offsetX + float32(cursorCol)*r.cellWidth
 		cursorY := offsetY + float32(cursorRow)*r.cellHeight
+		if snap.LineSize(cursorRow) != grid.LineSingle {
+			cursorX += float32(cursorCol) * r.cellWidth
+			r.cellWidth *= 2
+			defer func(cw float32) { r.cellWidth = cw }(r.cellWidth / 2)
+		}
 
 		// Only draw cursor if within pane bounds
 		if cursorX+r.cellWidth <= offsetX+paneWidth && cursorY+r.cellHeight <= offsetY+paneHeight {
@@ -3182,7 +3230,7 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 				// Redraw character under cursor in inverse
 				if cell.Char != ' ' && cell.Char != 0 && cell.Flags&grid.FlagHidden == 0 {
 					if !r.drawGeometryRune(cursorX, cursorY, cell.Char, r.defaultBg(), proj) {
-						r.drawCellGlyph(cursorX, cursorY, cell, r.defaultBg(), proj)
+						r.drawCursorGlyph(snap, cursorCol, cursorRow, cursorX, cursorY, offsetX, paneWidth, proj)
 					}
 				}
 			}
@@ -3241,12 +3289,24 @@ func (r *Renderer) buildGridBatches(snap *grid.Snapshot, offsetX, offsetY, paneW
 		y := offsetY + float32(row)*r.cellHeight
 		hoverLo, hoverHi := r.hoverColsForRow(hover, row, cols)
 		prevPH = placeholderInfo{}
-		r.prepareRowShaping(rowCells[:maxCol])
-		for col := range maxCol {
+		rowMax, cw, rw := maxCol, r.cellWidth, rectW
+		ls := snap.LineSize(row)
+		if ls != grid.LineSingle {
+			cw = 2 * r.cellWidth
+			rw = cw + 0.5
+			rowMax = fitCells(offsetX, cw, max(cols/2, 1), offsetX+paneWidth)
+		}
+		var sized []grid.SizedText
+		if ls == grid.LineSingle {
+			sized = snap.SizedText(row)
+		}
+		r.prepareRowShaping(rowCells[:rowMax])
+		for col := range rowMax {
 			cell := rowCells[col]
-			x := offsetX + float32(col)*r.cellWidth
+			x := offsetX + float32(col)*cw
 
 			inverse := cell.Flags&grid.FlagInverse != 0
+			cellBg := bgTheme
 			// Fast path: a default background without inverse is exactly the
 			// theme background, which draws no rect — skip the color math.
 			if cell.Bg.Type != grid.ColorDefault || inverse {
@@ -3255,18 +3315,20 @@ func (r *Renderer) buildGridBatches(snap *grid.Snapshot, offsetX, offsetY, paneW
 					bgColor = r.colorToRGBA(cell.Fg, false)
 				}
 				if bgColor != bgTheme {
-					r.gridRects.addRect(x, y, rectW, r.cellHeight, bgColor)
+					r.gridRects.addRect(x, y, rw, r.cellHeight, bgColor)
 				}
+				cellBg = bgColor
 			}
 			if selActive && snap.Selected(col, row) {
-				r.gridRects.addRect(x, y, rectW, r.cellHeight, selColor)
+				r.gridRects.addRect(x, y, rw, r.cellHeight, selColor)
+				cellBg = mixColor(cellBg, selColor, selColor[3])
 			}
 
 			if cell.Width == grid.CellWidthContinuation {
 				continue
 			}
 
-			hidden := cell.Flags&grid.FlagHidden != 0
+			hidden := cell.Flags&grid.FlagHidden != 0 || len(sized) > 0 && inSized(sized, col)
 			if cell.Char == placeholderRune {
 				prevPH = decodePlaceholder(cell, prevPH)
 				r.placeholders = append(r.placeholders, placeholderDraw{x: x, y: y, info: prevPH})
@@ -3307,13 +3369,25 @@ func (r *Renderer) buildGridBatches(snap *grid.Snapshot, offsetX, offsetY, paneW
 			}
 			if needDecor {
 				r.pass2 = append(r.pass2, pass2Item{
-					col: col, row: row, x: x, y: y, fg: fgColor, hovered: hovered,
+					col: col, row: row, x: x, y: y, fg: fgColor, hovered: hovered, ls: ls,
 				})
 			}
 
 			if needGlyph {
-				r.emitCellGlyph(&r.gridGlyphs, rowCells, col, x, y, offsetX+paneWidth, fgColor)
+				r.gridGlyphs.setBg(cellBg)
+				r.scaledGlyphs.setBg(cellBg)
+				if ls != grid.LineSingle {
+					r.emitCellGlyph(&r.scaledGlyphs, rowCells, col, offsetX+float32(col)*r.cellWidth, y, offsetX+paneWidth/2, fgColor)
+				} else {
+					r.emitCellGlyph(&r.gridGlyphs, rowCells, col, x, y, offsetX+paneWidth, fgColor)
+				}
 			}
+		}
+		if ls != grid.LineSingle {
+			r.flushScaledRow(ls, offsetX, y, offsetX+paneWidth)
+		}
+		if len(sized) > 0 {
+			r.emitSizedText(rowCells, sized, offsetX, y, offsetX+paneWidth)
 		}
 	}
 }
@@ -3394,8 +3468,7 @@ func (r *Renderer) DrawToast(message string, width, height int) {
 		}
 	}
 
-	x := float32(width) - boxW - margin
-	y := float32(height) - boxH - margin
+	x, y := toastOrigin(float32(width), float32(height), boxW, boxH, margin, r.copyStatusBox)
 	bg := r.theme.TabBar
 	bg[3] = 0.85
 
@@ -3442,6 +3515,14 @@ func (r *Renderer) DrawFindBar(query, status string, width, height int) {
 
 // drawRect draws a colored rectangle
 func (r *Renderer) drawRect(x, y, w, h float32, clr [4]float32, proj [16]float32) {
+	if c := r.rectClip; c != nil {
+		x0, y0 := max(x, c.x0), max(y, c.y0)
+		x1, y1 := min(x+w, c.x1), min(y+h, c.y1)
+		if x1 <= x0 || y1 <= y0 {
+			return
+		}
+		x, y, w, h = x0, y0, x1-x0, y1-y0
+	}
 	r.uiEnsure(uiKindRect, proj)
 	r.uiRects.addRect(x, y, w, h, clr)
 }
@@ -3742,30 +3823,21 @@ func (r *Renderer) drawText(x, y float32, text string, clr [4]float32, proj [16]
 	r.drawTextStyled(x, y, text, clr, false, proj)
 }
 
-// drawTextStyled draws a string with optional faux-bold, advancing per rune
-// width exactly like drawText.
+// drawTextStyled draws a string, optionally bold, shaped like grid text
+// (ligatures, grapheme clusters, color emoji); y is the line's bottom.
 func (r *Renderer) drawTextStyled(x, y float32, text string, clr [4]float32, bold bool, proj [16]float32) {
-	for _, char := range text {
-		w := grid.RuneWidth(char)
-		if w == 0 {
-			// Combining marks / variation selectors have no cell of their own
-			// in panel text; skip rather than draw the '?' fallback glyph.
-			continue
-		}
-		r.drawCharStyled(x, y, char, clr, proj, bold, false)
-		x += r.cellWidth * float32(w)
-	}
+	r.drawShapedText(x, y-r.cellHeight, text, clr, bold, proj)
 }
 
 // textCells returns the number of terminal cells the string occupies when
-// drawn with drawText (wide runes such as emoji take two).
+// drawn with drawText: one per grapheme cluster, two for wide ones.
 func textCells(s string) int {
-	return grid.StringWidth(s)
+	return clusterCells(s)
 }
 
 // truncateToCells truncates s so it occupies at most max cells, appending an
-// ellipsis when something was cut. Safe for multibyte/wide runes (never slices
-// mid-rune, counts display cells rather than bytes).
+// ellipsis when something was cut. Cuts between grapheme clusters and counts
+// display cells rather than bytes.
 func truncateToCells(s string, max int) string {
 	if max <= 0 {
 		return ""
@@ -3777,16 +3849,7 @@ func truncateToCells(s string, max int) string {
 	if max < 4 {
 		ellipsis = "" // no room for the marker: hard-cut instead of overflowing
 	}
-	budget := max - textCells(ellipsis)
-	w := 0
-	for i, char := range s {
-		cw := grid.RuneWidth(char)
-		if w+cw > budget {
-			return s[:i] + ellipsis
-		}
-		w += cw
-	}
-	return s
+	return s[:clusterPrefix(s, max-textCells(ellipsis))] + ellipsis
 }
 
 // truncateHeadToCells keeps the tail of s so it occupies at most max cells,
@@ -3796,17 +3859,7 @@ func truncateHeadToCells(s string, max int) string {
 	if max <= 0 || textCells(s) <= max {
 		return s
 	}
-	budget := max - 3
-	runes := []rune(s)
-	w := 0
-	for i, rune := range slices.Backward(runes) {
-		cw := grid.RuneWidth(rune)
-		if w+cw > budget {
-			return "..." + string(runes[i+1:])
-		}
-		w += cw
-	}
-	return s
+	return "..." + s[clusterSuffix(s, max-3):]
 }
 
 // drawInputCursor draws a thin caret bar at x, sized to one text line. Using a
@@ -3818,43 +3871,10 @@ func (r *Renderer) drawInputCursor(x, textY float32, proj [16]float32) {
 	r.drawRect(x, textY-r.cellHeight, 2, r.cellHeight, r.theme.TabActive, proj)
 }
 
-// drawTextScaled draws text at a specific scale relative to current font
+// drawTextScaled draws shaped text at a specific scale relative to the
+// current font; y is the scaled line's bottom.
 func (r *Renderer) drawTextScaled(x, y float32, text string, clr [4]float32, proj [16]float32, scale float32) {
-	for _, char := range text {
-		r.drawCharScaled(x, y, char, clr, proj, scale)
-		x += r.cellWidth * scale
-	}
-}
-
-// drawCharScaled draws a character at a specific scale
-func (r *Renderer) drawCharScaled(x, y float32, char rune, clr [4]float32, proj [16]float32, scale float32) {
-	glyph, ok := r.lookupGlyph(char)
-	if !ok || glyph.PixelWidth == 0 {
-		return
-	}
-
-	// Calculate screen coordinates with scale; y is the (scaled) cell bottom,
-	// so the baseline sits ascent-from-top within the scaled cell box.
-	w := float32(glyph.PixelWidth) * scale
-	h := float32(glyph.PixelHeight) * scale
-	baseline := y - r.cellHeight*scale + float32(r.atlasAscent)*scale
-	gx := x + glyph.OffsetX*scale
-	gyTop := baseline + glyph.OffsetY*scale
-	gy := gyTop + h
-
-	// Texture coordinates
-	tx := glyph.X
-	ty := glyph.Y
-	tw := glyph.Width
-	th := glyph.Height
-
-	r.uiEnsure(uiKindGlyph, proj)
-	if r.uiAtlasGen != r.atlasGen {
-		r.uiGlyphs.reset()
-		r.uiAtlasGen = r.atlasGen
-	}
-	r.atlas.touch(int(glyph.Layer))
-	r.uiGlyphs.addGlyphL(gx, gy, w, h, tx, ty, tw, th, clr, 0, float32(glyph.Layer))
+	r.drawShapedTextScaled(x, y, text, clr, scale, proj)
 }
 
 // colorToRGBA converts a grid.Color to RGBA

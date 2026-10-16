@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"unicode"
 
 	"github.com/go-gl/glfw/v3.3/glfw"
@@ -208,8 +209,8 @@ func (c *copyMode) wordBack() {
 func (c *copyMode) lineEnd() {
 	rs := c.runes(c.abs)
 	c.col = 0
-	for i := len(rs) - 1; i >= 0; i-- {
-		if rs[i] != ' ' && rs[i] != 0 {
+	for i, r := range slices.Backward(rs) {
+		if r != ' ' && r != 0 {
 			c.col = i
 			return
 		}
@@ -243,8 +244,8 @@ func (c *copyMode) search(q string, back bool) {
 	pick := ms[0]
 	if back {
 		pick = ms[len(ms)-1]
-		for i := len(ms) - 1; i >= 0; i-- {
-			if m := ms[i]; m.StartAbsRow < c.abs || (m.StartAbsRow == c.abs && m.StartCol < c.col) {
+		for _, m := range slices.Backward(ms) {
+			if m.StartAbsRow < c.abs || (m.StartAbsRow == c.abs && m.StartCol < c.col) {
 				pick = m
 				break
 			}

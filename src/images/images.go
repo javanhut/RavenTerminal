@@ -17,6 +17,10 @@ type Image struct {
 	Height int    // pixels
 	Pixels []byte // RGBA, len == 4*Width*Height
 	seq    uint64
+	// Animation frames (anim.go); touched only under the owning store's
+	// lock, never by the renderer.
+	anim       *animation
+	extraBytes int
 }
 
 // Placement is one on-screen instance of an Image.
@@ -36,6 +40,12 @@ type Placement struct {
 	// Virtual placements (Kitty U=1) are not drawn directly; cells holding
 	// U+10EEEE placeholders reference them.
 	Virtual bool
+	// Relative placements (Kitty P/Q/H/V) sit RelCol/RelRow cells from their
+	// parent's anchor; the store keeps the anchor in step as the parent moves
+	// and deletes them with it (relative.go).
+	ParentImage     ImageID
+	ParentPlacement uint32
+	RelCol, RelRow  int
 }
 
 // Per-store caps on image and placement counts.
@@ -60,6 +70,7 @@ type Store struct {
 	seq        uint64
 	totalBytes int
 	maxBytes   int
+	relative   bool // a relative placement was made (relative.go)
 }
 
 // NewStore creates an image store with a total pixel-memory budget in bytes.
@@ -94,7 +105,7 @@ func (s *Store) AddInternal(width, height int, pixels []byte) *Image {
 
 func (s *Store) put(id ImageID, width, height int, pixels []byte) *Image {
 	if old, ok := s.images[id]; ok {
-		s.totalBytes -= cap(old.Pixels)
+		s.totalBytes -= cap(old.Pixels) + old.extraBytes
 	}
 	s.seq++
 	img := &Image{ID: id, Width: width, Height: height, Pixels: pixels, seq: s.seq}
@@ -150,6 +161,9 @@ func (s *Store) Place(p *Placement) {
 	}
 	// Appending past len never touches elements a caller already holds.
 	*list = append(cur, p)
+	if s.relative && !p.Virtual {
+		s.reposition(p)
+	}
 }
 
 // Placements returns the current real placements (caller must not mutate).
@@ -161,8 +175,8 @@ func (s *Store) VirtualPlacements() []*Placement { return s.virtuals }
 // VirtualPlacement finds the virtual placement for an image; pid 0 matches the
 // most recent one.
 func (s *Store) VirtualPlacement(id ImageID, pid uint32) (*Placement, bool) {
-	for i := len(s.virtuals) - 1; i >= 0; i-- {
-		p := s.virtuals[i]
+	for _, p := range slices.Backward(s.virtuals) {
+
 		if p.ImageID == id && (pid == 0 || p.PlacementID == pid) {
 			return p, true
 		}
@@ -181,7 +195,7 @@ func (s *Store) DeleteAll() {
 // DeleteImage removes an image and any placements referencing it.
 func (s *Store) DeleteImage(id ImageID) {
 	if img, ok := s.images[id]; ok {
-		s.totalBytes -= cap(img.Pixels)
+		s.totalBytes -= cap(img.Pixels) + img.extraBytes
 		delete(s.images, id)
 	}
 	s.dropPlacements(func(p *Placement) bool { return p.ImageID == id })
@@ -195,13 +209,9 @@ func (s *Store) DeletePlacements(remove func(*Placement) bool, free bool, candid
 	for _, id := range candidates {
 		touched[id] = true
 	}
-	s.dropPlacements(func(p *Placement) bool {
-		if remove(p) {
-			touched[p.ImageID] = true
-			return true
-		}
-		return false
-	})
+	for _, p := range s.dropPlacements(remove) {
+		touched[p.ImageID] = true
+	}
 	if !free {
 		return
 	}
@@ -241,21 +251,36 @@ func (s *Store) PrunePlacementsBelow(minAbsRow int) {
 			kept = append(kept, p)
 		}
 	}
-	s.placements = kept
+	if len(kept) != len(s.placements) {
+		s.placements = kept
+		s.dropPlacements(func(*Placement) bool { return false })
+	}
 }
 
-func (s *Store) dropPlacements(remove func(*Placement) bool) {
-	filter := func(in []*Placement) []*Placement {
+// dropPlacements removes the placements matching remove, then every relative
+// placement left without its parent, and returns what it removed.
+func (s *Store) dropPlacements(remove func(*Placement) bool) []*Placement {
+	var removed []*Placement
+	filter := func(in []*Placement, remove func(*Placement) bool) []*Placement {
 		kept := make([]*Placement, 0, len(in))
 		for _, p := range in {
-			if !remove(p) {
+			if remove(p) {
+				removed = append(removed, p)
+			} else {
 				kept = append(kept, p)
 			}
 		}
 		return kept
 	}
-	s.placements = filter(s.placements)
-	s.virtuals = filter(s.virtuals)
+	s.placements = filter(s.placements, remove)
+	s.virtuals = filter(s.virtuals, remove)
+	for {
+		n := len(removed)
+		s.placements = filter(s.placements, s.orphans())
+		if len(removed) == n {
+			return removed
+		}
+	}
 }
 
 func (s *Store) evictIfNeeded(keep ImageID) {

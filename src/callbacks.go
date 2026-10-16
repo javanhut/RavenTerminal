@@ -12,6 +12,7 @@ import (
 	"github.com/javanhut/RavenTerminal/src/config"
 	"github.com/javanhut/RavenTerminal/src/keybindings"
 	"github.com/javanhut/RavenTerminal/src/parser"
+	"github.com/javanhut/RavenTerminal/src/render"
 	"github.com/javanhut/RavenTerminal/src/searchpanel"
 	"github.com/javanhut/RavenTerminal/src/tab"
 
@@ -42,8 +43,8 @@ func (a *App) clampedPaneCell(activeTab *tab.Tab, pane *tab.Pane, x, y float64) 
 	}
 	cellW, cellH := a.renderer.CellSize()
 	g := pane.Terminal.GetGrid()
-	col := clampInt(int((fx-rectX)/cellW), 0, g.Cols-1)
 	row := clampInt(int((fy-rectY)/cellH), 0, g.Rows-1)
+	col := render.CellColumn(fx-rectX, cellW, g.ViewLineSize(row), g.Cols)
 	return col, row, true
 }
 
@@ -51,7 +52,7 @@ func (a *App) clampedPaneCell(activeTab *tab.Tab, pane *tab.Pane, x, y float64) 
 // mouse tracking mode is active (and shift is not held). Returns true when
 // the event was consumed.
 func (a *App) reportMousePress(pane *tab.Pane, btn, col, row int, shift bool) bool {
-	x, y := a.win.GLFW().GetCursorPos()
+	x, y := a.cursorPos()
 	act := parser.DecideMouse(a.mouseCtxAt(a.tabManager.ActiveTab(), pane, shift, x, y), parser.MousePress, btn, col, row, -1, false)
 	if act.Kind != parser.MouseActionSend {
 		return false
@@ -1183,7 +1184,7 @@ func (a *App) onScroll(w *glfw.Window, xoff, yoff float64) {
 
 		// The anchor is absolute (survives the scroll); just extend to the
 		// cell under the cursor in the new view.
-		x, y := w.GetCursorPos()
+		x, y := a.cursorPos()
 		if col, row, ok := a.clampedPaneCell(activeTab, pane, x, y); ok {
 			g.ExtendSelection(col, row)
 		}
@@ -1251,7 +1252,7 @@ func (a *App) onScroll(w *glfw.Window, xoff, yoff float64) {
 	// Route the wheel: app mouse reporting (buttons 64/65), alt-screen
 	// arrow-key translation, or local scrollback.
 	width, height := a.win.GetFramebufferSize()
-	x, y := w.GetCursorPos()
+	x, y := a.cursorPos()
 	if pane, col, row, ok := a.renderer.HitTestPane(activeTab, x, y, width, height); ok && pane != nil {
 		shift := w.GetKey(glfw.KeyLeftShift) == glfw.Press || w.GetKey(glfw.KeyRightShift) == glfw.Press
 		ctx := a.mouseCtxAt(activeTab, pane, shift, x, y)
@@ -1287,7 +1288,7 @@ func (a *App) onMouseButton(w *glfw.Window, button glfw.MouseButton, action glfw
 	// still gets its release.
 	if action == glfw.Press {
 		width, height := a.win.GetFramebufferSize()
-		x, y := w.GetCursorPos()
+		x, y := a.cursorPos()
 		s := a.renderer.ContentScale()
 		if a.fingerprintClick(width, height, float32(x)*s, float32(y)*s) {
 			return
@@ -1303,7 +1304,7 @@ func (a *App) onMouseButton(w *glfw.Window, button glfw.MouseButton, action glfw
 	}
 
 	width, height := a.win.GetFramebufferSize()
-	x, y := w.GetCursorPos()
+	x, y := a.cursorPos()
 
 	// A press that was forwarded to the application gets its matching
 	// release forwarded too, wherever the cursor ended up (shift state at
@@ -1632,6 +1633,15 @@ func (a *App) onMouseButton(w *glfw.Window, button glfw.MouseButton, action glfw
 			}
 		}
 	}
+}
+
+// cursorPos is where the cursor callback last put the pointer, which is
+// where GLFW has it too, and also where an injected IPC move left it.
+func (a *App) cursorPos() (float64, float64) {
+	if a.haveCursorPos {
+		return a.lastCursorX, a.lastCursorY
+	}
+	return a.win.GLFW().GetCursorPos()
 }
 
 func (a *App) onCursorPos(w *glfw.Window, xpos, ypos float64) {

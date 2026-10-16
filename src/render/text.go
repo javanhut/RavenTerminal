@@ -2,10 +2,12 @@ package render
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"unicode/utf8"
 
 	"github.com/go-text/typesetting/shaping"
+	"github.com/rivo/uniseg"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/opentype"
 	"golang.org/x/image/font/sfnt"
@@ -54,7 +56,9 @@ type textState struct {
 	keyBuf     []byte
 	wordRunes  []rune
 	ligRow     []ligCell
-	oneCell    [1]grid.Cell
+	textRow    []grid.Cell
+	textRunes  []rune
+	scaledText glyphBatch
 
 	textGamma    float32
 	textContrast float32
@@ -73,10 +77,15 @@ type placedGlyph struct {
 	dx, dy float32
 }
 
-// ligCell holds the shaped glyphs a ligature run assigns to one cell.
+// ligCell holds the shaped glyphs a ligature run anchors to one cell. Each
+// cell draws its own slice of every glyph whose ink reaches it (anchored at
+// cells lo..hi), so a ligature over differently coloured cells takes each
+// cell's colour. start/end bound the run; its outer edges are not clipped.
 type ligCell struct {
-	set    bool
-	glyphs []shapedGlyph
+	set        bool
+	glyphs     []shapedGlyph
+	lo, hi     int
+	start, end int
 }
 
 func (r *Renderer) ppem() fixed.Int26_6 {
@@ -461,15 +470,13 @@ func (r *Renderer) resolveCluster(text []rune, style uint8, span int) []placedGl
 	return []placedGlyph{}
 }
 
-// monoCluster shapes the cluster with the style face covering its base. Marks
-// that face lacks are drawn from the fallback chain at the pen after the base.
+// monoCluster shapes the cluster in one font so that font's mark positioning
+// applies (see clusterSrc). A mark no font shares with the base is drawn from
+// its own font, its advance box right-aligned with the base's.
 func (r *Renderer) monoCluster(text []rune, style uint8) []placedGlyph {
-	src, synth := r.styleFace(style)
-	if src.gid(text[0]) == 0 {
-		if src = r.srcFor(text[0]); src == nil {
-			return nil
-		}
-		synth = synthFor(style)
+	src, synth := r.clusterSrc(text, style)
+	if src == nil {
+		return nil
 	}
 	face := src.shapeFace()
 	if face == nil {
@@ -480,18 +487,8 @@ func (r *Renderer) monoCluster(text []rune, style uint8) []placedGlyph {
 		return []placedGlyph{{g: g}}
 	}
 	var out []placedGlyph
-	var baseAdv float32
-	if adv, ok := src.face.GlyphAdvance(text[0]); ok {
-		baseAdv = float32(adv) / 64
-	}
 	for _, sg := range r.shapeRunes(face, text, r.ppem()) {
 		if sg.gid == 0 {
-			c := text[min(sg.cell, len(text)-1)]
-			if fb := r.srcFor(c); fb != nil && c != text[0] {
-				if g, ok := r.gidGlyph(fb, uint32(fb.gid(c)), synth); ok && g.PixelWidth > 0 {
-					out = append(out, placedGlyph{g: g, dx: baseAdv})
-				}
-			}
 			continue
 		}
 		g, ok := r.gidGlyph(src, sg.gid, synth)
@@ -500,17 +497,89 @@ func (r *Renderer) monoCluster(text []rune, style uint8) []placedGlyph {
 		}
 		out = append(out, placedGlyph{g: g, dx: sg.dx, dy: sg.dy})
 	}
+	baseAdv := advance(src, text[0])
+	for _, c := range text[1:] {
+		if src.gid(c) != 0 || defaultIgnorable(c) {
+			continue
+		}
+		if fb := r.srcFor(c); fb != nil {
+			if g, ok := r.gidGlyph(fb, uint32(fb.gid(c)), synthFor(style)); ok && g.PixelWidth > 0 {
+				out = append(out, placedGlyph{g: g, dx: baseAdv - advance(fb, c)})
+			}
+		}
+	}
 	if len(out) == 0 {
 		return nil
 	}
 	return out
 }
 
-// emitGlyph appends a mono glyph quad with its pen at (penX, baseline).
-func (r *Renderer) emitPlaced(b *glyphBatch, pg placedGlyph, cellX, cellTop float32, span int, fg [4]float32) {
+func advance(src *fontSrc, c rune) float32 {
+	if adv, ok := src.face.GlyphAdvance(c); ok {
+		return float32(adv) / 64
+	}
+	return 0
+}
+
+// clusterSrc picks the font a cluster is shaped in: the style face when it
+// has every character, else the first font in the chain that does (so a
+// base plus a mark the primary lacks are shaped together), else the font
+// covering the base.
+func (r *Renderer) clusterSrc(text []rune, style uint8) (*fontSrc, synthStyle) {
+	src, synth := r.styleFace(style)
+	if coversCluster(src, text) {
+		return src, synth
+	}
+	for _, c := range text {
+		if !defaultIgnorable(c) && src.gid(c) == 0 {
+			r.srcFor(c) // loads system fallbacks on demand
+		}
+	}
+	if coversCluster(r.primary, text) {
+		return r.primary, synthFor(style)
+	}
+	for _, s := range r.fallbackSrcs {
+		if coversCluster(s, text) {
+			return s, synthFor(style)
+		}
+	}
+	if src.gid(text[0]) != 0 {
+		return src, synth
+	}
+	if s := r.srcFor(text[0]); s != nil {
+		return s, synthFor(style)
+	}
+	return nil, 0
+}
+
+func coversCluster(s *fontSrc, text []rune) bool {
+	for _, c := range text {
+		if s.gid(c) == 0 && !defaultIgnorable(c) {
+			return false
+		}
+	}
+	return true
+}
+
+// defaultIgnorable reports format characters the shaper hides (joiners,
+// variation selectors), which no font needs to contain.
+func defaultIgnorable(c rune) bool {
+	switch {
+	case c == 0x34F, c >= 0x180B && c <= 0x180F, c >= 0x200B && c <= 0x200F,
+		c >= 0x2060 && c <= 0x2064, c >= 0xFE00 && c <= 0xFE0F, c >= 0xE0100 && c <= 0xE01EF:
+		return true
+	}
+	return false
+}
+
+// emitPlaced appends a placed glyph: mono with its pen offset from the cell
+// origin on the baseline, color with its top-left offset from the cell's.
+func (r *Renderer) emitPlaced(b *glyphBatch, pg placedGlyph, cellX, cellTop float32, fg [4]float32) {
 	g := pg.g
 	if g.Color {
-		r.emitColor(b, g, cellX, cellTop, span, fg[3])
+		r.colorAtlas.touch(int(g.Layer))
+		w, h := float32(g.PixelWidth), float32(g.PixelHeight)
+		b.addGlyphL(cellX+pg.dx, cellTop+pg.dy+h, w, h, g.X, g.Y, g.Width, g.Height, [4]float32{1, 1, 1, fg[3]}, 0, -1-float32(g.Layer))
 		return
 	}
 	if g.PixelWidth == 0 {
@@ -572,7 +641,7 @@ func (r *Renderer) prepareRowShaping(row []grid.Cell) {
 					}
 				}
 				for k := i; k < j; k++ {
-					r.ligRow[k] = ligCell{set: true}
+					r.ligRow[k] = ligCell{set: true, lo: k, hi: k, start: i, end: j}
 				}
 				for a := 0; a < len(out); {
 					b := a + 1
@@ -582,9 +651,67 @@ func (r *Renderer) prepareRowShaping(row []grid.Cell) {
 					r.ligRow[i+out[a].cell].glyphs = out[a:b]
 					a = b
 				}
+				r.ligatureReach(style, i, j)
 			}
 		}
 		i = j
+	}
+}
+
+// ligatureReach widens each run cell's lo..hi to every anchor cell whose
+// glyph ink reaches into it.
+func (r *Renderer) ligatureReach(style uint8, start, end int) {
+	src, synth := r.styleFace(style)
+	cw := r.cellWidth
+	for a := start; a < end; a++ {
+		for _, sg := range r.ligRow[a].glyphs {
+			g, ok := r.gidGlyph(src, sg.gid, synth)
+			if !ok || g.PixelWidth <= 2*glyphPad {
+				continue
+			}
+			x0 := sg.dx + g.OffsetX + glyphPad
+			x1 := x0 + float32(g.PixelWidth-2*glyphPad)
+			c0 := a + int(math.Floor(float64(x0/cw)))
+			c1 := a + int(math.Ceil(float64(x1/cw))) - 1
+			for c := max(c0, start); c <= min(c1, end-1); c++ {
+				lc := &r.ligRow[c]
+				lc.lo, lc.hi = min(lc.lo, a), max(lc.hi, a)
+			}
+		}
+	}
+}
+
+// emitLigatureSlice appends this cell's slice of every ligature glyph that
+// reaches it, clipped to the cell with matching texture coordinates (as
+// kitty and WezTerm do), in the cell's colour.
+func (r *Renderer) emitLigatureSlice(b *glyphBatch, col int, style uint8, x, y float32, fg [4]float32) {
+	lc := &r.ligRow[col]
+	src, synth := r.styleFace(style)
+	clipL, clipR := x, x+r.cellWidth
+	if col == lc.start {
+		clipL = float32(math.Inf(-1))
+	}
+	if col == lc.end-1 {
+		clipR = float32(math.Inf(1))
+	}
+	baseline := y + float32(r.atlasAscent)
+	for a := lc.lo; a <= lc.hi; a++ {
+		ax := x + float32(a-col)*r.cellWidth
+		for _, sg := range r.ligRow[a].glyphs {
+			g, ok := r.gidGlyph(src, sg.gid, synth)
+			if !ok || g.PixelWidth == 0 {
+				continue
+			}
+			gx, pw := ax+sg.dx+g.OffsetX, float32(g.PixelWidth)
+			x0, x1 := max(gx, clipL), min(gx+pw, clipR)
+			if x0 >= x1 {
+				continue
+			}
+			r.atlas.touch(int(g.Layer))
+			h := float32(g.PixelHeight)
+			yTop := baseline + sg.dy + g.OffsetY
+			b.addGlyphL(x0, yTop+h, x1-x0, h, g.X+(x0-gx)/pw*g.Width, g.Y, (x1-x0)/pw*g.Width, g.Height, fg, 0, float32(g.Layer))
+		}
 	}
 }
 
@@ -598,17 +725,12 @@ func (r *Renderer) emitCellGlyph(b *glyphBatch, row []grid.Cell, col int, x, y, 
 		span = 2
 	}
 	if col < len(r.ligRow) && r.ligRow[col].set {
-		src, synth := r.styleFace(style)
-		for _, sg := range r.ligRow[col].glyphs {
-			if g, ok := r.gidGlyph(src, sg.gid, synth); ok {
-				r.emitPlaced(b, placedGlyph{g: g, dx: sg.dx, dy: sg.dy}, x, y, 1, fg)
-			}
-		}
+		r.emitLigatureSlice(b, col, style, x, y, fg)
 		return
 	}
 	if len(cell.Combining) > 0 {
 		for _, pg := range r.clusterGlyphs(cell.Char, cell.Combining, style, span) {
-			r.emitPlaced(b, pg, x, y, span, fg)
+			r.emitPlaced(b, pg, x, y, fg)
 		}
 		return
 	}
@@ -647,17 +769,166 @@ func (r *Renderer) emitCellGlyph(b *glyphBatch, row []grid.Cell, col int, x, y, 
 	b.addGlyphL(gx, gyTop+gh, gw, gh, g.X, g.Y, g.Width, g.Height, fg, 0, float32(g.Layer))
 }
 
-// drawCellGlyph draws one cell's glyphs (cluster, style, color emoji) into the
-// UI batch with its top-left at (x, yTop), e.g. the text under a block cursor.
-func (r *Renderer) drawCellGlyph(x, yTop float32, cell grid.Cell, clr [4]float32, proj [16]float32) {
+// drawCellGlyph draws the glyphs of row[col] (its slice of a ligature, a
+// cluster, styled text, color emoji) into the UI batch with its top-left at
+// (x, yTop), composed against bg: e.g. the text under a block cursor.
+func (r *Renderer) drawCellGlyph(x, yTop float32, row []grid.Cell, col int, clr, bg [4]float32, proj [16]float32) {
 	r.uiEnsure(uiKindGlyph, proj)
+	r.prepareRowShaping(row)
 	if r.uiAtlasGen != r.atlasGen {
 		r.uiGlyphs.reset()
 		r.uiAtlasGen = r.atlasGen
 	}
-	r.ligRow = r.ligRow[:0]
-	r.oneCell[0] = cell
-	r.emitCellGlyph(&r.uiGlyphs, r.oneCell[:], 0, x, yTop, x+2*r.cellWidth, clr)
+	r.uiGlyphs.setBg(bg)
+	r.emitCellGlyph(&r.uiGlyphs, row, col, x, yTop, x+2*r.cellWidth, clr)
+	r.uiGlyphs.clearBg()
+}
+
+// drawCursorGlyph redraws the text under a block cursor in the theme
+// background colour, shaped with the rest of its row.
+func (r *Renderer) drawCursorGlyph(snap *grid.Snapshot, col, row int, x, yTop, offsetX, paneWidth float32, proj [16]float32) {
+	if row < 0 || row >= snap.Rows || col < 0 || col >= snap.Cols {
+		return
+	}
+	cells := snap.Cells[row*snap.Cols : (row+1)*snap.Cols]
+	cells = cells[:max(col+1, fitCells(offsetX, r.cellWidth, len(cells), offsetX+paneWidth))]
+	r.drawCellGlyph(x, yTop, cells, col, r.defaultBg(), r.cursorColor(), proj)
+}
+
+// textLine lays text out as a row of cells, one per grapheme cluster, as
+// the grid stores it; zero-width clusters (stray format characters) are
+// dropped.
+func (r *Renderer) textLine(text string, bold bool) []grid.Cell {
+	row, runes := r.textRow[:0], r.textRunes[:0]
+	var flags grid.CellFlags
+	if bold {
+		flags = grid.FlagBold
+	}
+	for state := -1; text != ""; {
+		var cluster string
+		var w int
+		cluster, text, w, state = uniseg.FirstGraphemeClusterInString(text, state)
+		if w = grid.ClusterWidth(cluster); w <= 0 {
+			continue
+		}
+		cell := grid.NewCell()
+		cell.Flags = flags
+		n := len(runes)
+		for _, c := range cluster {
+			runes = append(runes, c)
+		}
+		cell.Char = runes[n]
+		if len(runes) > n+1 {
+			cell.Combining = runes[n+1 : len(runes) : len(runes)]
+		}
+		if w >= 2 {
+			cell.Width = grid.CellWidthWide
+			cont := grid.NewCell()
+			cont.Char = 0
+			cont.Width = grid.CellWidthContinuation
+			row = append(row, cell, cont)
+		} else {
+			row = append(row, cell)
+		}
+	}
+	r.textRow, r.textRunes = row, runes
+	return row
+}
+
+// clusterCells is the number of cells textLine lays text out in.
+func clusterCells(text string) int {
+	n := 0
+	for state := -1; text != ""; {
+		var cluster string
+		cluster, text, _, state = uniseg.FirstGraphemeClusterInString(text, state)
+		n += max(0, grid.ClusterWidth(cluster))
+	}
+	return n
+}
+
+// clusterPrefix returns the byte length of the longest run of whole
+// grapheme clusters at the start of s that fits in cells.
+func clusterPrefix(s string, cells int) int {
+	n, w := 0, 0
+	for state := -1; n < len(s); {
+		cluster, _, _, st := uniseg.FirstGraphemeClusterInString(s[n:], state)
+		cw := max(0, grid.ClusterWidth(cluster))
+		if w+cw > cells {
+			break
+		}
+		n, w, state = n+len(cluster), w+cw, st
+	}
+	return n
+}
+
+// clusterSuffix returns the byte offset of the longest run of whole grapheme
+// clusters at the end of s that fits in cells.
+func clusterSuffix(s string, cells int) int {
+	var starts, widths []int
+	for n, state := 0, -1; n < len(s); {
+		cluster, _, _, st := uniseg.FirstGraphemeClusterInString(s[n:], state)
+		starts, widths = append(starts, n), append(widths, max(0, grid.ClusterWidth(cluster)))
+		n, state = n+len(cluster), st
+	}
+	off, w := len(s), 0
+	for i := len(starts) - 1; i >= 0 && w+widths[i] <= cells; i-- {
+		off, w = starts[i], w+widths[i]
+	}
+	return off
+}
+
+// emitText appends UI text with its top-left at (x, yTop) through the grid's
+// path, so it gets ligatures, grapheme clusters and color emoji. Bold always
+// uses the bold face, whatever the terminal's faux-bold setting.
+func (r *Renderer) emitText(b *glyphBatch, x, yTop float32, text string, clr [4]float32, bold bool) {
+	row := r.textLine(text, bold)
+	fauxBold := r.fauxBold
+	r.fauxBold = true
+	r.prepareRowShaping(row)
+	for col := range row {
+		c := &row[col]
+		if c.Width == grid.CellWidthContinuation || c.Char == ' ' {
+			continue
+		}
+		r.emitCellGlyph(b, row, col, x+float32(col)*r.cellWidth, yTop, math.MaxFloat32, clr)
+	}
+	r.fauxBold = fauxBold
+}
+
+// drawShapedText draws UI text (panels, help, search, toasts) into the UI
+// batch with its top-left at (x, yTop).
+func (r *Renderer) drawShapedText(x, yTop float32, text string, clr [4]float32, bold bool, proj [16]float32) {
+	r.uiEnsure(uiKindGlyph, proj)
+	for range 2 {
+		if r.uiAtlasGen != r.atlasGen {
+			r.uiGlyphs.reset()
+			r.uiAtlasGen = r.atlasGen
+		}
+		gen := r.atlasGen
+		r.emitText(&r.uiGlyphs, x, yTop, text, clr, bold)
+		if r.atlasGen == gen {
+			return
+		}
+	}
+}
+
+// drawShapedTextScaled is drawShapedText at scale (the tab bar), y being the
+// bottom of the scaled line: laid out at 1x, then scaled into the UI batch.
+func (r *Renderer) drawShapedTextScaled(x, y float32, text string, clr [4]float32, scale float32, proj [16]float32) {
+	r.uiEnsure(uiKindGlyph, proj)
+	for range 2 {
+		if r.uiAtlasGen != r.atlasGen {
+			r.uiGlyphs.reset()
+			r.uiAtlasGen = r.atlasGen
+		}
+		gen := r.atlasGen
+		r.scaledText.reset()
+		r.emitText(&r.scaledText, 0, 0, text, clr, false)
+		if r.atlasGen == gen {
+			appendScaled(&r.uiGlyphs, &r.scaledText, 0, 0, x, y-r.cellHeight*scale, scale, scale, noClip)
+			return
+		}
+	}
 }
 
 // SetLigatures toggles programming ligatures.

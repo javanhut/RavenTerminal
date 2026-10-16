@@ -1,12 +1,16 @@
 package grid
 
+import "slices"
+
 // Snapshot is an immutable, fully-resolved copy of the visible grid region
 // produced under a single lock for the renderer to consume lock-free. It
 // replaces the renderer's per-cell DisplayCell reads (each of which previously
 // took the grid RWMutex), eliminating ~Cols*Rows lock acquisitions per frame.
 type Snapshot struct {
 	Cols, Rows int
-	Cells      []Cell // row-major, inflated public DTO, len == Cols*Rows
+	Cells      []Cell        // row-major, inflated public DTO, len == Cols*Rows
+	LineSizes  []LineSize    // per visible row (DECDWL/DECDHL)
+	Sized      [][]SizedText // per visible row: OSC 66 blocks (nil for none)
 
 	CursorCol, CursorRow int
 	CursorVisible        bool
@@ -71,10 +75,10 @@ func (g *Grid) Snapshot(prev *Snapshot) *Snapshot {
 
 	cols, rows := g.Cols, g.Rows
 	var s *Snapshot
-	if prev != nil && prev.Cols == cols && prev.Rows == rows && len(prev.Cells) == cols*rows {
+	if prev != nil && prev.Cols == cols && prev.Rows == rows && len(prev.Cells) == cols*rows && len(prev.LineSizes) == rows && len(prev.Sized) == rows {
 		s = prev
 	} else {
-		s = &Snapshot{Cells: make([]Cell, cols*rows)}
+		s = &Snapshot{Cells: make([]Cell, cols*rows), LineSizes: make([]LineSize, rows), Sized: make([][]SizedText, rows)}
 	}
 
 	full := s != prev || g.scrollOffset != 0 || s.ScrollOffset != 0 || g.snapInvalid
@@ -84,11 +88,16 @@ func (g *Grid) Snapshot(prev *Snapshot) *Snapshot {
 	// RowDirty flag also means "visible content changed", which feeds the
 	// Dirty advisory below.
 	dirty := false
+	viewTop := g.viewTopAbsLocked()
 	if full {
 		for row := range rows {
 			base := row * cols
 			for col := range cols {
 				s.Cells[base+col] = g.displayCellLocked(col, row)
+			}
+			s.LineSizes[row], s.Sized[row] = LineSingle, nil
+			if r := g.rowAtAbsLocked(viewTop + row); r != nil {
+				s.LineSizes[row], s.Sized[row] = r.size, slices.Clone(r.sized)
 			}
 			if r := g.rows[row]; r.flags&RowDirty != 0 {
 				dirty = true
@@ -107,6 +116,7 @@ func (g *Grid) Snapshot(prev *Snapshot) *Snapshot {
 			for col := range cols {
 				s.Cells[base+col] = g.displayCellLocked(col, row)
 			}
+			s.LineSizes[row], s.Sized[row] = r.size, slices.Clone(r.sized)
 		}
 	}
 
@@ -145,6 +155,13 @@ func (g *Grid) Snapshot(prev *Snapshot) *Snapshot {
 		sSCol:        sSCol, sSRow: sSRow, sECol: sECol, sERow: sERow,
 	}
 	return s
+}
+
+// MarkScreenDirty is MarkScreenDirtyLocked taking the lock.
+func (g *Grid) MarkScreenDirty() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.MarkScreenDirtyLocked()
 }
 
 // MarkScreenDirtyLocked flags every on-screen row as changed, for state drawn

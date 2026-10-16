@@ -106,7 +106,7 @@ func fuzzyTerm(term, text []rune) (int, bool) {
 func fuzzyScore(query, text string) (int, bool) {
 	t := []rune(strings.ToLower(text))
 	total := 0
-	for _, term := range strings.Fields(strings.ToLower(query)) {
+	for term := range strings.FieldsSeq(strings.ToLower(query)) {
 		s, ok := fuzzyTerm([]rune(term), t)
 		if !ok {
 			return 0, false

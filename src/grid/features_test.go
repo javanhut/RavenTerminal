@@ -29,7 +29,7 @@ func TestResizeRowsOnlySkipsReflow(t *testing.T) {
 	if line(g, 0) != "abcdefghij" || line(g, 1) != "kl" {
 		t.Fatalf("shrink lost content: %q %q", line(g, 0), line(g, 1))
 	}
-	for i := 0; i < 6; i++ {
+	for range 6 {
 		g.CarriageReturn()
 		g.Newline()
 	}

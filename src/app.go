@@ -893,7 +893,7 @@ func (a *App) renderFrame(now time.Time) {
 		a.closeFind()
 	}
 
-	drawCursor := a.cursorVisible
+	drawCursor := a.cursorVisible && a.terminalCursorAllowed()
 	if activeTab != nil && activeTab.Terminal != nil {
 		drawCursor = drawCursor && activeTab.Terminal.IsCursorVisible()
 	}
@@ -989,6 +989,7 @@ func (a *App) renderFrame(now time.Time) {
 			a.renderer.DrawFingerprintModal(fp.modal, width, height)
 		}
 
+		a.captureFrames(width, height)
 		a.win.SwapBuffers()
 	}
 }

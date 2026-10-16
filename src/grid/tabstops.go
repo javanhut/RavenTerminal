@@ -66,6 +66,7 @@ func (g *Grid) FillScreen(r rune) {
 // (see LockBatch).
 func (g *Grid) FillScreenLocked(r rune) {
 	cell := Cell{Char: r, Fg: DefaultFg(), Bg: DefaultBg(), Width: CellWidthNormal}
+	g.resetLineSizes()
 	for row := 0; row < g.Rows; row++ {
 		for col := 0; col < g.Cols; col++ {
 			g.putCell(g.index(col, row), cell)

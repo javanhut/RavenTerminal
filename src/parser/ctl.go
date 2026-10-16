@@ -385,9 +385,10 @@ func (t *Terminal) printInMargins(r rune) {
 		t.Grid.WriteCharLocked(r, t.currentFg, t.currentBg, t.currentFlags, t.currentLinkID, t.currentUnderlineStyle, t.currentUnderlineColor)
 		return
 	}
-	left, right := t.ctl.left, t.ctl.right
+	left := t.ctl.left
 	autoWrap := t.Grid.GetAutoWrapLocked()
 	col, row := t.Grid.GetCursorLocked()
+	right := t.marginRight(row)
 	if col < left || col > right {
 		t.writeRune(r)
 		return
@@ -400,6 +401,10 @@ func (t *Terminal) printInMargins(r rune) {
 			t.Grid.SetCursorLocked(col, row)
 		}
 		col, row = t.Grid.GetCursorLocked()
+		if right = t.marginRight(row); col > right {
+			t.writeRune(r)
+			return
+		}
 	}
 	if t.insertMode {
 		t.Grid.ScrollRectRightLocked(row, row, col, right, w, t.Grid.EraseBgLocked())
@@ -409,6 +414,12 @@ func (t *Terminal) printInMargins(r rune) {
 		t.Grid.SetCursorLocked(right, row)
 		t.Grid.SetWrapPendingLocked(autoWrap)
 	}
+}
+
+// marginRight is the right margin as it applies to row: a double-width or
+// double-height row ends at half the screen.
+func (t *Terminal) marginRight(row int) int {
+	return min(t.ctl.right, t.Grid.RowLimitLocked(row)-1)
 }
 
 func (t *Terminal) writeRune(r rune) {

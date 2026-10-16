@@ -36,6 +36,8 @@ type Row struct {
 	flags RowFlags
 	mark  MarkKind // OSC 133 marks (marks.go)
 	exit  int32
+	size  LineSize    // DECDWL/DECDHL line attribute (linesize.go)
+	sized []SizedText // OSC 66 blocks (sizedtext.go)
 }
 
 // newRow allocates a blank row of the given width (default style).
@@ -93,6 +95,8 @@ func (g *Grid) fillRow(r *Row, bg Color) {
 	g.styles.release(id) // drop owner ref; cells hold len(cells) refs
 	r.flags = RowDirty
 	r.mark, r.exit = 0, 0
+	r.size = LineSingle
+	r.sized = nil
 }
 
 // fillSpan blanks cells [col0, col1) of a row at the given background (BCE).
@@ -113,6 +117,9 @@ func (g *Grid) fillSpan(row, col0, col1 int, bg Color) {
 	}
 	if col0 >= col1 {
 		return
+	}
+	if len(g.rows[row].sized) > 0 {
+		g.dropSized(row, col0, col1)
 	}
 	// An erase that reaches the last column ends the logical line here: the
 	// row no longer continues onto the next one. Clear the soft-wrap mark even

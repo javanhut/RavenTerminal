@@ -17,6 +17,7 @@ func (g *Grid) SetCursorLocked(col, row int) {
 	g.wrapPending = false
 	g.CursorCol = clampInt(col, 0, g.Cols-1)
 	g.CursorRow = clampInt(row, 0, g.Rows-1)
+	g.clampCursorCol()
 }
 
 func (g *Grid) clampRect(top, bottom, left, right int) (int, int, int, int, bool) {

@@ -173,7 +173,36 @@ raven-terminal @ get-text [--id N] [--extent screen|all|last-output|selection]
 raven-terminal @ set-title [--id N] TITLE          # "-" returns to the program's title
 raven-terminal @ close-pane [--id N]
 raven-terminal @ get-user-vars [--id N]            # OSC 1337 SetUserVar values
+raven-terminal @ screenshot [--id N] shot.png      # next frame as PNG; --id crops to that pane
+raven-terminal @ action hints                      # run a keybinding action by (part of) its name
+raven-terminal @ send-key ctrl+shift+space         # press and release a chord (Leader+H, escape, j)
+raven-terminal @ state                             # overlay modes, focus, size, pointer, IME preedit
+raven-terminal @ send-mouse 300 60 left:press      # move the pointer (window coords); click, press or release
 ```
+
+`action` takes any unambiguous part of a name from the help list or the
+palette (`hints`, `copy mode`, `palette`, `zoom`, `broadcast`, `resize`) and
+presses that action's first chord. `send-key` and `action` go through the
+same key and char callbacks as a real keyboard (and `send-mouse` through the
+cursor and button callbacks), modifiers included, so
+overlays, keybindings and kitty keyboard encoding all apply. A relative
+screenshot path is resolved against the caller's directory.
+
+These four exist so a window can be checked without a human. Run the
+terminal inside a nested huginn with its own HOME, XDG dirs, short
+`XDG_RUNTIME_DIR` (socket paths must fit in 108 bytes) and a private bus:
+
+```
+WAYLAND_DISPLAY=/run/user/1000/wayland-1 vblank_mode=0 \
+  dbus-run-session -- huginn --backend winit    # logs "huginn is up socket=wayland-N"
+WAYLAND_DISPLAY=wayland-N raven-terminal &
+raven-terminal @ action copy mode && raven-terminal @ screenshot copy.png
+```
+
+`vblank_mode=0` stops the nested compositor blocking on the host's frame
+callbacks when its window is not on screen. IME preedit and commit can be
+driven with `ime-probe` from RavenGUI (`ime-probe preedit TEXT wait 1000
+commit TEXT`).
 
 Without `--id` a command acts on the focused pane of the focused window.
 `focus-pane` with a direction exits non-zero when there is no pane that way,

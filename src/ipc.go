@@ -5,11 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"log"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -17,7 +21,11 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
+	"github.com/go-gl/gl/v4.1-core/gl"
+	"github.com/go-gl/glfw/v3.3/glfw"
+	"github.com/javanhut/RavenTerminal/src/keybindings"
 	"github.com/javanhut/RavenTerminal/src/tab"
 	"github.com/javanhut/RavenTerminal/src/window"
 )
@@ -46,6 +54,17 @@ type ipcCommand struct {
 	Text   string
 	Cwd    string
 	Argv   []string
+	Path   string
+	Steps  []keyStep
+	Mouse  ipcMouse
+}
+
+// ipcMouse moves the pointer to X,Y (window coordinates) and, when Press or
+// Release is set, presses or releases Button there.
+type ipcMouse struct {
+	X, Y           float64
+	Button         glfw.MouseButton
+	Press, Release bool
 }
 
 type ipcPane struct {
@@ -85,6 +104,12 @@ func ipcUsage() string {
   set-title [--id N] TITLE...          fix the tab title ("" via set-title -)
   close-pane [--id N]
   get-user-vars [--id N]               OSC 1337 SetUserVar values
+  screenshot [--id N] FILE.png         next frame as PNG, cropped to pane N
+  action NAME                          run a keybinding action (hints, copy mode, palette, zoom ...)
+  send-key CHORD                       press and release a key (ctrl+shift+space, escape, j)
+  send-mouse X Y [BUTTON[:press|:release]]
+                                       move the pointer; click left|middle|right, or press/release it
+  state                                overlay modes, focus, size, pointer and IME preedit as JSON
 `
 }
 
@@ -128,10 +153,10 @@ func parseIPC(req ipcRequest) (ipcCommand, error) {
 	c := ipcCommand{Name: req.Cmd}
 	flags := map[string]bool{}
 	switch req.Cmd {
-	case "ls", "new-window":
+	case "ls", "new-window", "state", "send-key", "action", "send-mouse":
 	case "new-tab":
 		flags["--cwd"] = true
-	case "split", "send-text", "set-title", "close-pane", "get-user-vars":
+	case "split", "send-text", "set-title", "close-pane", "get-user-vars", "screenshot":
 		flags["--id"] = true
 	case "get-text":
 		flags["--id"], flags["--extent"] = true, true
@@ -178,7 +203,7 @@ func parseIPC(req ipcRequest) (ipcCommand, error) {
 		}
 	}
 	switch req.Cmd {
-	case "ls", "new-window", "close-pane", "get-user-vars", "get-text":
+	case "ls", "new-window", "close-pane", "get-user-vars", "get-text", "state":
 		if len(pos) > 0 {
 			return c, fmt.Errorf("%s takes no arguments", req.Cmd)
 		}
@@ -222,8 +247,277 @@ func parseIPC(req ipcRequest) (ipcCommand, error) {
 		if c.Text = strings.Join(pos, " "); c.Text == "-" {
 			c.Text = ""
 		}
+	case "screenshot":
+		if len(pos) != 1 {
+			return c, errors.New("screenshot needs one file name")
+		}
+		if !filepath.IsAbs(pos[0]) || !strings.EqualFold(filepath.Ext(pos[0]), ".png") {
+			return c, fmt.Errorf("screenshot: %q is not an absolute .png path", pos[0])
+		}
+		c.Path = pos[0]
+	case "send-key":
+		if len(pos) != 1 {
+			return c, errors.New("send-key needs one chord")
+		}
+		ch, err := parseChord(pos[0])
+		if err != nil {
+			return c, err
+		}
+		c.Steps = ch.steps()
+	case "send-mouse":
+		m, err := parseMouse(pos)
+		if err != nil {
+			return c, err
+		}
+		c.Mouse = m
+	case "action":
+		info, err := lookupAction(strings.Join(pos, " "))
+		if err != nil {
+			return c, err
+		}
+		ch, err := actionChord(info)
+		if err != nil {
+			return c, err
+		}
+		c.Steps = ch.steps()
 	}
 	return c, nil
+}
+
+var mouseButtons = map[string]glfw.MouseButton{
+	"left": glfw.MouseButtonLeft, "middle": glfw.MouseButtonMiddle, "right": glfw.MouseButtonRight,
+}
+
+func parseMouse(pos []string) (ipcMouse, error) {
+	var m ipcMouse
+	if len(pos) < 2 || len(pos) > 3 {
+		return m, errors.New("send-mouse needs X Y and an optional button")
+	}
+	for i, v := range []*float64{&m.X, &m.Y} {
+		n, err := strconv.ParseFloat(pos[i], 64)
+		if err != nil || n < 0 || math.IsInf(n, 0) || math.IsNaN(n) {
+			return m, fmt.Errorf("send-mouse: bad coordinate %q", pos[i])
+		}
+		*v = n
+	}
+	if len(pos) == 2 {
+		return m, nil
+	}
+	name, phase, _ := strings.Cut(pos[2], ":")
+	b, ok := mouseButtons[name]
+	if !ok {
+		return m, fmt.Errorf("send-mouse: unknown button %q", name)
+	}
+	m.Button = b
+	switch phase {
+	case "":
+		m.Press, m.Release = true, true
+	case "press":
+		m.Press = true
+	case "release":
+		m.Release = true
+	default:
+		return m, fmt.Errorf("send-mouse: %q is not press or release", phase)
+	}
+	return m, nil
+}
+
+// keyChord is a key with its modifiers, as written on the command line.
+type keyChord struct {
+	Key  glfw.Key
+	Mods glfw.ModifierKey
+}
+
+// keyStep is one injected event: a key press or release, or (Char != 0) the
+// char event GLFW sends after a printable key.
+type keyStep struct {
+	Key    glfw.Key
+	Action glfw.Action
+	Mods   glfw.ModifierKey
+	Char   rune
+}
+
+var chordMods = []struct {
+	mod glfw.ModifierKey
+	key glfw.Key
+}{
+	{glfw.ModControl, glfw.KeyLeftControl}, {glfw.ModShift, glfw.KeyLeftShift},
+	{glfw.ModAlt, glfw.KeyLeftAlt}, {glfw.ModSuper, glfw.KeyLeftSuper},
+}
+
+var modNames = map[string]glfw.ModifierKey{
+	"ctrl": glfw.ModControl, "control": glfw.ModControl, "shift": glfw.ModShift,
+	"alt": glfw.ModAlt, "opt": glfw.ModAlt, "option": glfw.ModAlt,
+	"super": glfw.ModSuper, "cmd": glfw.ModSuper, "command": glfw.ModSuper, "logo": glfw.ModSuper,
+}
+
+var keyNames = func() map[string]glfw.Key {
+	m := map[string]glfw.Key{
+		"space": glfw.KeySpace, "enter": glfw.KeyEnter, "return": glfw.KeyEnter, "tab": glfw.KeyTab,
+		"backspace": glfw.KeyBackspace, "escape": glfw.KeyEscape, "esc": glfw.KeyEscape,
+		"insert": glfw.KeyInsert, "delete": glfw.KeyDelete, "del": glfw.KeyDelete,
+		"home": glfw.KeyHome, "end": glfw.KeyEnd, "pageup": glfw.KeyPageUp, "pgup": glfw.KeyPageUp,
+		"pagedown": glfw.KeyPageDown, "pgdn": glfw.KeyPageDown,
+		"up": glfw.KeyUp, "down": glfw.KeyDown, "left": glfw.KeyLeft, "right": glfw.KeyRight,
+		"kpenter": glfw.KeyKPEnter, "menu": glfw.KeyMenu,
+		"minus": glfw.KeyMinus, "equal": glfw.KeyEqual, "comma": glfw.KeyComma, "period": glfw.KeyPeriod,
+		"slash": glfw.KeySlash, "backslash": glfw.KeyBackslash, "semicolon": glfw.KeySemicolon,
+		"apostrophe": glfw.KeyApostrophe, "grave": glfw.KeyGraveAccent,
+		"leftbracket": glfw.KeyLeftBracket, "rightbracket": glfw.KeyRightBracket,
+		"ctrl": glfw.KeyLeftControl, "control": glfw.KeyLeftControl, "shift": glfw.KeyLeftShift,
+		"alt": glfw.KeyLeftAlt, "super": glfw.KeyLeftSuper,
+	}
+	for _, r := range "abcdefghijklmnopqrstuvwxyz0123456789-=[]\\;',./`" {
+		m[string(r)] = glfw.Key(unicode.ToUpper(r))
+	}
+	for i := 1; i <= 25; i++ {
+		m["f"+strconv.Itoa(i)] = glfw.KeyF1 + glfw.Key(i-1)
+	}
+	return m
+}()
+
+var shiftedASCII = map[rune]rune{
+	'1': '!', '2': '@', '3': '#', '4': '$', '5': '%', '6': '^', '7': '&', '8': '*', '9': '(', '0': ')',
+	'-': '_', '=': '+', '[': '{', ']': '}', '\\': '|', ';': ':', '\'': '"', ',': '<', '.': '>',
+	'/': '?', '`': '~',
+}
+
+// parseChord reads "ctrl+shift+space", "escape" or "Leader+H". Leader is the
+// app leader: Ctrl+Shift on Linux, where Leader+Shift adds Alt.
+func parseChord(s string) (keyChord, error) {
+	parts := strings.Split(s, "+")
+	var ch keyChord
+	leader := false
+	for i, p := range parts {
+		name := strings.ToLower(strings.TrimSpace(p))
+		if len(name) > 1 {
+			name = strings.NewReplacer("_", "", "-", "").Replace(name)
+		}
+		if name == "" {
+			return ch, fmt.Errorf("bad key chord %q", s)
+		}
+		if i < len(parts)-1 {
+			if name == "leader" {
+				leader = true
+				continue
+			}
+			m, ok := modNames[name]
+			if !ok {
+				return ch, fmt.Errorf("%q: unknown modifier %q", s, p)
+			}
+			ch.Mods |= m
+			continue
+		}
+		k, ok := keyNames[name]
+		if !ok {
+			return ch, fmt.Errorf("%q: unknown key %q", s, p)
+		}
+		ch.Key = k
+	}
+	if leader {
+		switch {
+		case runtime.GOOS == "darwin":
+			ch.Mods |= glfw.ModSuper
+		case ch.Mods&glfw.ModShift != 0:
+			ch.Mods |= glfw.ModControl | glfw.ModAlt
+		default:
+			ch.Mods |= glfw.ModControl | glfw.ModShift
+		}
+	}
+	return ch, nil
+}
+
+// steps is the event sequence a keyboard produces for the chord: modifiers
+// down, the key with its text, then everything up in reverse. Like Wayland,
+// a modifier's own press does not yet carry its bit and its release does.
+func (ch keyChord) steps() []keyStep {
+	var out []keyStep
+	var mods glfw.ModifierKey
+	for _, m := range chordMods {
+		if ch.Mods&m.mod != 0 {
+			out = append(out, keyStep{Key: m.key, Action: glfw.Press, Mods: mods})
+			mods |= m.mod
+		}
+	}
+	out = append(out, keyStep{Key: ch.Key, Action: glfw.Press, Mods: mods})
+	if r := chordRune(ch.Key); r != 0 && mods&glfw.ModControl == 0 {
+		if mods&glfw.ModShift != 0 {
+			if s, ok := shiftedASCII[r]; ok {
+				r = s
+			}
+			r = unicode.ToUpper(r)
+		}
+		out = append(out, keyStep{Char: r, Mods: mods})
+	}
+	out = append(out, keyStep{Key: ch.Key, Action: glfw.Release, Mods: mods})
+	for _, m := range slices.Backward(chordMods) {
+		if ch.Mods&m.mod != 0 {
+			out = append(out, keyStep{Key: m.key, Action: glfw.Release, Mods: mods})
+			mods &^= m.mod
+		}
+	}
+	return out
+}
+
+// chordRune is the US-layout text of a printable key, 0 for the rest.
+func chordRune(k glfw.Key) rune {
+	switch {
+	case k >= glfw.KeyA && k <= glfw.KeyZ:
+		return rune('a' + (k - glfw.KeyA))
+	case k == glfw.KeySpace:
+		return ' '
+	case k < glfw.KeyWorld1:
+		if _, ok := shiftedASCII[rune(k)]; ok {
+			return rune(k)
+		}
+	}
+	return 0
+}
+
+// ipcActions is what `action` can run: the palette's actions plus the palette.
+func ipcActions() []keybindings.ActionInfo {
+	return append(keybindings.Actions(),
+		keybindings.ActionInfo{Action: keybindings.ActionCommandPalette, Name: "Command palette", Chord: "Leader+P"})
+}
+
+func actionKey(s string) string {
+	s = strings.NewReplacer("-", " ", "_", " ").Replace(strings.ToLower(s))
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// lookupAction finds an action by its name or a unique part of it.
+func lookupAction(name string) (keybindings.ActionInfo, error) {
+	q := actionKey(name)
+	if q == "" {
+		return keybindings.ActionInfo{}, errors.New("action needs a name")
+	}
+	var found []keybindings.ActionInfo
+	for _, info := range ipcActions() {
+		n := actionKey(info.Name)
+		if n == q {
+			return info, nil
+		}
+		if strings.Contains(n, q) {
+			found = append(found, info)
+		}
+	}
+	switch len(found) {
+	case 0:
+		return keybindings.ActionInfo{}, fmt.Errorf("unknown action %q", name)
+	case 1:
+		return found[0], nil
+	}
+	names := make([]string, len(found))
+	for i, f := range found {
+		names[i] = f.Name
+	}
+	return keybindings.ActionInfo{}, fmt.Errorf("action %q is ambiguous: %s", name, strings.Join(names, "; "))
+}
+
+// actionChord is the first chord listed for an action.
+func actionChord(info keybindings.ActionInfo) (keyChord, error) {
+	first, _, _ := strings.Cut(info.Chord, " / ")
+	return parseChord(first)
 }
 
 // Pane ids are process-wide and stable for a pane's life. Main thread only.
@@ -349,6 +643,20 @@ func dispatchIPC(apps []*App, c ipcCommand) ipcResponse {
 		}
 		return ipcResponse{OK: true, Data: ipcID(apps, a.tabManager.ActiveTab().GetActivePane())}
 	}
+	switch c.Name {
+	case "send-key", "action":
+		a := focusedApp(apps)
+		ipcInjectKeys(a, c.Steps)
+		a.eventRedraw = true
+		return ipcResponse{OK: true}
+	case "send-mouse":
+		a := focusedApp(apps)
+		ipcInjectMouse(a, c.Mouse)
+		a.eventRedraw = true
+		return ipcResponse{OK: true}
+	case "state":
+		return ipcResponse{OK: true, Data: ipcStateOf(apps)}
+	}
 	if c.Name == "focus-pane" && c.Dir != "" {
 		t := focusedApp(apps).tabManager.ActiveTab()
 		if t == nil || !t.FocusDirection(c.Dir) {
@@ -429,6 +737,243 @@ func dispatchIPC(apps []*App, c ipcCommand) ipcResponse {
 	return ipcResponse{Error: "unsupported command " + c.Name}
 }
 
+type ipcModes struct {
+	Hints     bool `json:"hints"`
+	Copy      bool `json:"copy"`
+	Palette   bool `json:"palette"`
+	Zoom      bool `json:"zoom"`
+	Broadcast bool `json:"broadcast"`
+	Resize    bool `json:"resize"`
+	Help      bool `json:"help"`
+	Find      bool `json:"find"`
+	Menu      bool `json:"menu"`
+}
+
+type ipcPreedit struct {
+	Text  string `json:"text"`
+	Caret int    `json:"caret_bytes"`
+}
+
+type ipcHint struct {
+	Label string `json:"label"`
+	Text  string `json:"text"`
+}
+
+type ipcState struct {
+	Window       int        `json:"window"`
+	Focused      bool       `json:"focused"`
+	FocusedPane  int        `json:"focused_pane"`
+	Width        int        `json:"width"`
+	Height       int        `json:"height"`
+	FBWidth      int        `json:"fb_width"`
+	FBHeight     int        `json:"fb_height"`
+	Modes        ipcModes   `json:"modes"`
+	Pointer      string     `json:"pointer"`
+	Preedit      ipcPreedit `json:"preedit"`
+	Toast        string     `json:"toast,omitempty"`
+	Hints        []ipcHint  `json:"hints,omitempty"`
+	CopyStatus   string     `json:"copy_status,omitempty"`
+	PaletteQuery string     `json:"palette_query,omitempty"`
+	PaletteRows  []string   `json:"palette_rows,omitempty"`
+}
+
+// ipcWinState is per-window harness state kept outside App. Main thread only.
+type ipcWinState struct {
+	shots   []ipcShot
+	preedit ipcPreedit
+}
+
+type ipcShot struct {
+	path  string
+	pane  *tab.Pane
+	reply chan ipcResponse
+}
+
+var ipcWins = map[*App]*ipcWinState{}
+
+func ipcWinFor(a *App) *ipcWinState {
+	st := ipcWins[a]
+	if st == nil {
+		st = &ipcWinState{}
+		ipcWins[a] = st
+	}
+	return st
+}
+
+func ipcNotePreedit(a *App, text string, caretBytes int) {
+	ipcWinFor(a).preedit = ipcPreedit{Text: text, Caret: caretBytes}
+}
+
+// ipcInjectKeys feeds events through the window's own key callbacks.
+var ipcInjectKeys = func(a *App, steps []keyStep) {
+	w := a.win.GLFW()
+	for _, st := range steps {
+		if st.Char != 0 {
+			a.onChar(w, st.Char, st.Mods)
+		} else {
+			a.onKey(w, st.Key, 0, st.Action, st.Mods)
+		}
+	}
+}
+
+// ipcInjectMouse feeds pointer events through the window's own callbacks.
+var ipcInjectMouse = func(a *App, m ipcMouse) {
+	w := a.win.GLFW()
+	a.onCursorPos(w, m.X, m.Y)
+	if m.Press {
+		a.onMouseButton(w, m.Button, glfw.Press, 0)
+	}
+	if m.Release {
+		a.onMouseButton(w, m.Button, glfw.Release, 0)
+	}
+}
+
+// ipcStateOf describes the focused window.
+func ipcStateOf(apps []*App) ipcState {
+	a := focusedApp(apps)
+	st := ipcState{Focused: a.windowFocused, Pointer: a.pointerCSS, Preedit: ipcWinFor(a).preedit}
+	st.Window = slices.Index(apps, a) + 1
+	if st.Pointer == "" {
+		st.Pointer = "default"
+	}
+	if a.win != nil {
+		st.Width, st.Height = a.win.GetSize()
+		st.FBWidth, st.FBHeight = a.win.GetFramebufferSize()
+	}
+	t := a.tabManager.ActiveTab()
+	if p := activePane(t); p != nil {
+		st.FocusedPane = ipcID(apps, p)
+	}
+	st.Modes = ipcModes{
+		Hints: a.ux.hints != nil, Copy: a.ux.copy != nil, Palette: a.ux.palette.open,
+		Resize: a.resizeMode, Help: a.showHelp, Find: a.find.open,
+		Menu: a.settingsMenu != nil && a.settingsMenu.IsOpen(),
+	}
+	if t != nil {
+		st.Modes.Zoom, st.Modes.Broadcast = t.Zoomed(), t.Broadcasting()
+	}
+	if a.toast != nil && time.Now().Before(a.toast.expiresAt) {
+		st.Toast = a.toast.message
+	}
+	if hs := a.ux.hints; hs != nil {
+		for i, m := range hs.matches {
+			st.Hints = append(st.Hints, ipcHint{Label: hs.labels[i], Text: m.Text})
+		}
+	}
+	if a.ux.copy != nil {
+		st.CopyStatus = a.ux.copy.status()
+	}
+	if p := &a.ux.palette; p.open {
+		st.PaletteQuery = p.query
+		for _, e := range p.shown {
+			st.PaletteRows = append(st.PaletteRows, e.Label)
+		}
+	}
+	return st
+}
+
+// queueScreenshot asks for the window's next frame; the reply waits for it.
+func queueScreenshot(apps []*App, call ipcCall) error {
+	if len(apps) == 0 {
+		return errors.New("no windows")
+	}
+	a := focusedApp(apps)
+	var pane *tab.Pane
+	if call.cmd.ID != 0 {
+		p, loc := ipcFind(apps, call.cmd.ID)
+		if p == nil {
+			return fmt.Errorf("no pane with id %d", call.cmd.ID)
+		}
+		if loc.app.tabManager.ActiveTab() != loc.t {
+			return fmt.Errorf("pane %d is not in the visible tab", call.cmd.ID)
+		}
+		a, pane = loc.app, p
+	}
+	st := ipcWinFor(a)
+	st.shots = append(st.shots, ipcShot{path: call.cmd.Path, pane: pane, reply: call.reply})
+	a.eventRedraw = true
+	return nil
+}
+
+// captureFrames reads back the frame just drawn, before it is swapped, for
+// any queued screenshots. Render thread, with this window's context current.
+func (a *App) captureFrames(width, height int) {
+	if st := ipcWins[a]; st == nil || len(st.shots) == 0 || width <= 0 || height <= 0 {
+		return
+	}
+	var prev int32
+	gl.GetIntegerv(gl.READ_FRAMEBUFFER_BINDING, &prev)
+	gl.BindFramebuffer(gl.READ_FRAMEBUFFER, 0)
+	pix := make([]byte, width*height*4)
+	gl.ReadPixels(0, 0, int32(width), int32(height), gl.RGBA, gl.UNSIGNED_BYTE, gl.Ptr(pix))
+	gl.BindFramebuffer(gl.READ_FRAMEBUFFER, uint32(prev))
+	scale := float32(1)
+	if winW, _ := a.win.GetSize(); winW > 0 {
+		scale = float32(width) / float32(winW)
+	}
+	t := a.tabManager.ActiveTab()
+	a.deliverShots(pix, width, height, func(p *tab.Pane) (image.Rectangle, bool) {
+		x, y, w, h, ok := a.renderer.PaneRectFor(t, p, width, height)
+		px := func(v float32) int { return int(math.Round(float64(v * scale))) }
+		return image.Rect(px(x), px(y), px(x+w), px(y+h)), ok
+	})
+}
+
+// deliverShots crops and writes the queued screenshots from one frame of
+// bottom-up RGBA pixels; files are encoded off the main thread.
+func (a *App) deliverShots(pix []byte, w, h int, rectFor func(*tab.Pane) (image.Rectangle, bool)) {
+	st := ipcWinFor(a)
+	shots := st.shots
+	st.shots = nil
+	for _, s := range shots {
+		crop := image.Rect(0, 0, w, h)
+		if s.pane != nil {
+			r, ok := rectFor(s.pane)
+			if !ok {
+				s.reply <- ipcResponse{Error: "pane is not on screen"}
+				continue
+			}
+			crop = r
+		}
+		img := frameImage(pix, w, h, crop)
+		goSafe("ipc screenshot", func() {
+			if err := writePNG(s.path, img); err != nil {
+				s.reply <- ipcErr(err)
+				return
+			}
+			s.reply <- ipcResponse{OK: true, Data: s.path}
+		})
+	}
+}
+
+// frameImage turns glReadPixels output (rows bottom-up) into an opaque image
+// of crop, given top-down and clamped to the frame.
+func frameImage(pix []byte, w, h int, crop image.Rectangle) *image.NRGBA {
+	crop = crop.Intersect(image.Rect(0, 0, w, h))
+	img := image.NewNRGBA(image.Rect(0, 0, crop.Dx(), crop.Dy()))
+	for y := crop.Min.Y; y < crop.Max.Y; y++ {
+		src := pix[((h-1-y)*w+crop.Min.X)*4 : ((h-1-y)*w+crop.Max.X)*4]
+		dst := img.Pix[(y-crop.Min.Y)*img.Stride:]
+		copy(dst, src)
+		for x := 3; x < len(src); x += 4 {
+			dst[x] = 255
+		}
+	}
+	return img
+}
+
+func writePNG(path string, img image.Image) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	if err := png.Encode(f, img); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
 type ipcCall struct {
 	cmd   ipcCommand
 	reply chan ipcResponse
@@ -457,11 +1002,34 @@ func ipcMainHandler(req ipcRequest) ipcResponse {
 	}
 }
 
-// serveIPC answers queued requests on the main loop; new-window adds a window.
+// serveIPC answers queued requests on the main loop; new-window adds a window
+// and screenshot waits for the next frame.
 func serveIPC(apps []*App) []*App {
+	for a, st := range ipcWins {
+		if !slices.Contains(apps, a) {
+			for _, s := range st.shots {
+				s.reply <- ipcResponse{Error: "window closed"}
+			}
+			delete(ipcWins, a)
+		}
+	}
+	served := false
+	defer func() {
+		// The loop is about to sleep: wake it so the effects get drawn.
+		if served {
+			window.PostEmptyEvent()
+		}
+	}()
 	for {
 		select {
 		case call := <-ipcCalls:
+			served = true
+			if call.cmd.Name == "screenshot" {
+				if err := queueScreenshot(apps, call); err != nil {
+					call.reply <- ipcErr(err)
+				}
+				continue
+			}
 			if call.cmd.Name == "new-window" {
 				a, err := newAppWith(func(cols, rows uint16) (*tab.TabManager, error) {
 					return tab.NewTabManager(cols, rows)
@@ -633,6 +1201,9 @@ func ipcClientMain(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 	}
+	if args[0] == "screenshot" {
+		args = absScreenshotArgs(args)
+	}
 	conn, err := net.DialTimeout("unix", path, 3*time.Second)
 	if err != nil {
 		fmt.Fprintf(stderr, "raven-terminal @: %v\n", err)
@@ -665,6 +1236,22 @@ func ipcClientMain(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "%s\n", out)
 	}
 	return 0
+}
+
+// absScreenshotArgs resolves the file name against the client's directory,
+// since the terminal's own working directory is unrelated.
+func absScreenshotArgs(args []string) []string {
+	out := slices.Clone(args)
+	for i := 1; i < len(out); i++ {
+		if out[i] == "--id" {
+			i++
+			continue
+		}
+		if abs, err := filepath.Abs(out[i]); err == nil && !strings.HasPrefix(out[i], "--") {
+			out[i] = abs
+		}
+	}
+	return out
 }
 
 // startIPCServer starts the app's socket; failures only disable remote control.

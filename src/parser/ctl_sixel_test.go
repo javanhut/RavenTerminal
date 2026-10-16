@@ -11,7 +11,7 @@ func sixelImage(w, bands int) string {
 	b.WriteString("\x1bP0;1;0q\"1;1;")
 	b.WriteString(itoa(w) + ";" + itoa(bands*6))
 	b.WriteString("#1;2;100;0;0#1")
-	for i := 0; i < bands; i++ {
+	for i := range bands {
 		if i > 0 {
 			b.WriteByte('-')
 		}
