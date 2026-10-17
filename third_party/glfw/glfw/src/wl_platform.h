@@ -137,6 +137,17 @@ typedef int (* PFN_xkb_state_mod_index_is_active)(struct xkb_state*,xkb_mod_inde
 #define xkb_state_update_mask _glfw.wl.xkb.state_update_mask
 #define xkb_state_key_get_layout _glfw.wl.xkb.state_key_get_layout
 #define xkb_state_mod_index_is_active _glfw.wl.xkb.state_mod_index_is_active
+// Raven extension: keymap probing for Hyper/Meta and per-key symbols
+typedef xkb_keycode_t (* PFN_xkb_keymap_min_keycode)(struct xkb_keymap*);
+typedef xkb_keycode_t (* PFN_xkb_keymap_max_keycode)(struct xkb_keymap*);
+typedef xkb_level_index_t (* PFN_xkb_keymap_num_levels_for_key)(struct xkb_keymap*,xkb_keycode_t,xkb_layout_index_t);
+typedef enum xkb_state_component (* PFN_xkb_state_update_key)(struct xkb_state*,xkb_keycode_t,enum xkb_key_direction);
+typedef xkb_mod_mask_t (* PFN_xkb_state_serialize_mods)(struct xkb_state*,enum xkb_state_component);
+#define xkb_keymap_min_keycode _glfw.wl.xkb.keymap_min_keycode
+#define xkb_keymap_max_keycode _glfw.wl.xkb.keymap_max_keycode
+#define xkb_keymap_num_levels_for_key _glfw.wl.xkb.keymap_num_levels_for_key
+#define xkb_state_update_key _glfw.wl.xkb.state_update_key
+#define xkb_state_serialize_mods _glfw.wl.xkb.state_serialize_mods
 
 typedef struct xkb_compose_table* (* PFN_xkb_compose_table_new_from_locale)(struct xkb_context*, const char*, enum xkb_compose_compile_flags);
 typedef void (* PFN_xkb_compose_table_unref)(struct xkb_compose_table*);
@@ -467,6 +478,8 @@ typedef struct _GLFWlibraryWayland
         struct xkb_keymap*      keymap;
         struct xkb_state*       state;
         struct xkb_compose_state* composeState;
+        // Raven: modifier-free state for per-key symbol lookups
+        struct xkb_state*       scratch;
 
         xkb_mod_index_t         controlIndex;
         xkb_mod_index_t         altIndex;
@@ -475,6 +488,10 @@ typedef struct _GLFWlibraryWayland
         xkb_mod_index_t         capsLockIndex;
         xkb_mod_index_t         numLockIndex;
         unsigned int            modifiers;
+        // Raven: the real modifiers Hyper and Meta own, 0 when they share
+        // one with another GLFW modifier
+        xkb_mod_mask_t          hyperMask;
+        xkb_mod_mask_t          metaMask;
 
         PFN_xkb_context_new context_new;
         PFN_xkb_context_unref context_unref;
@@ -489,6 +506,11 @@ typedef struct _GLFWlibraryWayland
         PFN_xkb_state_update_mask state_update_mask;
         PFN_xkb_state_key_get_layout state_key_get_layout;
         PFN_xkb_state_mod_index_is_active state_mod_index_is_active;
+        PFN_xkb_keymap_min_keycode keymap_min_keycode;
+        PFN_xkb_keymap_max_keycode keymap_max_keycode;
+        PFN_xkb_keymap_num_levels_for_key keymap_num_levels_for_key;
+        PFN_xkb_state_update_key state_update_key;
+        PFN_xkb_state_serialize_mods state_serialize_mods;
 
         PFN_xkb_compose_table_new_from_locale compose_table_new_from_locale;
         PFN_xkb_compose_table_unref compose_table_unref;
@@ -586,4 +608,8 @@ void _glfwAddSeatListenerWayland(struct wl_seat* seat);
 void _glfwAddDataDeviceListenerWayland(struct wl_data_device* device);
 void _glfwAddPrimarySelectionListenerWayland(struct zwp_primary_selection_device_v1* device);
 void _glfwAddTextInputListenerWayland(struct zwp_text_input_v3* textInput);
+
+void _glfwRavenKeymapChangedWayland(void);
+int _glfwRavenModifiersWayland(void);
+int _glfwPlatformRavenScancodeKeysyms(int scancode, unsigned int keysyms[2]);
 

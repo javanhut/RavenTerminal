@@ -93,6 +93,11 @@ func (t *Terminal) handleAPC(buf []byte) {
 			return
 		}
 		tr.buf.Write(data)
+		// A later chunk's q= wins. kitty applies it from any chunk of a
+		// transmission but, for a=f, only from the final one.
+		if q := ctrl["q"]; q != "" && q != "0" && (tr.ctrl["a"] != "f" || ctrl["m"] != "1") {
+			tr.ctrl["q"] = q
+		}
 		if ctrl["m"] != "1" {
 			t.pendingKitty = nil
 			t.kittyFinishTransmit(tr.ctrl, tr.buf.Bytes())
@@ -486,7 +491,8 @@ func (t *Terminal) kittyDelete(ctrl map[string]string) {
 }
 
 // kittyReply answers a command that named an image (i= or I=), or any a=q.
-// q=1 suppresses OK replies, q=2 all replies.
+// q=1 suppresses OK replies, q=2 all replies. a=f and a=a replies carry the
+// frame number r=, as kitty's do.
 func (t *Terminal) kittyReply(ctrl map[string]string, id images.ImageID, err error) {
 	if t.responseWriter == nil {
 		return
@@ -517,6 +523,9 @@ func (t *Terminal) kittyReply(ctrl map[string]string, id images.ImageID, err err
 	}
 	if p := ctrlInt(ctrl, "p", 0); p != 0 {
 		b.WriteString(",p=" + strconv.Itoa(p))
+	}
+	if r := ctrlInt(ctrl, "r", 0); r > 0 && (ctrl["a"] == "f" || ctrl["a"] == "a") {
+		b.WriteString(",r=" + strconv.Itoa(r))
 	}
 	b.WriteString(";" + msg + "\x1b\\")
 	t.responseWriter([]byte(b.String()))

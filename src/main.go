@@ -17,6 +17,7 @@ import (
 	"github.com/javanhut/RavenTerminal/src/parser"
 	"github.com/javanhut/RavenTerminal/src/shell"
 	"github.com/javanhut/RavenTerminal/src/tab"
+	"github.com/javanhut/RavenTerminal/src/version"
 	"github.com/javanhut/RavenTerminal/src/websearch"
 	"github.com/javanhut/RavenTerminal/src/window"
 
@@ -305,6 +306,9 @@ func main() {
 	case opts.keybindings:
 		fmt.Print(keybindingsText())
 		return
+	case opts.version:
+		fmt.Println("raven-terminal " + version.String())
+		return
 	}
 	tab.SetHoldOnExit(opts.hold)
 	windowClass = opts.class
@@ -330,6 +334,7 @@ type launchOptions struct {
 	listFonts   bool
 	keybindings bool
 	help        bool
+	version     bool
 }
 
 // parseArgs reads the command line. Everything after -e/--execute/-- is the
@@ -382,6 +387,8 @@ func parseArgs(args []string) (launchOptions, error) {
 			o.keybindings = true
 		case "-h", "--help":
 			o.help = true
+		case "-V", "--version":
+			o.version = true
 		default:
 			if strings.HasPrefix(arg, "-") {
 				return o, fmt.Errorf("unknown option %q", arg)
@@ -429,6 +436,7 @@ func usageText() string {
       --list-fonts            print the available fonts and exit
       --keybindings           print the keybindings and exit
   -h, --help                  print this help and exit
+  -V, --version               print the version and exit
 `
 }
 

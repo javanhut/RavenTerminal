@@ -19,6 +19,38 @@ const (
 	ResizeNSCursor     StandardCursor = VResizeCursor
 )
 
+// Hyper and Meta modifier bits (Raven extension, X11 and Wayland). Each is
+// set only when the keymap gives it a modifier of its own; stock keymaps
+// share Hyper with Super and Meta with Alt, and there neither bit appears.
+const (
+	ModHyper ModifierKey = C.GLFW_MOD_HYPER
+	ModMeta  ModifierKey = C.GLFW_MOD_META
+)
+
+// KeySymbols is what a key produces in the active keyboard layout.
+type KeySymbols struct {
+	Keysym  uint32 // XKB keysym with no modifiers
+	Rune    rune   // its character, 0 when it has none (media keys, modifiers)
+	Shifted rune   // the character with Shift alone, 0 when none
+}
+
+// GetScancodeSymbols reports what the key with this platform scancode (as
+// passed to the key callback) produces in the active layout group. It also
+// covers keys that arrive as KeyUnknown, which is how media keys come in.
+// ok is false on platforms without keysyms (macOS, Windows) and before the
+// first keymap arrives.
+//
+// This function may only be called from the main thread.
+func GetScancodeSymbols(scancode int) (syms KeySymbols, ok bool) {
+	var keysym, cp, shifted C.uint
+	found := C.glfwGetScancodeSymbols(C.int(scancode), &keysym, &cp, &shifted)
+	panicError()
+	if found == 0 {
+		return KeySymbols{}, false
+	}
+	return KeySymbols{Keysym: uint32(keysym), Rune: rune(cp), Shifted: rune(shifted)}, true
+}
+
 // SetPrimarySelectionString sets the primary selection (X11 PRIMARY, Wayland
 // zwp_primary_selection_v1, in-process elsewhere).
 //

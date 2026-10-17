@@ -104,11 +104,28 @@ func TestLoadFrameErrors(t *testing.T) {
 	if _, err := s.LoadFrame(1, FrameData{Pixels: solid(2, 2, red), W: 2, H: 2, X: 1}); errCode(err) != "EINVAL" {
 		t.Fatalf("out of bounds: %v", err)
 	}
-	if _, err := s.LoadFrame(1, FrameData{Pixels: solid(1, 1, red), W: 1, H: 1, Base: 4}); errCode(err) != "ENOENT" {
+	// kitty answers a missing base frame (c=) with EINVAL, not ENOENT.
+	if _, err := s.LoadFrame(1, FrameData{Pixels: solid(1, 1, red), W: 1, H: 1, Base: 4}); errCode(err) != "EINVAL" {
 		t.Fatalf("missing base frame: %v", err)
 	}
-	if _, err := s.LoadFrame(1, FrameData{Pixels: solid(1, 1, red), W: 1, H: 1, Edit: 3}); errCode(err) != "ENOENT" {
-		t.Fatalf("missing edited frame: %v", err)
+}
+
+// kitty treats r= past the last frame as "add a new frame", and reports the
+// frame number it targeted even when the load then fails.
+func TestLoadFrameEditPastEndAddsFrame(t *testing.T) {
+	s := NewStore(0)
+	s.Add(1, 2, 2, solid(2, 2, red))
+	if n, err := s.LoadFrame(1, FrameData{Pixels: solid(1, 1, green), W: 1, H: 1, Edit: 7}); err != nil || n != 2 {
+		t.Fatalf("edit past end = %d, %v", n, err)
+	}
+	if s.FrameCount(1) != 2 {
+		t.Fatalf("frames = %d", s.FrameCount(1))
+	}
+	if n, err := s.LoadFrame(1, FrameData{Pixels: solid(2, 2, red), W: 2, H: 2, X: 1}); errCode(err) != "EINVAL" || n != 3 {
+		t.Fatalf("failed load = %d, %v; want frame 3, EINVAL", n, err)
+	}
+	if n, err := s.LoadFrame(1, FrameData{Pixels: solid(2, 2, red), W: 2, H: 2, X: 1, Edit: 2}); errCode(err) != "EINVAL" || n != 2 {
+		t.Fatalf("failed edit = %d, %v; want frame 2, EINVAL", n, err)
 	}
 }
 
@@ -132,6 +149,10 @@ func TestComposeFrames(t *testing.T) {
 	}
 	if err := s.ComposeFrames(1, Compose{Src: 1, Dst: 1, W: 2, H: 1, DstX: 0, DstY: 0}); errCode(err) != "EINVAL" {
 		t.Fatalf("overlapping self-compose: %v", err)
+	}
+	// w/h default to the full image, not to the edge from the offset.
+	if err := s.ComposeFrames(1, Compose{Src: 2, Dst: 1, X: 1}); errCode(err) != "EINVAL" {
+		t.Fatalf("offset full-size compose: %v", err)
 	}
 }
 
@@ -183,22 +204,35 @@ func TestAnimationLoopCountAndLoading(t *testing.T) {
 	s.LoadFrame(1, FrameData{Pixels: solid(1, 1, green), W: 1, H: 1, Gap: 10})
 	s.Place(&Placement{ImageID: 1, Cols: 1, Rows: 1})
 	t0 := time.Unix(1000, 0)
-	// v=2: one loop back to the start, then stop on the last frame.
+	// v=2: kitty sets max_loops = v-1 and stops when the first wrap brings
+	// the loop count to it, so the frames play once and stay on the last.
 	s.ControlAnimation(1, AnimControl{State: AnimRunning, Loops: 2, Gap: 10, GapFrame: 1}, t0)
 	for ms := 0; ms <= 1000; ms += 5 {
 		s.Tick(t0.Add(time.Duration(ms) * time.Millisecond))
+		if ms >= 10 && s.CurrentFrame(1) != 2 {
+			t.Fatalf("v=2 looped back to frame %d at %dms", s.CurrentFrame(1), ms)
+		}
 	}
-	if s.CurrentFrame(1) != 2 || !s.Tick(t0.Add(2*time.Second)).IsZero() {
-		t.Fatalf("finite loop did not stop on the last frame: %d", s.CurrentFrame(1))
+	if !s.Tick(t0.Add(2 * time.Second)).IsZero() {
+		t.Fatal("a finished animation still schedules frames")
+	}
+	// Raising v resumes it, as in kitty, which keeps the loop count: one
+	// wrap is spent, so v=4 (three plays) allows the next wrap.
+	s.ControlAnimation(1, AnimControl{Loops: 4}, t0.Add(2*time.Second))
+	s.Tick(t0.Add(2*time.Second + 15*time.Millisecond))
+	if s.CurrentFrame(1) != 1 {
+		t.Fatalf("v=4 after one play did not loop again: %d", s.CurrentFrame(1))
 	}
 	// Loading mode waits on the last frame for more data instead of looping.
-	s.ControlAnimation(1, AnimControl{State: AnimLoading, Current: 1}, t0)
-	s.Tick(t0.Add(100 * time.Millisecond))
+	t1 := t0.Add(10 * time.Second)
+	s.ControlAnimation(1, AnimControl{State: AnimStopped}, t1)
+	s.ControlAnimation(1, AnimControl{State: AnimLoading, Current: 1}, t1)
+	s.Tick(t1.Add(100 * time.Millisecond))
 	if s.CurrentFrame(1) != 2 {
 		t.Fatalf("loading frame = %d", s.CurrentFrame(1))
 	}
 	s.LoadFrame(1, FrameData{Pixels: solid(1, 1, blue), W: 1, H: 1, Gap: 10})
-	s.Tick(t0.Add(200 * time.Millisecond))
+	s.Tick(t1.Add(200 * time.Millisecond))
 	if s.CurrentFrame(1) != 3 {
 		t.Fatalf("loading did not continue onto the new frame: %d", s.CurrentFrame(1))
 	}
@@ -222,8 +256,13 @@ func TestAnimationGaplessFramesAndUnplacedImages(t *testing.T) {
 	if errCode(s.ControlAnimation(9, AnimControl{State: AnimRunning}, t0)) != "ENOENT" {
 		t.Fatal("control of a missing image did not fail")
 	}
-	if errCode(s.ControlAnimation(1, AnimControl{Current: 7}, t0)) != "ENOENT" {
-		t.Fatal("selecting a missing frame did not fail")
+	// kitty ignores frame numbers that don't exist rather than failing.
+	cur := s.CurrentFrame(1)
+	if err := s.ControlAnimation(1, AnimControl{Current: 7, GapFrame: 9, Gap: 5}, t0); err != nil {
+		t.Fatalf("missing frames: %v", err)
+	}
+	if s.CurrentFrame(1) != cur {
+		t.Fatal("selecting a missing frame changed the current frame")
 	}
 }
 

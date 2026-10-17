@@ -233,6 +233,47 @@ func TestXTWINOPS(t *testing.T) {
 	}
 }
 
+// 8t (cells) and 4t (text-area pixels) become a resize request for the
+// host to grant or refuse; omitted or zero sizes keep the current one.
+func TestXTWINOPSResizeRequest(t *testing.T) {
+	cases := []struct {
+		in         string
+		cols, rows int
+		none       bool
+	}{
+		{in: "\x1b[8;30;100t", cols: 100, rows: 30},
+		{in: "\x1b[8;;100t", cols: 100, rows: 24},
+		{in: "\x1b[8;30t", cols: 80, rows: 30},
+		{in: "\x1b[4;600;1000t", cols: 100, rows: 30},
+		{in: "\x1b[4;;1005t", cols: 100, rows: 24},
+		{in: "\x1b[8;24;80t", none: true}, // already that size
+		{in: "\x1b[8t", none: true},
+	}
+	for _, c := range cases {
+		term := NewTerminal(80, 24)
+		term.SetCellPixelSize(10, 20)
+		feed(term, c.in)
+		var got []Event
+		for _, e := range term.DrainEvents() {
+			if e.Kind == EventResizeRequest {
+				got = append(got, e)
+			}
+		}
+		if c.none {
+			if len(got) != 0 {
+				t.Errorf("%q: unexpected request %+v", c.in, got)
+			}
+			continue
+		}
+		if len(got) != 1 || got[0].Cols != c.cols || got[0].Rows != c.rows {
+			t.Errorf("%q: got %+v, want one request for %dx%d", c.in, got, c.cols, c.rows)
+		}
+		if term.Grid.Cols != 80 || term.Grid.Rows != 24 {
+			t.Errorf("%q: parser resized the grid itself", c.in)
+		}
+	}
+}
+
 func TestTitleStack(t *testing.T) {
 	term := NewTerminal(10, 3)
 	feed(term, "\x1b]2;one\x07\x1b[22;0t\x1b]2;two\x07")

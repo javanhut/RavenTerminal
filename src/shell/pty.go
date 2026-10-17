@@ -19,6 +19,7 @@ import (
 
 	"github.com/creack/pty"
 	"github.com/javanhut/RavenTerminal/src/config"
+	"github.com/javanhut/RavenTerminal/src/version"
 )
 
 // darwinDefaultPath is the fallback PATH on macOS when the login shell can't be
@@ -447,9 +448,14 @@ func newPtySession(cols, rows uint16, pxW, pxH int, startDir string, command []s
 	env = replaceEnv(env, "TERM", TermName())
 	env = replaceEnv(env, "COLORTERM", "truecolor")
 	env = replaceEnv(env, "TERM_PROGRAM", "RavenTerminal")
-	env = replaceEnv(env, "TERM_PROGRAM_VERSION", "1.0")
+	env = replaceEnv(env, "TERM_PROGRAM_VERSION", version.String())
 	env = replaceEnv(env, "RAVEN_TERMINAL", "1")
-	env = replaceEnv(env, "HOME", currentUser.HomeDir)
+	configuredHome := cfg.Shell.Home
+	if configuredHome == "" {
+		configuredHome = cfg.Shell.AdditionalEnv["HOME"]
+	}
+	home := sessionHome(configuredHome, os.Getenv("HOME"), currentUser.HomeDir)
+	env = replaceEnv(env, "HOME", home)
 	env = replaceEnv(env, "USER", currentUser.Username)
 	env = replaceEnv(env, "SHELL", shell)
 	// NOTE: deliberately do NOT export COLUMNS/LINES. ncurses (use_env) and many
@@ -480,9 +486,13 @@ func newPtySession(cols, rows uint16, pxW, pxH int, startDir string, command []s
 		env = replaceEnv(env, "XDG_SESSION_TYPE", "wayland")
 	}
 
-	// Add additional env from config
+	// [shell.env] overrides the defaults above. HOME is the exception: it
+	// was already resolved (shell.home first, then this table), with ~/
+	// expanded, and the start directory follows it, so it is not re-set raw.
 	for k, v := range cfg.Shell.AdditionalEnv {
-		env = replaceEnv(env, k, v)
+		if k != "HOME" {
+			env = replaceEnv(env, k, v)
+		}
 	}
 
 	// For zsh, inject Raven's init via the standard ZDOTDIR shim.
@@ -504,14 +514,12 @@ func newPtySession(cols, rows uint16, pxW, pxH int, startDir string, command []s
 	}
 
 	cmd.Env = env
-	if startDir != "" {
-		if info, err := os.Stat(startDir); err == nil && info.IsDir() {
-			cmd.Dir = startDir
-		} else {
-			cmd.Dir = currentUser.HomeDir
+	cmd.Dir = currentUser.HomeDir
+	for _, dir := range []string{startDir, home} {
+		if info, err := os.Stat(dir); dir != "" && err == nil && info.IsDir() {
+			cmd.Dir = dir
+			break
 		}
-	} else {
-		cmd.Dir = currentUser.HomeDir
 	}
 
 	ptmx, err := pty.StartWithSize(cmd, winsize(cols, rows, pxW, pxH))
@@ -564,6 +572,26 @@ func recoverLog(where string) {
 	if r := recover(); r != nil {
 		fmt.Fprintf(os.Stderr, "raven: recovered panic in %s: %v\n", where, r)
 	}
+}
+
+// sessionHome is the HOME a session gets: the home set in settings
+// (shell.home, "~/" meaning the account's home), else the HOME the terminal
+// itself was started with, else the account's home from the user database.
+// The inherited HOME is kept so that launching with a scratch HOME (tests,
+// sandboxes, a second profile) reaches the shell instead of being reset.
+func sessionHome(configured, inherited, account string) string {
+	configured = strings.TrimSpace(configured)
+	switch {
+	case configured == "~":
+		return account
+	case strings.HasPrefix(configured, "~/"):
+		return account + configured[1:]
+	case configured != "":
+		return configured
+	case inherited != "":
+		return inherited
+	}
+	return account
 }
 
 func replaceEnv(env []string, key, value string) []string {

@@ -163,3 +163,41 @@ GLFWAPI GLFWmonitor* glfwGetWindowCurrentMonitor(GLFWwindow* handle)
     _GLFW_REQUIRE_INIT_OR_RETURN(NULL);
     return (GLFWmonitor*) _glfwPlatformGetWindowCurrentMonitor(window);
 }
+
+GLFWAPI int glfwGetScancodeSymbols(int scancode, unsigned int* keysym,
+                                   unsigned int* codepoint,
+                                   unsigned int* shiftedCodepoint)
+{
+    unsigned int syms[2] = { 0, 0 };
+    unsigned int cps[2] = { 0, 0 };
+    int found = GLFW_FALSE;
+
+    if (keysym)
+        *keysym = 0;
+    if (codepoint)
+        *codepoint = 0;
+    if (shiftedCodepoint)
+        *shiftedCodepoint = 0;
+
+    _GLFW_REQUIRE_INIT_OR_RETURN(GLFW_FALSE);
+
+#if defined(_GLFW_X11) || defined(_GLFW_WAYLAND)
+    found = _glfwPlatformRavenScancodeKeysyms(scancode, syms);
+    for (int i = 0;  i < 2;  i++)
+    {
+        const uint32_t cp = syms[i] ? _glfwKeySym2Unicode(syms[i]) : GLFW_INVALID_CODEPOINT;
+        if (cp != GLFW_INVALID_CODEPOINT)
+            cps[i] = cp;
+    }
+#endif
+
+    if (!found)
+        return GLFW_FALSE;
+    if (keysym)
+        *keysym = syms[0];
+    if (codepoint)
+        *codepoint = cps[0];
+    if (shiftedCodepoint)
+        *shiftedCodepoint = cps[1];
+    return GLFW_TRUE;
+}

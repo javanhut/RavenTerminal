@@ -319,3 +319,10 @@ Keys are encoded like xterm, following the active keyboard layout:
   keys (4, shifted and base-layout key), report all keys as escape codes (8,
   including modifier keys and Caps/Num Lock state) and associated text (16).
   Leader shortcuts keep working while a program has the protocol enabled.
+  On Linux the shifted key comes from your active keyboard layout (German
+  Shift+7 reports `/`), and media keys (play, pause, next, volume, mute …)
+  are reported. Hyper and Meta are reported only when your keymap gives them
+  a modifier of their own; stock keymaps share Hyper with Super (Mod4) and
+  Meta with Alt (Mod1), so there they read as Super and Alt. AltGr reports
+  as ISO_Level3_Shift, not Right Alt. On macOS the shifted key falls back to
+  a US-layout guess.

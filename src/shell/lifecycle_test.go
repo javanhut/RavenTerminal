@@ -2,6 +2,8 @@ package shell
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/javanhut/RavenTerminal/src/version"
 )
 
 func startCmd(t *testing.T, argv ...string) *PtySession {
@@ -181,5 +184,44 @@ func TestWaitReapedReturnsAfterClose(t *testing.T) {
 	}
 	if !p.HasExited() {
 		t.Fatal("process not exited after WaitReaped")
+	}
+}
+
+// Settings reach a real session: [shell.env] variables, the home override
+// (shell.home beats a HOME in [shell.env]) as both $HOME and the start
+// directory, and the build version.
+func TestSessionEnvFromSettings(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	alt := filepath.Join(home, "alt")
+	if err := os.MkdirAll(filepath.Join(home, ".config", "raven-terminal"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(alt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "[shell]\nhome = \"" + alt + "\"\n\n[shell.env]\nRAVEN_TEST_VAR = \"from settings\"\nHOME = \"/nonexistent\"\n"
+	if err := os.WriteFile(filepath.Join(home, ".config", "raven-terminal", "config.toml"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := NewPtySessionSized(80, 24, 640, 384, "", []string{"sh", "-c", `echo "[$RAVEN_TEST_VAR|$HOME|$(pwd)|$TERM_PROGRAM_VERSION]"`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { p.Close() })
+	var out bytes.Buffer
+	buf := make([]byte, 4096)
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(out.String(), "]") && time.Now().Before(deadline) {
+		n, err := p.Read(buf)
+		out.Write(buf[:n])
+		if err != nil {
+			break
+		}
+	}
+	want := "[from settings|" + alt + "|" + alt + "|" + version.String() + "]"
+	if !strings.Contains(out.String(), want) {
+		t.Fatalf("output %q, want %q", out.String(), want)
 	}
 }

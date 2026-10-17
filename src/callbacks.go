@@ -6,6 +6,7 @@ import (
 	"math"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/javanhut/RavenTerminal/src/aipanel"
@@ -1085,6 +1086,14 @@ func keyEvent(key glfw.Key, scancode int, action glfw.Action, mods glfw.Modifier
 	ev := keybindings.Event{Key: key, Mods: mods, Action: action}
 	if name := glfw.GetKeyName(key, scancode); utf8.RuneCountInString(name) == 1 {
 		ev.Rune, _ = utf8.DecodeRuneInString(name)
+	}
+	// The XKB keymap adds the layout's Shift character and the keysym, which
+	// names media keys (KeyUnknown to GLFW) and remapped modifiers.
+	if syms, ok := glfw.GetScancodeSymbols(scancode); ok {
+		ev.Shifted, ev.Keysym = syms.Shifted, syms.Keysym
+		if ev.Rune == 0 && key == glfw.KeyUnknown && unicode.IsPrint(syms.Rune) {
+			ev.Rune = syms.Rune
+		}
 	}
 	return ev
 }

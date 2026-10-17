@@ -560,6 +560,20 @@ extern "C" {
  *  GLFW_LOCK_KEY_MODS input mode is set.
  */
 #define GLFW_MOD_NUM_LOCK        0x0020
+/*! @brief If this bit is set one or more Hyper keys were held down.
+ *
+ *  Raven extension (X11 and Wayland).  Set only when the keymap puts Hyper on
+ *  a modifier of its own; stock keymaps share Mod4 between Hyper and Super,
+ *  and there the bit is never set.
+ */
+#define GLFW_MOD_HYPER           0x0040
+/*! @brief If this bit is set one or more Meta keys were held down.
+ *
+ *  Raven extension (X11 and Wayland).  Set only when the keymap puts Meta on
+ *  a modifier of its own; stock keymaps share Mod1 between Meta and Alt, and
+ *  there the bit is never set.
+ */
+#define GLFW_MOD_META            0x0080
 
 /*! @} */
 
@@ -5388,6 +5402,22 @@ GLFWAPI const char* glfwGetPrimarySelectionString(void);
 GLFWAPI GLFWpreeditfun glfwSetPreeditCallback(GLFWwindow* window, GLFWpreeditfun callback);
 GLFWAPI void glfwSetIMECursorRect(GLFWwindow* window, int x, int y, int width, int height);
 GLFWAPI GLFWmonitor* glfwGetWindowCurrentMonitor(GLFWwindow* window);
+
+/*! @brief Raven extension: what a key produces in the active layout.
+ *
+ *  Stores the XKB keysym the scancode produces with no modifiers, its Unicode
+ *  codepoint, and the codepoint it produces with Shift alone, each in the
+ *  active layout group.  Codepoints are zero for keysyms without one (media
+ *  keys, modifiers).  This also covers keys reported as @ref
+ *  GLFW_KEY_UNKNOWN, which is how media keys arrive.
+ *
+ *  @return `GLFW_TRUE` on success, or `GLFW_FALSE` where the platform has no
+ *  keysyms (macOS, Windows) or no keymap has been received yet; the outputs
+ *  are then zero.
+ */
+GLFWAPI int glfwGetScancodeSymbols(int scancode, unsigned int* keysym,
+                                   unsigned int* codepoint,
+                                   unsigned int* shiftedCodepoint);
 
 /*! @brief Returns the GLFW time.
  *

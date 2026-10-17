@@ -4,11 +4,12 @@ import (
 	"fmt"
 
 	"github.com/javanhut/RavenTerminal/src/grid"
+	"github.com/javanhut/RavenTerminal/src/version"
 )
 
-// Version is reported by XTVERSION; override with
-// -ldflags "-X github.com/javanhut/RavenTerminal/src/parser.Version=x.y.z".
-var Version = "1.0.0"
+// Version is reported by XTVERSION. It is the build version (see package
+// version); a var only so tests can pin it.
+var Version = version.String()
 
 const (
 	defaultCellW  = 8

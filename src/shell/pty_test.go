@@ -165,3 +165,21 @@ func TestComposePathCustomDirAlreadyInBaseMovesFirst(t *testing.T) {
 		t.Fatalf("composePath = %q, want %q", got, "/bin:/usr/bin")
 	}
 }
+
+func TestSessionHome(t *testing.T) {
+	cases := []struct {
+		name, configured, inherited, want string
+	}{
+		{"inherited HOME is kept", "", "/tmp/scratch", "/tmp/scratch"},
+		{"no HOME falls back to the account", "", "", "/home/raven"},
+		{"settings override the inherited HOME", "/srv/alt", "/tmp/scratch", "/srv/alt"},
+		{"tilde means the account home", "~/profiles/work", "/tmp/scratch", "/home/raven/profiles/work"},
+		{"bare tilde", "~", "/tmp/scratch", "/home/raven"},
+		{"blank setting is unset", "   ", "/tmp/scratch", "/tmp/scratch"},
+	}
+	for _, c := range cases {
+		if got := sessionHome(c.configured, c.inherited, "/home/raven"); got != c.want {
+			t.Errorf("%s: sessionHome(%q, %q) = %q, want %q", c.name, c.configured, c.inherited, got, c.want)
+		}
+	}
+}

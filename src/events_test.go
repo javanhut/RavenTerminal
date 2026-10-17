@@ -17,6 +17,7 @@ type fakeSink struct {
 	attention int
 	bells     int
 	fonts     []string
+	resizes   [][2]int
 }
 
 func (f *fakeSink) notify(n notification) { f.notes = append(f.notes, n) }
@@ -24,6 +25,10 @@ func (f *fakeSink) requestAttention()     { f.attention++ }
 func (f *fakeSink) visualBell(*tab.Pane)  { f.bells++ }
 func (f *fakeSink) changeFont(name string) {
 	f.fonts = append(f.fonts, name)
+}
+
+func (f *fakeSink) resizePane(_ *tab.Pane, cols, rows int) {
+	f.resizes = append(f.resizes, [2]int{cols, rows})
 }
 
 func route(p eventPolicy, visible bool, evs ...parser.Event) (*fakeSink, bool) {
@@ -229,5 +234,53 @@ func TestPointerOnlyOverPanes(t *testing.T) {
 	}
 	if got := pointerFor("text", true); got != "text" {
 		t.Fatalf("over pane = %q", got)
+	}
+}
+
+func TestRouteResizeRequestNeedsOptInAndVisibility(t *testing.T) {
+	req := parser.Event{Kind: parser.EventResizeRequest, Cols: 100, Rows: 30}
+	cases := []struct {
+		windowOps, visible bool
+		want               int
+	}{
+		{false, true, 0},
+		{true, false, 0},
+		{true, true, 1},
+	}
+	for _, c := range cases {
+		s, _ := route(eventPolicy{windowOps: c.windowOps}, c.visible, req)
+		if len(s.resizes) != c.want {
+			t.Errorf("windowOps=%v visible=%v: %d resizes, want %d", c.windowOps, c.visible, len(s.resizes), c.want)
+		}
+		if c.want == 1 && s.resizes[0] != [2]int{100, 30} {
+			t.Errorf("resize %v, want 100x30", s.resizes[0])
+		}
+	}
+}
+
+func TestEventPolicyWindowOpsDefaultsOff(t *testing.T) {
+	if eventPolicyFor(nil, true).windowOps {
+		t.Fatal("window ops on by default")
+	}
+}
+
+func TestResizedWindow(t *testing.T) {
+	cases := []struct {
+		name                       string
+		fbW, fbH, winW, winH       int
+		cw, ch                     float64
+		dCols, dRows, wantW, wantH int
+	}{
+		{"scale 1 grows by whole cells", 800, 600, 800, 600, 10, 20, 20, -6, 1000, 480},
+		{"scale 2 halves into window coords", 1600, 1200, 800, 600, 20, 40, 20, -6, 1000, 480},
+		// 1.25: 7 more 12.5px cells = 87.5 fb px = 70 window px.
+		{"fractional scale rounds up", 1000, 750, 800, 600, 12.5, 25, 7, 0, 870, 600},
+		{"no change", 800, 600, 800, 600, 10, 20, 0, 0, 800, 600},
+	}
+	for _, c := range cases {
+		w, h := resizedWindow(c.fbW, c.fbH, c.winW, c.winH, c.cw, c.ch, c.dCols, c.dRows)
+		if w != c.wantW || h != c.wantH {
+			t.Errorf("%s: got %dx%d, want %dx%d", c.name, w, h, c.wantW, c.wantH)
+		}
 	}
 }

@@ -342,6 +342,10 @@ typedef struct _GLFWlibraryX11
         int          major;
         int          minor;
         unsigned int group;
+        // Raven: the core modifier masks Hyper and Meta own, 0 when they
+        // share one with another GLFW modifier
+        unsigned int hyperMask;
+        unsigned int metaMask;
     } xkb;
 
     struct {
@@ -455,4 +459,7 @@ void _glfwReleaseErrorHandlerX11(void);
 void _glfwInputErrorX11(int error, const char* message);
 
 void _glfwPushSelectionToManagerX11(void);
+
+void _glfwRavenUpdateModifierMasksX11(void);
+int _glfwPlatformRavenScancodeKeysyms(int scancode, unsigned int keysyms[2]);
 

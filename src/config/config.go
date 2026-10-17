@@ -66,6 +66,9 @@ type OllamaConfig struct {
 type ShellConfig struct {
 	// Path to shell binary (empty = system default)
 	Path string `toml:"path"`
+	// Home is the HOME shells start with and their default directory
+	// (empty = the HOME the terminal was started with).
+	Home string `toml:"home"`
 	// SourceRC whether to source user's rc files (.bashrc, .zshrc, etc.)
 	SourceRC bool `toml:"source_rc"`
 	// Paths are extra directories prepended to PATH for every shell.
@@ -114,6 +117,10 @@ type Config struct {
 	// OSC 52 queries. Off by default: clipboard read is a data-exfiltration
 	// vector, so kitty and wezterm gate it behind an opt-in too.
 	AllowClipboardRead bool `toml:"allow_clipboard_read"`
+	// AllowWindowOps lets applications resize the window with XTWINOPS
+	// (CSI 8 ; rows ; cols t, CSI 4 ; height ; width t). Off by default, as
+	// in xterm (allowWindowOps): any program could otherwise reshape it.
+	AllowWindowOps bool `toml:"allow_window_ops"`
 	// RestoreSession reopens the previous run's tabs, splits, and working
 	// directories at startup. Only the layout is restored — shells are fresh.
 	RestoreSession bool `toml:"restore_session"`

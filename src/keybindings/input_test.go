@@ -16,13 +16,16 @@ const (
 )
 
 type kcase struct {
-	name   string
-	key    glfw.Key
-	mods   glfw.ModifierKey
-	r      rune
-	action glfw.Action
-	mode   Mode
-	want   string
+	name string
+	key  glfw.Key
+	mods glfw.ModifierKey
+	r    rune
+	// shifted and sym are the layout's Shift character and XKB keysym.
+	shifted rune
+	sym     uint32
+	action  glfw.Action
+	mode    Mode
+	want    string
 }
 
 func runCases(t *testing.T, cases []kcase) {
@@ -35,7 +38,7 @@ func runCases(t *testing.T, cases []kcase) {
 		case rel:
 			act = glfw.Release
 		}
-		res := Translate(Event{Key: c.key, Mods: c.mods, Action: act, Rune: c.r}, c.mode)
+		res := Translate(Event{Key: c.key, Mods: c.mods, Action: act, Rune: c.r, Shifted: c.shifted, Keysym: c.sym}, c.mode)
 		got := string(res.Data)
 		if c.want == "" {
 			if res.Action == ActionInput || got != "" {
@@ -321,6 +324,66 @@ func TestKittyKeyboard(t *testing.T) {
 		// flags without 1 or 8 keep legacy bytes
 		{name: "2 only ctrl+a legacy", key: glfw.KeyA, mods: ctrl, r: 'a', mode: k(2), want: "\x01"},
 		{name: "kitty ctrl+q not exit", key: glfw.KeyQ, mods: ctrl, r: 'q', mode: k(31), want: "\x1b[113;5u"},
+	})
+}
+
+// Layout-aware Shift characters, Hyper/Meta, and keys GLFW has no token for,
+// all of which come from the XKB keymap (Event.Shifted, Event.Keysym).
+func TestKittyKeyboardFromKeymap(t *testing.T) {
+	linux(t)
+	k := func(f uint8) Mode { return Mode{KittyFlags: f} }
+	const (
+		hyper = glfw.ModHyper
+		meta  = glfw.ModMeta
+		unk   = glfw.KeyUnknown
+	)
+	runCases(t, []kcase{
+		// Shifted key from the layout, not a US table: German Shift+7 is
+		// '/', where the US guess said '&'.
+		{name: "de shift+alt+7", key: glfw.Key7, mods: shift | alt, r: '7', shifted: '/', mode: k(5), want: "\x1b[55:47;4u"},
+		{name: "de shift+7 text", key: glfw.Key7, mods: shift, r: '7', shifted: '/', mode: k(24), want: "\x1b[55;2;47u"},
+		{name: "de shift+ß", key: glfw.KeyMinus, mods: shift | alt, r: 'ß', shifted: '?', mode: k(5), want: "\x1b[223:63:45;4u"},
+		// AZERTY: the unshifted key is '&' and Shift gives the digit.
+		{name: "fr shift+alt+1", key: glfw.Key1, mods: shift | alt, r: '&', shifted: '1', mode: k(5), want: "\x1b[38:49:49;4u"},
+		{name: "fr shift+1 text", key: glfw.Key1, mods: shift, r: '&', shifted: '1', mode: k(24), want: "\x1b[38;2;49u"},
+		{name: "cyrillic shift letter", key: glfw.KeyC, mods: shift | alt, r: 'с', shifted: 'С', mode: k(5), want: "\x1b[1089:1057:99;4u"},
+		{name: "shifted same as key not reported", key: glfw.KeySpace, mods: shift | alt, r: ' ', shifted: ' ', mode: k(5), want: "\x1b[32;4u"},
+		{name: "no shift no shifted field", key: glfw.Key7, mods: alt, r: '7', shifted: '/', mode: k(5), want: "\x1b[55;3u"},
+		{name: "unknown layout keeps US guess", key: glfw.Key1, mods: shift | alt, r: '1', mode: k(5), want: "\x1b[49:33;4u"},
+		// Hyper and Meta modifier bits (16 and 32).
+		{name: "1 hyper+a", key: glfw.KeyA, mods: hyper, r: 'a', mode: k(1), want: "\x1b[97;17u"},
+		{name: "1 meta+a", key: glfw.KeyA, mods: meta, r: 'a', mode: k(1), want: "\x1b[97;33u"},
+		{name: "1 ctrl+hyper+meta+up", key: glfw.KeyUp, mods: ctrl | hyper | meta, mode: k(1), want: "\x1b[1;53A"},
+		{name: "24 hyper+a has no text", key: glfw.KeyA, mods: hyper, r: 'a', mode: k(24), want: "\x1b[97;17u"},
+		// Modifier keys named by their keysym, not the physical key.
+		{name: "8 Hyper_L on caps", key: glfw.KeyCapsLock, sym: 0xffed, mode: k(8), want: "\x1b[57445;17u"},
+		{name: "8 Hyper_R", key: unk, sym: 0xffee, mode: k(8), want: "\x1b[57451;17u"},
+		{name: "8 Meta_L", key: glfw.KeyLeftAlt, sym: 0xffe7, mode: k(8), want: "\x1b[57446;33u"},
+		{name: "8 Meta_R", key: unk, sym: 0xffe8, mode: k(8), want: "\x1b[57452;33u"},
+		{name: "10 Hyper_L release", key: glfw.KeyCapsLock, mods: hyper, sym: 0xffed, action: rel, mode: k(10), want: "\x1b[57445;1:3u"},
+		{name: "8 AltGr is level3 shift, not alt", key: glfw.KeyRightAlt, sym: 0xfe03, mode: k(8), want: "\x1b[57453u"},
+		{name: "8 level5 shift", key: unk, sym: 0xfe11, mode: k(8), want: "\x1b[57454u"},
+		{name: "8 Alt_R stays right alt", key: glfw.KeyRightAlt, sym: 0xffea, mode: k(8), want: "\x1b[57449;3u"},
+		{name: "1 Hyper_L press not reported", key: glfw.KeyCapsLock, sym: 0xffed, mode: k(1), want: ""},
+		// Media keys: GLFW_KEY_UNKNOWN, identified by keysym.
+		{name: "1 play", key: unk, sym: 0x1008ff14, mode: k(1), want: "\x1b[57428u"},
+		{name: "1 pause", key: unk, sym: 0x1008ff31, mode: k(1), want: "\x1b[57429u"},
+		{name: "1 play/pause", key: unk, sym: 0x100810a4, mode: k(1), want: "\x1b[57430u"},
+		{name: "1 stop", key: unk, sym: 0x1008ff15, mode: k(1), want: "\x1b[57432u"},
+		{name: "1 forward", key: unk, sym: 0x1008ff97, mode: k(1), want: "\x1b[57433u"},
+		{name: "1 rewind", key: unk, sym: 0x1008ff3e, mode: k(1), want: "\x1b[57434u"},
+		{name: "1 next", key: unk, sym: 0x1008ff17, mode: k(1), want: "\x1b[57435u"},
+		{name: "1 prev", key: unk, sym: 0x1008ff16, mode: k(1), want: "\x1b[57436u"},
+		{name: "1 record", key: unk, sym: 0x1008ff1c, mode: k(1), want: "\x1b[57437u"},
+		{name: "1 volume down", key: unk, sym: 0x1008ff11, mode: k(1), want: "\x1b[57438u"},
+		{name: "1 volume up", key: unk, sym: 0x1008ff13, mode: k(1), want: "\x1b[57439u"},
+		{name: "1 mute", key: unk, sym: 0x1008ff12, mode: k(1), want: "\x1b[57440u"},
+		{name: "1 ctrl+next", key: unk, sym: 0x1008ff17, mods: ctrl, mode: k(1), want: "\x1b[57435;5u"},
+		{name: "3 play release", key: unk, sym: 0x1008ff14, action: rel, mode: k(3), want: "\x1b[57428;1:3u"},
+		{name: "legacy play sends nothing", key: unk, sym: 0x1008ff14, mode: Mode{}, want: ""},
+		{name: "unknown keysym sends nothing", key: unk, sym: 0x1008ff2b, mode: k(8), want: ""},
+		// A text key GLFW has no token for still reports its character.
+		{name: "8 unknown key with text", key: unk, r: 'ü', sym: 0xfc, mode: k(8), want: "\x1b[252u"},
 	})
 }
 

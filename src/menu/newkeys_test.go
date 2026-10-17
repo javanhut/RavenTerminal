@@ -66,3 +66,35 @@ func TestNewSettingsEntries(t *testing.T) {
 		t.Fatalf("notify after = %d", m.Config.NotifyCommandAfter)
 	}
 }
+
+func TestBasicMenuHomeSetting(t *testing.T) {
+	m := NewMenu()
+	m.Open()
+	selectLabel(t, m, "Basic Settings...")
+	selectLabel(t, m, "Home: (inherited $HOME)")
+	m.InputBuffer = "  ~/profiles/work "
+	m.HandleEnter()
+	if m.Config.Shell.Home != "~/profiles/work" {
+		t.Fatalf("home = %q", m.Config.Shell.Home)
+	}
+	selectLabel(t, m, "Home: ~/profiles/work")
+	m.InputBuffer = ""
+	m.HandleEnter()
+	if m.Config.Shell.Home != "" {
+		t.Fatalf("clearing home left %q", m.Config.Shell.Home)
+	}
+	selectLabel(t, m, "Home: (inherited $HOME)")
+}
+
+func TestBasicMenuWindowOpsToggle(t *testing.T) {
+	m := NewMenu()
+	m.Open()
+	selectLabel(t, m, "Basic Settings...")
+	if m.Config.AllowWindowOps {
+		t.Fatal("window ops on by default")
+	}
+	selectLabel(t, m, "Let Apps Resize the Window")
+	if !m.Config.AllowWindowOps {
+		t.Fatal("toggle did not enable window ops")
+	}
+}

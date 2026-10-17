@@ -827,7 +827,13 @@ var ipcInjectKeys = func(a *App, steps []keyStep) {
 		if st.Char != 0 {
 			a.onChar(w, st.Char, st.Mods)
 		} else {
-			a.onKey(w, st.Key, 0, st.Action, st.Mods)
+			// The key's real scancode, so layout lookups (the kitty shifted
+			// key) see the live keymap as a physical press would.
+			scancode := 0
+			if st.Key != glfw.KeyUnknown {
+				scancode = glfw.GetKeyScancode(st.Key)
+			}
+			a.onKey(w, st.Key, scancode, st.Action, st.Mods)
 		}
 	}
 }

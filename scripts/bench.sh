@@ -197,6 +197,10 @@ if [ "$COLS" = "$WANT_COLS" ] && [ "$ROWS" = "$WANT_ROWS" ]; then
 else
     print_warning "Geometry:  ${COLS}x${ROWS} — asked for ${WANT_COLS}x${WANT_ROWS}, terminal refused."
     print_warning "Resize manually to ${WANT_COLS}x${WANT_ROWS}, or the comparison is void."
+    if [ "${TERM_PROGRAM:-}" = "RavenTerminal" ]; then
+        print_warning "Raven grants this request with allow_window_ops = true (Settings > Basic > Let Apps Resize the Window),"
+        print_warning "in a window that is the only pane in its tab and is not maximized or fullscreen."
+    fi
 fi
 print_warning "Screen will flood; that is the benchmark running."
 echo

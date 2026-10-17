@@ -105,3 +105,12 @@ func TestInfoOutputs(t *testing.T) {
 		t.Fatalf("usage lacks flags:\n%s", u)
 	}
 }
+
+func TestParseArgsVersion(t *testing.T) {
+	for _, arg := range []string{"-V", "--version"} {
+		o, err := parseArgs([]string{arg})
+		if err != nil || !o.version {
+			t.Errorf("parseArgs(%q) = version %v, err %v; want version", arg, o.version, err)
+		}
+	}
+}

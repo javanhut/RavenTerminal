@@ -116,14 +116,17 @@ func (t *Terminal) dispatchEscIntermediate(inter []byte, final byte) {
 		if len(inter) != 1 {
 			return
 		}
-		switch final {
-		case '3':
+		// DECDHL/DECDWL are ignored while DECLRMM is set (VT510; xterm's
+		// repaint_line): margins and double-size lines don't mix.
+		switch {
+		case t.ctl.lrmm && (final == '3' || final == '4' || final == '6'):
+		case final == '3':
 			t.Grid.SetLineSizeLocked(grid.LineDoubleTop)
-		case '4':
+		case final == '4':
 			t.Grid.SetLineSizeLocked(grid.LineDoubleBottom)
-		case '5':
+		case final == '5':
 			t.Grid.SetLineSizeLocked(grid.LineSingle)
-		case '6':
+		case final == '6':
 			t.Grid.SetLineSizeLocked(grid.LineDoubleWidth)
 		}
 		if final == '8' { // DECALN

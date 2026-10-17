@@ -38,8 +38,8 @@ type frame struct {
 type animation struct {
 	frames    []*frame // frames[0] is the root frame
 	state     AnimState
-	loops     int // v: 1 = forever, n = n-1 loops back to the start
-	loopsDone int
+	loops     int // v: 1 = forever, n = play through n-1 times
+	loopsDone int // wraps past the last frame since the last s=
 	current   int // 0-based
 	shownAt   time.Time
 	gen       uint64 // bumped whenever the displayed frame may change
@@ -51,7 +51,7 @@ type FrameData struct {
 	W, H      int
 	X, Y      int
 	Base      int    // c: 1-based frame to start from (0 = Bg colour)
-	Edit      int    // r: 1-based frame to edit (0 = new frame)
+	Edit      int    // r: 1-based frame to edit (0 or past the end = new frame)
 	Gap       int    // z: ms, 0 = default, <0 = gapless
 	Overwrite bool   // X=1: replace pixels instead of alpha blending
 	Bg        uint32 // Y: RGBA background for a new frame without a base
@@ -67,7 +67,7 @@ type AnimControl struct {
 }
 
 // Compose is an a=c command: copy a W x H rect at (X, Y) of frame Src onto
-// frame Dst at (DstX, DstY). W/H 0 mean "to the edge".
+// frame Dst at (DstX, DstY). W/H 0 mean the full image width/height.
 type Compose struct {
 	Src, Dst   int
 	X, Y, W, H int
@@ -113,32 +113,35 @@ func gapOf(z int) int {
 }
 
 // LoadFrame implements a=f: it creates a frame (or edits frame Edit) and
-// returns its 1-based number.
+// returns its 1-based number. Once the image is found the number is returned
+// even on failure, since kitty's reply names the frame it targeted (r=).
 func (s *Store) LoadFrame(id ImageID, fd FrameData) (int, error) {
 	img, err := s.image(id)
 	if err != nil {
 		return 0, err
 	}
+	a := s.anim(img)
+	n := fd.Edit
+	if n < 1 || n > len(a.frames) {
+		n = len(a.frames) + 1
+	}
 	if fd.X < 0 || fd.Y < 0 || fd.W <= 0 || fd.H <= 0 || fd.X+fd.W > img.Width || fd.Y+fd.H > img.Height ||
 		len(fd.Pixels) < 4*fd.W*fd.H {
-		return 0, errorf("EINVAL", "frame data out of bounds")
+		return n, errorf("EINVAL", "frame data out of bounds")
 	}
-	a := s.anim(img)
-	if fd.Edit == 0 && len(a.frames) >= maxFrames {
-		return 0, errorf("EINVAL", "too many frames")
+	if n > len(a.frames) && len(a.frames) >= maxFrames {
+		return n, errorf("EINVAL", "too many frames")
 	}
 	canvas := make([]byte, 4*img.Width*img.Height)
 	var old *frame
 	switch {
-	case fd.Edit > 0:
-		if old, err = a.frameAt(fd.Edit); err != nil {
-			return 0, err
-		}
+	case n <= len(a.frames):
+		old = a.frames[n-1]
 		copy(canvas, old.pixels)
 	case fd.Base > 0:
 		base, err := a.frameAt(fd.Base)
 		if err != nil {
-			return 0, err
+			return n, errorf("EINVAL", "no such base frame")
 		}
 		copy(canvas, base.pixels)
 	default:
@@ -151,7 +154,6 @@ func (s *Store) LoadFrame(id ImageID, fd FrameData) (int, error) {
 	}
 	blit(canvas, img.Width, fd.Pixels, fd.W, 0, 0, fd.W, fd.H, fd.X, fd.Y, !fd.Overwrite)
 	if old != nil {
-		n := fd.Edit
 		gap := old.gap
 		if fd.Gap != 0 {
 			gap = gapOf(fd.Gap)
@@ -197,10 +199,10 @@ func (s *Store) ComposeFrames(id ImageID, c Compose) error {
 	}
 	w, h := c.W, c.H
 	if w == 0 {
-		w = img.Width - c.X
+		w = img.Width
 	}
 	if h == 0 {
-		h = img.Height - c.Y
+		h = img.Height
 	}
 	if c.X < 0 || c.Y < 0 || c.DstX < 0 || c.DstY < 0 || w <= 0 || h <= 0 ||
 		c.X+w > img.Width || c.Y+h > img.Height || c.DstX+w > img.Width || c.DstY+h > img.Height {
@@ -246,43 +248,45 @@ func blit(dst []byte, dstW int, src []byte, srcW, sx, sy, w, h, dx, dy int, blen
 	}
 }
 
-// ControlAnimation implements a=a.
+// ControlAnimation implements a=a. Like kitty, it fails only for a missing
+// image: frame numbers that don't exist are ignored.
 func (s *Store) ControlAnimation(id ImageID, c AnimControl, now time.Time) error {
 	img, err := s.image(id)
 	if err != nil {
 		return err
 	}
 	a := s.anim(img)
-	if c.GapFrame > 0 && c.Gap != 0 {
-		f, err := a.frameAt(c.GapFrame)
-		if err != nil {
-			return err
-		}
+	if f, err := a.frameAt(c.GapFrame); err == nil && c.Gap != 0 {
 		f.gap = gapOf(c.Gap)
 	}
-	if c.Current > 0 {
-		if _, err := a.frameAt(c.Current); err != nil {
-			return err
-		}
+	if _, err := a.frameAt(c.Current); err == nil && c.Current-1 != a.current {
 		a.current, a.shownAt = c.Current-1, now
 		a.gen++
 	}
 	if c.Loops > 0 {
-		a.loops, a.loopsDone = c.Loops, 0
+		// A raised v can resume a finished animation; time it from now
+		// rather than replaying every loop missed since it stopped.
+		if a.finished() {
+			a.shownAt = now
+		}
+		a.loops = c.Loops
 	}
 	if c.State >= AnimStopped && c.State <= AnimRunning {
 		if a.state == AnimStopped && c.State != AnimStopped {
-			a.loopsDone, a.shownAt = 0, now
+			a.shownAt = now
 		}
-		a.state = c.State
+		a.state, a.loopsDone = c.State, 0
 	}
 	return nil
 }
 
+// finished reports whether a finite loop count (v > 1) has been used up.
+func (a *animation) finished() bool { return a.loops > 1 && a.loopsDone >= a.loops-1 }
+
 // advance moves the animation to the frame showing at now and returns when
 // the next frame is due (zero when nothing is scheduled).
 func (a *animation) advance(now time.Time) time.Time {
-	if a.state == AnimStopped || len(a.frames) < 2 {
+	if a.state == AnimStopped || len(a.frames) < 2 || a.finished() {
 		return time.Time{}
 	}
 	moving := false
@@ -305,12 +309,12 @@ func (a *animation) advance(now time.Time) time.Time {
 			if a.state == AnimLoading {
 				return time.Time{}
 			}
-			if a.loops > 1 {
-				if a.loopsDone >= a.loops-1 {
-					a.state = AnimStopped
-					return time.Time{}
-				}
-				a.loopsDone++
+			// The wrap counts as a loop and, once v-1 are done, the
+			// animation stays on the last frame: v=2 plays through once.
+			// It keeps its state, so raising v resumes it (kitty does both).
+			a.loopsDone++
+			if a.finished() {
+				return time.Time{}
 			}
 			a.current = 0
 		} else {

@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"testing"
 	"time"
+	"unicode"
 )
 
 func init() { runtime.LockOSThread() }
@@ -341,4 +342,28 @@ func TestIMECursorRectStored(t *testing.T) {
 			t.Fatalf("IME rect = %d,%d %dx%d", x, y, cw, ch)
 		}
 	})
+}
+
+// Against the live keymap, whatever it is: a letter key's Shift character
+// is its capital, and out-of-range scancodes fail cleanly.
+func TestScancodeSymbolsLiveKeymap(t *testing.T) {
+	needDisplay(t)
+	var syms KeySymbols
+	var ok, badOK bool
+	onMain(func() {
+		syms, ok = GetScancodeSymbols(GetKeyScancode(KeyA))
+		_, badOK = GetScancodeSymbols(-1)
+	})
+	if badOK {
+		t.Error("scancode -1 reported symbols")
+	}
+	if !ok {
+		t.Skip("no keymap received yet")
+	}
+	if syms.Keysym == 0 {
+		t.Fatalf("KeyA has no keysym: %+v", syms)
+	}
+	if unicode.IsLetter(syms.Rune) && syms.Shifted != unicode.ToUpper(syms.Rune) {
+		t.Errorf("KeyA = %+v, want Shifted = upper(Rune)", syms)
+	}
 }

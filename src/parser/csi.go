@@ -667,6 +667,14 @@ func (t *Terminal) setPrivateMode(p int, set bool) {
 		t.ctl.lrmm = set
 		if !set {
 			t.resetLRMargins()
+		} else {
+			// VT510: every line in page memory goes single width, so margin
+			// operations never meet a double-size line. Both screens are page
+			// memory.
+			t.Grid.FlattenLineSizesLocked()
+			if t.savedMainGrid != nil {
+				t.savedMainGrid.FlattenLineSizes()
+			}
 		}
 	case 80: // DECSDM
 		t.ctl.sixelDisplay = set

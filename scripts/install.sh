@@ -514,7 +514,10 @@ install_macos() {
     rm -f "$REPO_DIR/$APP_NAME"
     print_info "Cleaned up build artifact from source directory"
 
-    # Create Info.plist
+    # Create Info.plist. The version is the terminal's own, from the same
+    # file the binary embeds.
+    local version
+    version="$(tr -d '[:space:]' < "$REPO_DIR/src/version/VERSION")"
     local plist_content='<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -530,9 +533,9 @@ install_macos() {
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>'"$version"'</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>'"$version"'</string>
     <key>LSMinimumSystemVersion</key>
     <string>10.13</string>
     <key>NSHighResolutionCapable</key>

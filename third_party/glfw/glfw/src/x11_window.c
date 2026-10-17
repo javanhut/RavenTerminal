@@ -280,8 +280,83 @@ static int translateState(int state)
         mods |= GLFW_MOD_CAPS_LOCK;
     if (state & Mod2Mask)
         mods |= GLFW_MOD_NUM_LOCK;
+    if (state & _glfw.x11.xkb.hyperMask)
+        mods |= GLFW_MOD_HYPER;
+    if (state & _glfw.x11.xkb.metaMask)
+        mods |= GLFW_MOD_META;
 
     return mods;
+}
+
+// Raven extension: finds the core modifiers carrying Hyper and Meta keysyms,
+// minus those GLFW already reports as something else.  Stock keymaps put
+// Hyper on Mod4 with Super and Meta on Mod1 with Alt, so both stay
+// unreported unless the user gives them a modifier of their own.
+//
+void _glfwRavenUpdateModifierMasksX11(void)
+{
+    const unsigned int taken = ShiftMask | LockMask | ControlMask |
+                               Mod1Mask | Mod2Mask | Mod4Mask;
+    unsigned int hyper = 0, meta = 0;
+    XModifierKeymap* map = XGetModifierMapping(_glfw.x11.display);
+
+    if (!map)
+        return;
+
+    for (int mod = 0;  mod < 8;  mod++)
+    {
+        for (int i = 0;  i < map->max_keypermod;  i++)
+        {
+            const KeyCode keycode = map->modifiermap[mod * map->max_keypermod + i];
+            int count = 0;
+
+            if (!keycode)
+                continue;
+
+            KeySym* syms = XGetKeyboardMapping(_glfw.x11.display, keycode, 1, &count);
+            if (!syms)
+                continue;
+
+            for (int j = 0;  j < count;  j++)
+            {
+                if (syms[j] == XK_Hyper_L || syms[j] == XK_Hyper_R)
+                    hyper |= 1u << mod;
+                else if (syms[j] == XK_Meta_L || syms[j] == XK_Meta_R)
+                    meta |= 1u << mod;
+            }
+
+            XFree(syms);
+        }
+    }
+
+    XFreeModifiermap(map);
+    _glfw.x11.xkb.hyperMask = hyper & ~taken;
+    _glfw.x11.xkb.metaMask = meta & ~(taken | _glfw.x11.xkb.hyperMask);
+}
+
+// Raven extension: the keysyms a key produces in the active group with no
+// modifiers and with Shift alone
+//
+int _glfwPlatformRavenScancodeKeysyms(int scancode, unsigned int keysyms[2])
+{
+    const unsigned int masks[2] = { 0, ShiftMask };
+
+    keysyms[0] = keysyms[1] = NoSymbol;
+    if (!_glfw.x11.xkb.available || scancode < 8 || scancode > 255)
+        return GLFW_FALSE;
+
+    for (int i = 0;  i < 2;  i++)
+    {
+        unsigned int consumed;
+        KeySym sym = NoSymbol;
+
+        if (XkbLookupKeySym(_glfw.x11.display, (KeyCode) scancode,
+                            XkbBuildCoreState(masks[i], _glfw.x11.xkb.group),
+                            &consumed, &sym))
+            keysyms[i] = (unsigned int) sym;
+    }
+
+    return keysyms[0] != NoSymbol;
 }
 
 // Translates an X11 key code to a GLFW key token
@@ -1379,6 +1454,18 @@ static void processEvent(XEvent *event)
             _glfwPollMonitorsX11();
             return;
         }
+    }
+
+    // Raven: Hyper/Meta masks follow modifier remaps (xmodmap, setxkbmap)
+    if (event->type == MappingNotify)
+    {
+        XRefreshKeyboardMapping(&event->xmapping);
+        if (event->xmapping.request == MappingModifier ||
+            event->xmapping.request == MappingKeyboard)
+        {
+            _glfwRavenUpdateModifierMasksX11();
+        }
+        return;
     }
 
     if (_glfw.x11.xkb.available)

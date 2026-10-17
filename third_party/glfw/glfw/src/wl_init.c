@@ -500,6 +500,16 @@ int _glfwPlatformInit(void)
         _glfw_dlsym(_glfw.wl.xkb.handle, "xkb_state_key_get_layout");
     _glfw.wl.xkb.state_mod_index_is_active = (PFN_xkb_state_mod_index_is_active)
         _glfw_dlsym(_glfw.wl.xkb.handle, "xkb_state_mod_index_is_active");
+    _glfw.wl.xkb.keymap_min_keycode = (PFN_xkb_keymap_min_keycode)
+        _glfw_dlsym(_glfw.wl.xkb.handle, "xkb_keymap_min_keycode");
+    _glfw.wl.xkb.keymap_max_keycode = (PFN_xkb_keymap_max_keycode)
+        _glfw_dlsym(_glfw.wl.xkb.handle, "xkb_keymap_max_keycode");
+    _glfw.wl.xkb.keymap_num_levels_for_key = (PFN_xkb_keymap_num_levels_for_key)
+        _glfw_dlsym(_glfw.wl.xkb.handle, "xkb_keymap_num_levels_for_key");
+    _glfw.wl.xkb.state_update_key = (PFN_xkb_state_update_key)
+        _glfw_dlsym(_glfw.wl.xkb.handle, "xkb_state_update_key");
+    _glfw.wl.xkb.state_serialize_mods = (PFN_xkb_state_serialize_mods)
+        _glfw_dlsym(_glfw.wl.xkb.handle, "xkb_state_serialize_mods");
 
     _glfw.wl.xkb.compose_table_new_from_locale = (PFN_xkb_compose_table_new_from_locale)
         _glfw_dlsym(_glfw.wl.xkb.handle, "xkb_compose_table_new_from_locale");
@@ -741,6 +751,8 @@ void _glfwPlatformTerminate(void)
         xkb_keymap_unref(_glfw.wl.xkb.keymap);
     if (_glfw.wl.xkb.state)
         xkb_state_unref(_glfw.wl.xkb.state);
+    if (_glfw.wl.xkb.scratch)
+        xkb_state_unref(_glfw.wl.xkb.scratch);
     if (_glfw.wl.xkb.context)
         xkb_context_unref(_glfw.wl.xkb.context);
     if (_glfw.wl.xkb.handle)

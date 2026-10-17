@@ -1961,6 +1961,160 @@ static void keyboardHandleKeymap(void* userData,
     _glfw.wl.xkb.superIndex    = xkb_keymap_mod_get_index(_glfw.wl.xkb.keymap, "Mod4");
     _glfw.wl.xkb.capsLockIndex = xkb_keymap_mod_get_index(_glfw.wl.xkb.keymap, "Lock");
     _glfw.wl.xkb.numLockIndex  = xkb_keymap_mod_get_index(_glfw.wl.xkb.keymap, "Mod2");
+
+    _glfwRavenKeymapChangedWayland();
+}
+
+// Raven extension: the real modifiers a modifier key sets when pressed
+//
+static xkb_mod_mask_t ravenKeyModMask(xkb_keycode_t keycode)
+{
+    struct xkb_state* probe = xkb_state_new(_glfw.wl.xkb.keymap);
+    if (!probe)
+        return 0;
+
+    xkb_state_update_key(probe, keycode, XKB_KEY_DOWN);
+    const xkb_mod_mask_t mask =
+        xkb_state_serialize_mods(probe, XKB_STATE_MODS_DEPRESSED);
+    xkb_state_unref(probe);
+    return mask;
+}
+
+// Raven extension: rebuilds the per-keymap state behind Hyper/Meta reporting
+// and glfwGetScancodeSymbols.  Hyper and Meta have no fixed real modifier, so
+// the keymap is scanned for keys carrying their keysyms and the modifiers
+// those keys set are kept, minus any GLFW already reports as something else.
+// Stock keymaps put Hyper on Mod4 with Super and Meta on Mod1 with Alt, so
+// both stay unreported unless the user gives them a modifier of their own.
+//
+void _glfwRavenKeymapChangedWayland(void)
+{
+    struct xkb_keymap* keymap = _glfw.wl.xkb.keymap;
+
+    if (_glfw.wl.xkb.scratch)
+        xkb_state_unref(_glfw.wl.xkb.scratch);
+    _glfw.wl.xkb.scratch = keymap ? xkb_state_new(keymap) : NULL;
+    _glfw.wl.xkb.hyperMask = 0;
+    _glfw.wl.xkb.metaMask = 0;
+
+    if (!keymap)
+        return;
+
+    const xkb_mod_index_t taken[] =
+    {
+        _glfw.wl.xkb.controlIndex, _glfw.wl.xkb.altIndex,
+        _glfw.wl.xkb.shiftIndex, _glfw.wl.xkb.superIndex,
+        _glfw.wl.xkb.capsLockIndex, _glfw.wl.xkb.numLockIndex
+    };
+    xkb_mod_mask_t takenMask = 0;
+
+    for (size_t i = 0;  i < sizeof(taken) / sizeof(taken[0]);  i++)
+    {
+        if (taken[i] != XKB_MOD_INVALID && taken[i] < 32)
+            takenMask |= 1u << taken[i];
+    }
+
+    const xkb_keycode_t min = xkb_keymap_min_keycode(keymap);
+    const xkb_keycode_t max = xkb_keymap_max_keycode(keymap);
+
+    for (xkb_keycode_t keycode = min;  keycode <= max && keycode >= min;  keycode++)
+    {
+        const xkb_level_index_t levels =
+            xkb_keymap_num_levels_for_key(keymap, keycode, 0);
+
+        for (xkb_level_index_t level = 0;  level < levels;  level++)
+        {
+            const xkb_keysym_t* syms = NULL;
+            const int count =
+                xkb_keymap_key_get_syms_by_level(keymap, keycode, 0, level, &syms);
+
+            for (int i = 0;  i < count;  i++)
+            {
+                if (syms[i] == XKB_KEY_Hyper_L || syms[i] == XKB_KEY_Hyper_R)
+                    _glfw.wl.xkb.hyperMask |= ravenKeyModMask(keycode);
+                else if (syms[i] == XKB_KEY_Meta_L || syms[i] == XKB_KEY_Meta_R)
+                    _glfw.wl.xkb.metaMask |= ravenKeyModMask(keycode);
+            }
+        }
+    }
+
+    _glfw.wl.xkb.hyperMask &= ~takenMask;
+    _glfw.wl.xkb.metaMask &= ~(takenMask | _glfw.wl.xkb.hyperMask);
+}
+
+// Raven extension: the GLFW modifier bits for the current keyboard state
+//
+int _glfwRavenModifiersWayland(void)
+{
+    int mods = 0;
+
+    struct
+    {
+        xkb_mod_index_t index;
+        unsigned int bit;
+    } modifiers[] =
+    {
+        { _glfw.wl.xkb.controlIndex,  GLFW_MOD_CONTROL },
+        { _glfw.wl.xkb.altIndex,      GLFW_MOD_ALT },
+        { _glfw.wl.xkb.shiftIndex,    GLFW_MOD_SHIFT },
+        { _glfw.wl.xkb.superIndex,    GLFW_MOD_SUPER },
+        { _glfw.wl.xkb.capsLockIndex, GLFW_MOD_CAPS_LOCK },
+        { _glfw.wl.xkb.numLockIndex,  GLFW_MOD_NUM_LOCK }
+    };
+
+    for (size_t i = 0; i < sizeof(modifiers) / sizeof(modifiers[0]); i++)
+    {
+        if (xkb_state_mod_index_is_active(_glfw.wl.xkb.state,
+                                          modifiers[i].index,
+                                          XKB_STATE_MODS_EFFECTIVE) == 1)
+        {
+            mods |= modifiers[i].bit;
+        }
+    }
+
+    const xkb_mod_mask_t effective =
+        xkb_state_serialize_mods(_glfw.wl.xkb.state, XKB_STATE_MODS_EFFECTIVE);
+    if (effective & _glfw.wl.xkb.hyperMask)
+        mods |= GLFW_MOD_HYPER;
+    if (effective & _glfw.wl.xkb.metaMask)
+        mods |= GLFW_MOD_META;
+
+    return mods;
+}
+
+// Raven extension: the keysyms a key produces in its active layout group
+// with no modifiers and with Shift alone
+//
+int _glfwPlatformRavenScancodeKeysyms(int scancode, unsigned int keysyms[2])
+{
+    struct xkb_state* scratch = _glfw.wl.xkb.scratch;
+
+    keysyms[0] = keysyms[1] = XKB_KEY_NoSymbol;
+    if (!_glfw.wl.xkb.keymap || !scratch || scancode < 0)
+        return GLFW_FALSE;
+
+    const xkb_keycode_t keycode = scancode + 8;
+    const xkb_layout_index_t layout =
+        xkb_state_key_get_layout(_glfw.wl.xkb.state, keycode);
+    if (layout == XKB_LAYOUT_INVALID)
+        return GLFW_FALSE;
+
+    xkb_mod_mask_t shift = 0;
+    if (_glfw.wl.xkb.shiftIndex != XKB_MOD_INVALID && _glfw.wl.xkb.shiftIndex < 32)
+        shift = 1u << _glfw.wl.xkb.shiftIndex;
+
+    const xkb_mod_mask_t masks[2] = { 0, shift };
+
+    for (int i = 0;  i < 2;  i++)
+    {
+        const xkb_keysym_t* syms = NULL;
+
+        xkb_state_update_mask(scratch, masks[i], 0, 0, 0, 0, layout);
+        if (xkb_state_key_get_syms(scratch, keycode, &syms) == 1)
+            keysyms[i] = syms[0];
+    }
+
+    return keysyms[0] != XKB_KEY_NoSymbol;
 }
 
 static void keyboardHandleEnter(void* userData,
@@ -2069,31 +2223,8 @@ static void keyboardHandleModifiers(void* userData,
                           0,
                           group);
 
-    _glfw.wl.xkb.modifiers = 0;
-
-    struct
-    {
-        xkb_mod_index_t index;
-        unsigned int bit;
-    } modifiers[] =
-    {
-        { _glfw.wl.xkb.controlIndex,  GLFW_MOD_CONTROL },
-        { _glfw.wl.xkb.altIndex,      GLFW_MOD_ALT },
-        { _glfw.wl.xkb.shiftIndex,    GLFW_MOD_SHIFT },
-        { _glfw.wl.xkb.superIndex,    GLFW_MOD_SUPER },
-        { _glfw.wl.xkb.capsLockIndex, GLFW_MOD_CAPS_LOCK },
-        { _glfw.wl.xkb.numLockIndex,  GLFW_MOD_NUM_LOCK }
-    };
-
-    for (size_t i = 0; i < sizeof(modifiers) / sizeof(modifiers[0]); i++)
-    {
-        if (xkb_state_mod_index_is_active(_glfw.wl.xkb.state,
-                                          modifiers[i].index,
-                                          XKB_STATE_MODS_EFFECTIVE) == 1)
-        {
-            _glfw.wl.xkb.modifiers |= modifiers[i].bit;
-        }
-    }
+    // Raven: moved to a function so Hyper/Meta can be added and tested
+    _glfw.wl.xkb.modifiers = _glfwRavenModifiersWayland();
 }
 
 #ifdef WL_KEYBOARD_REPEAT_INFO_SINCE_VERSION

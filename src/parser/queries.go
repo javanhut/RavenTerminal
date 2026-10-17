@@ -73,6 +73,10 @@ func (t *Terminal) handleXTWINOPS(params []int) {
 	g := t.Grid
 	cw, ch := t.cellSize()
 	switch params[0] {
+	case 4: // resize text area to height;width pixels
+		t.requestResize(t.getParam(params, 2, g.Cols*cw)/cw, t.getParam(params, 1, g.Rows*ch)/ch)
+	case 8: // resize text area to rows;cols cells
+		t.requestResize(t.getParam(params, 2, g.Cols), t.getParam(params, 1, g.Rows))
 	case 14:
 		t.respond(fmt.Sprintf("\x1b[4;%d;%dt", g.Rows*ch, g.Cols*cw))
 	case 16:
@@ -101,6 +105,18 @@ func (t *Terminal) handleXTWINOPS(params []int) {
 			}
 		}
 	}
+}
+
+// requestResize hands a window resize to the host, which grants it only when
+// the user allows window operations (allow_window_ops). The grid follows
+// through the normal resize path once the window has changed. Zero or
+// omitted sizes keep the current one; xterm's "zero means the whole
+// display" is not offered.
+func (t *Terminal) requestResize(cols, rows int) {
+	if cols == t.Grid.Cols && rows == t.Grid.Rows {
+		return
+	}
+	t.pushEvent(Event{Kind: EventResizeRequest, Cols: cols, Rows: rows})
 }
 
 // handleXTSMGRAPHICS answers CSI ? Pi ; Pa ; Pv S for sixel colour registers

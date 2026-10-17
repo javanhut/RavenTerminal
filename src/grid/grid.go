@@ -1479,9 +1479,11 @@ func (g *Grid) DeleteCharsLocked(n int) {
 	g.clearSized(g.CursorRow)
 
 	// Clamp to the space right of the cursor; an oversized count would index
-	// negative columns in the shift/clear loops below.
-	if n > g.Cols-g.CursorCol {
-		n = g.Cols - g.CursorCol
+	// negative columns in the shift/clear loops below. A double-width row
+	// shifts only its usable half, so text hidden past it never slides in.
+	lim := g.rowLimit(g.rows[g.CursorRow])
+	if n > lim-g.CursorCol {
+		n = lim - g.CursorCol
 	}
 	if n <= 0 {
 		return
@@ -1499,7 +1501,7 @@ func (g *Grid) DeleteCharsLocked(n int) {
 
 	// Check if the end of deletion range would break a wide character
 	endPos := g.CursorCol + n
-	if endPos < g.Cols {
+	if endPos < lim {
 		idx := g.index(endPos, g.CursorRow)
 		if g.cellAt(idx).Width == CellWidthContinuation {
 			// Would break a wide char - clear it first
@@ -1509,10 +1511,10 @@ func (g *Grid) DeleteCharsLocked(n int) {
 	}
 
 	// Now perform the shift (move transfers style ownership)
-	for col := g.CursorCol; col < g.Cols-n; col++ {
+	for col := g.CursorCol; col < lim-n; col++ {
 		g.moveCell(g.index(col, g.CursorRow), g.index(col+n, g.CursorRow))
 	}
-	g.fillSpan(g.CursorRow, g.Cols-n, g.Cols, g.eraseBg)
+	g.fillSpan(g.CursorRow, lim-n, lim, g.eraseBg)
 }
 
 // InsertChars inserts n blank characters at cursor, shifting right
@@ -1527,8 +1529,9 @@ func (g *Grid) InsertChars(n int) {
 func (g *Grid) InsertCharsLocked(n int) {
 	g.clearSized(g.CursorRow)
 
-	if n > g.Cols-g.CursorCol {
-		n = g.Cols - g.CursorCol
+	lim := g.rowLimit(g.rows[g.CursorRow]) // usable half on a double-width row
+	if n > lim-g.CursorCol {
+		n = lim - g.CursorCol
 	}
 	if n <= 0 {
 		return
@@ -1544,14 +1547,14 @@ func (g *Grid) InsertCharsLocked(n int) {
 	}
 
 	// A wide start shifted into the last column would lose its continuation.
-	if last := g.Cols - n - 1; last >= g.CursorCol {
+	if last := lim - n - 1; last >= g.CursorCol {
 		if idx := g.index(last, g.CursorRow); g.cellAt(idx).Width == CellWidthWide {
 			g.putCell(idx, NewCellWithBg(g.eraseBg))
 		}
 	}
 
 	// Shift right (move transfers style ownership)
-	for col := g.Cols - 1; col >= g.CursorCol+n; col-- {
+	for col := lim - 1; col >= g.CursorCol+n; col-- {
 		g.moveCell(g.index(col, g.CursorRow), g.index(col-n, g.CursorRow))
 	}
 	// Clear inserted positions

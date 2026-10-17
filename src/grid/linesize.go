@@ -88,6 +88,23 @@ func (g *Grid) clearLineSize(row int) {
 	}
 }
 
+// FlattenLineSizesLocked makes every active row single width, keeping its
+// text: setting DECLRMM does this to the whole page. Caller holds g.mu.
+func (g *Grid) FlattenLineSizesLocked() {
+	for row := range g.rows {
+		g.clearLineSize(row)
+	}
+	g.clampCursorCol()
+}
+
+// FlattenLineSizes is FlattenLineSizesLocked with locking, for a grid that
+// isn't the one the parser is holding (the saved main screen).
+func (g *Grid) FlattenLineSizes() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.FlattenLineSizesLocked()
+}
+
 // resetLineSizes makes every active row single width and drops sized text
 // (DECALN).
 func (g *Grid) resetLineSizes() {

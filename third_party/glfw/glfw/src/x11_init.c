@@ -797,6 +797,8 @@ static GLFWbool initExtensions(void)
                               XkbGroupStateMask, XkbGroupStateMask);
     }
 
+    _glfwRavenUpdateModifierMasksX11();
+
 #if defined(__CYGWIN__)
     _glfw.x11.x11xcb.handle = _glfw_dlopen("libX11-xcb-1.so");
 #elif defined(__OpenBSD__) || defined(__NetBSD__)

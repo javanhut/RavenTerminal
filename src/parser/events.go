@@ -14,6 +14,7 @@ const (
 	EventUserVar
 	EventRavenCommand
 	EventCommandFinished
+	EventResizeRequest
 )
 
 // Event is one queued host-facing event. Fields used per kind:
@@ -22,11 +23,13 @@ const (
 // ProgressValue (0..100). PointerShape: Shape (CSS name, "" = default).
 // UserVar / RavenCommand: Name, Value. CommandFinished: ExitCode, Value
 // (duration in milliseconds, "" if unknown), Body (command line if reported).
+// ResizeRequest: Cols, Rows (the text-area size XTWINOPS 4t/8t asked for).
 type Event struct {
 	Kind                                  EventKind
 	Title, Body, ID, Shape, Name, Value   string
 	Urgency, ProgressState, ProgressValue int
 	ExitCode                              int
+	Cols, Rows                            int
 }
 
 const maxEvents = 256

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ type eventSink interface {
 	requestAttention()
 	visualBell(p *tab.Pane)
 	changeFont(name string)
+	resizePane(p *tab.Pane, cols, rows int)
 }
 
 type eventPolicy struct {
@@ -28,6 +30,7 @@ type eventPolicy struct {
 	notifications bool
 	notifyAfter   time.Duration
 	focused       bool
+	windowOps     bool
 }
 
 // paneEvents are one pane's drained events; visible means the pane is in the
@@ -92,6 +95,11 @@ func routeEvents(batch []paneEvents, p eventPolicy, s eventSink) (redraw bool) {
 				if ev.Name == "change-font" { // applied once, after the batch
 					font, fontSet = ev.Value, true
 					redraw = true
+				}
+			case parser.EventResizeRequest:
+				// A background tab reshaping the window would be a surprise.
+				if p.windowOps && pe.visible {
+					s.resizePane(pe.pane, ev.Cols, ev.Rows)
 				}
 			case parser.EventTitle, parser.EventProgress, parser.EventPointerShape:
 				redraw = true
@@ -184,6 +192,7 @@ func eventPolicyFor(cfg *config.Config, focused bool) eventPolicy {
 		notifications: cfg.Notifications,
 		notifyAfter:   time.Duration(cfg.NotifyCommandAfter) * time.Second,
 		focused:       focused,
+		windowOps:     cfg.AllowWindowOps,
 	}
 }
 
@@ -347,4 +356,46 @@ func (a *App) changeFont(name string) {
 	if line, _, _ := strings.Cut(strings.TrimSpace(msg), "\n"); line != "" {
 		a.showToast(line)
 	}
+}
+
+// resizePane grants an XTWINOPS resize: it grows or shrinks the window by
+// whole cells so the pane ends up cols x rows, and the grid follows through
+// the ordinary framebuffer-resize path. Only a pane that is alone in its tab
+// can be sized exactly, and a fullscreen or maximized window keeps the size
+// the user gave it. The compositor may still refuse (a tiled window).
+func (a *App) resizePane(p *tab.Pane, cols, rows int) {
+	t := a.tabManager.ActiveTab()
+	if t == nil || t.PaneCount() != 1 || t.GetPanes()[0] != p || a.win.IsFullscreen() ||
+		a.win.GLFW().GetAttrib(glfw.Maximized) == glfw.True {
+		return
+	}
+	cw, ch := a.renderer.CellDimensions()
+	fbW, fbH := a.win.GetFramebufferSize()
+	winW, winH := a.win.GetSize()
+	if cw <= 0 || ch <= 0 || fbW <= 0 || fbH <= 0 {
+		return
+	}
+	g := p.Terminal.GetGrid()
+	cols = max(2, min(cols, maxRequestedCells))
+	rows = max(1, min(rows, maxRequestedCells))
+	if cols == g.Cols && rows == g.Rows {
+		return
+	}
+	w, h := resizedWindow(fbW, fbH, winW, winH, float64(cw), float64(ch),
+		cols-g.Cols, rows-g.Rows)
+	a.win.GLFW().SetSize(w, h)
+}
+
+// maxRequestedCells bounds an application's resize request per axis.
+const maxRequestedCells = 1000
+
+// resizedWindow is the window size (in window coordinates) that changes the
+// framebuffer by dCols x dRows cells of cw x ch framebuffer pixels. The
+// padding remainder is carried over, so the fitted grid lands exactly on the
+// requested size; rounding up keeps a fractional scale from losing a cell.
+func resizedWindow(fbW, fbH, winW, winH int, cw, ch float64, dCols, dRows int) (int, int) {
+	newFbW := float64(fbW) + float64(dCols)*cw
+	newFbH := float64(fbH) + float64(dRows)*ch
+	return int(math.Ceil(newFbW * float64(winW) / float64(fbW))),
+		int(math.Ceil(newFbH * float64(winH) / float64(fbH)))
 }

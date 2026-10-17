@@ -22,6 +22,8 @@ const (
 	KMAlt      uint8 = 1 << 1
 	KMCtrl     uint8 = 1 << 2
 	KMSuper    uint8 = 1 << 3
+	KMHyper    uint8 = 1 << 4
+	KMMeta     uint8 = 1 << 5
 	KMCapsLock uint8 = 1 << 6
 	KMNumLock  uint8 = 1 << 7
 )
@@ -74,6 +76,31 @@ var kittyModKeys = map[glfw.Key]kittyModKey{
 	glfw.KeyCapsLock: {57358, 0}, glfw.KeyScrollLock: {57359, 0}, glfw.KeyNumLock: {57360, 0},
 }
 
+// Modifier keys known by keysym rather than position: a Caps Lock remapped
+// to Hyper reports as Hyper, and AltGr as ISO_Level3_Shift rather than
+// Right Alt. These win over kittyModKeys.
+var kittyModKeysyms = map[uint32]kittyModKey{
+	0xffed: {57445, KMHyper}, 0xffee: {57451, KMHyper}, // Hyper_L, Hyper_R
+	0xffe7: {57446, KMMeta}, 0xffe8: {57452, KMMeta}, // Meta_L, Meta_R
+	0xfe03: {57453, 0}, 0xfe11: {57454, 0}, // ISO_Level3_Shift, ISO_Level5_Shift
+}
+
+// Media keys, which GLFW reports as KeyUnknown, by XF86 keysym.
+var kittyMediaKeysyms = map[uint32]int{
+	0x1008ff14: 57428, // XF86AudioPlay
+	0x1008ff31: 57429, // XF86AudioPause
+	0x100810a4: 57430, // XF86MediaPlayPause
+	0x1008ff15: 57432, // XF86AudioStop
+	0x1008ff97: 57433, // XF86AudioForward
+	0x1008ff3e: 57434, // XF86AudioRewind
+	0x1008ff17: 57435, // XF86AudioNext
+	0x1008ff16: 57436, // XF86AudioPrev
+	0x1008ff1c: 57437, // XF86AudioRecord
+	0x1008ff11: 57438, // XF86AudioLowerVolume
+	0x1008ff13: 57439, // XF86AudioRaiseVolume
+	0x1008ff12: 57440, // XF86AudioMute
+}
+
 func kittyMods(mods glfw.ModifierKey, locks bool) uint8 {
 	var m uint8
 	if mods&glfw.ModShift != 0 {
@@ -87,6 +114,12 @@ func kittyMods(mods glfw.ModifierKey, locks bool) uint8 {
 	}
 	if mods&glfw.ModSuper != 0 {
 		m |= KMSuper
+	}
+	if mods&glfw.ModHyper != 0 {
+		m |= KMHyper
+	}
+	if mods&glfw.ModMeta != 0 {
+		m |= KMMeta
 	}
 	if locks {
 		if mods&glfw.ModCapsLock != 0 {
@@ -160,7 +193,11 @@ func encodeKitty(ev Event, m Mode) []byte {
 	real := km &^ (KMCapsLock | KMNumLock)
 	key := ev.Key
 
-	if mk, ok := kittyModKeys[key]; ok {
+	mk, ok := kittyModKeysyms[ev.Keysym]
+	if !ok {
+		mk, ok = kittyModKeys[key]
+	}
+	if ok {
 		if !all {
 			return nil
 		}
@@ -173,6 +210,9 @@ func encodeKitty(ev Event, m Mode) []byte {
 	}
 	if key >= glfw.KeyF13 && key <= glfw.KeyF25 {
 		return kittyCSI(57376+int(key-glfw.KeyF13), 0, 0, km, event, nil, 'u')
+	}
+	if code, ok := kittyMediaKeysyms[ev.Keysym]; ok && key == glfw.KeyUnknown {
+		return kittyCSI(code, 0, 0, km, event, nil, 'u')
 	}
 
 	numLock := ev.Mods&glfw.ModNumLock != 0
@@ -212,7 +252,10 @@ func encodeKitty(ev Event, m Mode) []byte {
 		code = unicode.ToLower(c)
 		text = code
 		if km&KMShift != 0 {
-			text = shiftedRune(code, us)
+			text = ev.Shifted
+			if text == 0 {
+				text = shiftedRune(code, us)
+			}
 			if f&kittyAlternates != 0 && text != code {
 				shifted = text
 			}
@@ -225,7 +268,7 @@ func encodeKitty(ev Event, m Mode) []byte {
 		}
 	}
 
-	producesText := real&(KMAlt|KMCtrl|KMSuper) == 0
+	producesText := real&(KMAlt|KMCtrl|KMSuper|KMHyper|KMMeta) == 0
 	if !all && producesText && event != KEvRelease {
 		return nil
 	}

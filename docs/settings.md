@@ -122,6 +122,7 @@ notifications = true          # desktop notifications from apps (OSC 9, 99, 777)
 notify_command_after = 10     # notify when a command that ran this many seconds
                               # finishes while unfocused (0 = never; needs shell integration)
 allow_clipboard_read = false  # let apps read the clipboard via OSC 52 (writes always work)
+allow_window_ops = false      # let apps resize the window (XTWINOPS CSI 8 t / CSI 4 t)
 restore_session = false       # reopen the previous run's tabs, splits and directories
 fingerprint_sudo = true       # show RavenLinux's sudo fingerprint prompt as a modal
 ```
@@ -153,6 +154,7 @@ is created); going back to 1 applies at once.
 ```toml
 [shell]
 path = ""           # Shell path (empty = system default)
+home = ""           # HOME for new shells (empty = inherit the terminal's $HOME)
 source_rc = true    # Whether to source .bashrc/.zshrc etc.
 
 [shell.env]         # Additional environment variables
@@ -160,7 +162,9 @@ source_rc = true    # Whether to source .bashrc/.zshrc etc.
 ```
 
 - **path**: Specify a shell path like `/usr/bin/zsh` or leave empty for system default
+- **home**: The `HOME` new shells get, and the directory they start in when none is given. Empty keeps whatever `HOME` the terminal was launched with, falling back to your account's home if that is unset. `~/` means your account's home, so `~/profiles/work` gives shells a separate profile. Also under Settings > Basic Settings > Home.
 - **source_rc**: When `true`, sources your shell's rc files (.bashrc, .zshrc, etc.)
+- **[shell.env]**: Variables set in the environment of every new pane, before the shell starts, so `-e` commands and programs that never read shell init files see them too. They override the terminal's own defaults (`TERM`, `COLORTERM`, …). A `HOME` here is used when `home` above is empty, with the same `~/` expansion. Unlike `[exports]`, which the shell's init script runs, values are taken literally, with no `$VAR` expansion.
 
 ### Prompt Settings
 

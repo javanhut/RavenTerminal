@@ -81,6 +81,13 @@ type Event struct {
 	// Rune is the unshifted character the key produces in the active layout
 	// (glfw.GetKeyName); 0 when unknown.
 	Rune rune
+	// Shifted is the character the key produces with Shift alone in the
+	// active layout; 0 when unknown, and then a US-layout guess stands in.
+	Shifted rune
+	// Keysym is the XKB keysym the key produces without modifiers; 0 when
+	// unknown (macOS, Windows). It names keys GLFW has no token for, such as
+	// media keys, and modifier keys by role (Hyper_L, ISO_Level3_Shift).
+	Keysym uint32
 }
 
 // Mode is the terminal state that shapes how keys are encoded.
@@ -517,7 +524,8 @@ var usShifted = map[rune]rune{
 	'/': '?', '`': '~',
 }
 
-// shiftedRune is the best known Shift variant of c on the active layout.
+// shiftedRune guesses the Shift variant of c when the layout's own is
+// unknown: letters capitalise, and US punctuation follows the US layout.
 func shiftedRune(c, us rune) rune {
 	if unicode.IsLetter(c) {
 		return unicode.ToUpper(c)

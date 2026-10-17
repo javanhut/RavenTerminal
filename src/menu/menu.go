@@ -72,6 +72,7 @@ const (
 	InputScrollback
 	InputOpacity
 	InputNotifyAfter
+	InputShellHome
 )
 
 // MenuItem represents a menu item
@@ -290,11 +291,17 @@ func (m *Menu) buildBasicMenu() {
 	if currentShell == "" {
 		currentShell = "(system default)"
 	}
+	homeLabel := m.Config.Shell.Home
+	if homeLabel == "" {
+		homeLabel = "(inherited $HOME)"
+	}
 	m.Items = []MenuItem{
 		{Label: "BASIC SETTINGS", IsHeader: true},
 		{Label: "Shell: " + currentShell},
+		{Label: "Home: " + homeLabel},
 		{Label: "Source RC Files", IsToggle: true, Toggled: m.Config.Shell.SourceRC},
 		{Label: "Restore Session", IsToggle: true, Toggled: m.Config.RestoreSession},
+		{Label: "Let Apps Resize the Window", IsToggle: true, Toggled: m.Config.AllowWindowOps},
 		{Label: "Show sudo fingerprint modal", IsToggle: true, Toggled: m.Config.FingerprintSudo},
 		{Label: "  sudo asks for a finger only when Settings > Security > Approve sudo is on", Disabled: true},
 		{Label: "Bell: " + m.Config.BellMode()},
@@ -821,6 +828,8 @@ func (m *Menu) handleMainSelect() {
 		m.StatusMessage = "Updated (save to persist)"
 	case strings.HasPrefix(label, "Shell:"):
 		m.navigateTo(MenuShellSelect, m.buildShellMenu)
+	case strings.HasPrefix(label, "Home:"):
+		m.startInputWithValue(InputShellHome, "Home for new shells (empty = inherit $HOME, ~/ = your home):", m.Config.Shell.Home)
 	case label == "Source RC Files":
 		m.Config.Shell.SourceRC = !m.Config.Shell.SourceRC
 		m.rebuildCurrent()
@@ -872,6 +881,10 @@ func (m *Menu) handleMainSelect() {
 		m.StatusMessage = "Updated (save to persist)"
 	case strings.HasPrefix(label, "Notify Commands After:"):
 		m.startInputWithValue(InputNotifyAfter, "Notify when a command runs at least (seconds, 0 = never):", itoa(m.Config.NotifyCommandAfter))
+	case label == "Let Apps Resize the Window":
+		m.Config.AllowWindowOps = !m.Config.AllowWindowOps
+		m.rebuildCurrent()
+		m.StatusMessage = "Updated (save to persist)"
 	case label == "Restore Session":
 		m.Config.RestoreSession = !m.Config.RestoreSession
 		m.rebuildCurrent()
@@ -1415,6 +1428,11 @@ func (m *Menu) HandleEnter() bool {
 		m.buildExportConfirmMenu()
 		m.SelectedIndex = m.firstSelectableIndex()
 		m.debugf("confirm export name=%q value=%q", m.PendingName, m.PendingExport)
+
+	case InputShellHome:
+		m.Config.Shell.Home = strings.TrimSpace(value)
+		m.StatusMessage = "Updated (new tabs; save to persist)"
+		m.rebuildCurrent()
 
 	case InputShellPath:
 		dir := strings.TrimSpace(value)
@@ -2002,6 +2020,8 @@ func (m *Menu) inputStateName() string {
 		return "opacity"
 	case InputNotifyAfter:
 		return "notify_after"
+	case InputShellHome:
+		return "shell_home"
 	default:
 		return "unknown"
 	}
