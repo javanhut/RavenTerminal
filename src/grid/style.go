@@ -136,6 +136,14 @@ func (r *styleRef) take() StyleID {
 	return r.id
 }
 
+// takeN is take for n cells at once.
+func (r *styleRef) takeN(n int) StyleID {
+	if r.entry != nil {
+		r.entry.refs += uint32(n)
+	}
+	return r.id
+}
+
 // done releases the handle's own reference, freeing the style if the run wrote
 // no cells that kept it alive.
 func (s *styleSet) done(r styleRef) { s.release(r.id) }
@@ -299,6 +307,7 @@ func (g *Grid) putCell(idx int, c Cell) {
 	}
 	g.styles.release(old)
 	g.rows[idx/g.Cols].flags |= RowDirty
+	g.rows[idx/g.Cols].touch(idx%g.Cols + 1)
 }
 
 // putCellStyled writes a cell whose style has already been interned by the
@@ -311,6 +320,7 @@ func (g *Grid) putCellStyled(idx int, char rune, id StyleID, width uint8, link u
 	*p = storedCell{Style: id, Char: char, Width: width, Link: link}
 	g.styles.release(old)
 	g.rows[idx/g.Cols].flags |= RowDirty
+	g.rows[idx/g.Cols].touch(idx%g.Cols + 1)
 }
 
 // putCellStyledRow is putCellStyled with the row pointer and column already
@@ -325,6 +335,7 @@ func (g *Grid) putCellStyledRow(row *Row, col int, char rune, id StyleID, width 
 	*p = storedCell{Style: id, Char: char, Width: width, Link: link}
 	g.styles.release(old)
 	row.flags |= RowDirty
+	row.touch(col + 1)
 	if col == len(row.cells)-1 {
 		// Overwriting the last column ends any earlier soft wrap; if this
 		// write itself overflows, the wrap path re-marks the row when the
@@ -348,6 +359,7 @@ func (g *Grid) moveCell(dst, src int) {
 	g.styles.release(d.Style)
 	*d = *s
 	*s = blankStored
+	g.rows[dst/g.Cols].touch(dst%g.Cols + 1)
 	g.rows[dst/g.Cols].flags |= RowDirty
 	g.rows[src/g.Cols].flags |= RowDirty
 }

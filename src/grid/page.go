@@ -38,14 +38,42 @@ type Row struct {
 	exit  int32
 	size  LineSize    // DECDWL/DECDHL line attribute (linesize.go)
 	sized []SizedText // OSC 66 blocks (sizedtext.go)
+
+	// blankTail counts trailing cells known to be blankStored. Output rarely
+	// reaches the right margin, so this lets a scroll, an erase or a history
+	// compaction touch only the written prefix instead of every column. It
+	// is a lower bound: zero (the zero value) claims nothing, so a row built
+	// without knowing about it is still correct, only unoptimized. Every
+	// store of a cell that may not be blankStored must go through touch.
+	blankTail int32
+}
+
+// used is the column past which every cell is blankStored.
+func (r *Row) used() int { return len(r.cells) - int(r.blankTail) }
+
+// touch records that cells before end may no longer be blankStored.
+func (r *Row) touch(end int) {
+	if t := len(r.cells) - end; t < int(r.blankTail) {
+		r.blankTail = int32(max(t, 0))
+	}
+}
+
+// fillCells sets every cell to c with doubling copies: one store, then
+// exponentially larger memmoves instead of a store per cell.
+func fillCells(cells []storedCell, c storedCell) {
+	if len(cells) == 0 {
+		return
+	}
+	cells[0] = c
+	for n := 1; n < len(cells); n *= 2 {
+		copy(cells[n:], cells[:n])
+	}
 }
 
 // newRow allocates a blank row of the given width (default style).
 func newRow(cols int) *Row {
-	r := &Row{cells: make([]storedCell, cols)}
-	for i := range r.cells {
-		r.cells[i] = blankStored
-	}
+	r := &Row{cells: make([]storedCell, cols), blankTail: int32(cols)}
+	fillCells(r.cells, blankStored)
 	return r
 }
 
@@ -65,10 +93,11 @@ func (g *Grid) blankRowN(cols int, bg Color) *Row {
 		r = &Row{}
 	}
 	if len(r.cells) != cols {
-		r.cells = nil
+		r.cells, r.blankTail = nil, 0
 		if n := len(g.freeCells); n > 0 {
 			if len(g.freeCells[n-1]) == cols {
-				r.cells = g.freeCells[n-1]
+				// Pooled arrays are all blank (see compactForHistory).
+				r.cells, r.blankTail = g.freeCells[n-1], int32(cols)
 				g.freeCells = g.freeCells[:n-1]
 			} else {
 				// A resize changed the width: every pooled array is the wrong size.
@@ -76,6 +105,7 @@ func (g *Grid) blankRowN(cols int, bg Color) *Row {
 			}
 		}
 		if r.cells == nil {
+			// Zeroed cells are not blankStored, so blankTail stays 0.
 			r.cells = make([]storedCell, cols)
 		}
 	}
@@ -88,9 +118,15 @@ func (g *Grid) blankRowN(cols int, bg Color) *Row {
 // caller must own a row that is fresh or already released.
 func (g *Grid) fillRow(r *Row, bg Color) {
 	id := g.styles.intern(styleOf(NewCellWithBg(bg))) // ref=1 owner
-	g.styles.retainN(id, len(r.cells))                // one ref per cell, in bulk
-	for i := range r.cells {
-		r.cells[i] = storedCell{Style: id, Char: ' ', Width: CellWidthNormal}
+	if id == 0 {
+		// Default blanks hold no references, and the known-blank tail is
+		// already in place: only the written prefix needs clearing.
+		fillCells(r.cells[:r.used()], blankStored)
+		r.blankTail = int32(len(r.cells))
+	} else {
+		g.styles.retainN(id, len(r.cells)) // one ref per cell, in bulk
+		fillCells(r.cells, storedCell{Style: id, Char: ' ', Width: CellWidthNormal})
+		r.blankTail = 0
 	}
 	g.styles.release(id) // drop owner ref; cells hold len(cells) refs
 	r.flags = RowDirty
@@ -128,8 +164,22 @@ func (g *Grid) fillSpan(row, col0, col1 int, bg Color) {
 	if col1 == g.Cols {
 		g.rows[row].flags &^= rowWrapFlags
 	}
-	cells := g.rows[row].cells
+	r := g.rows[row]
+	cells := r.cells
 	st := styleOf(NewCellWithBg(bg))
+	// A default-background erase has nothing to do past the known-blank
+	// tail. Clamp to it, remembering whether the erase reached it: if so,
+	// everything from col0 on is blank afterwards.
+	clearsTail := false
+	if st == defaultStyle {
+		if u := r.used(); col1 >= u {
+			clearsTail = true
+			col1 = u
+		}
+	}
+	if col0 >= col1 {
+		return // the span lies wholly in the known-blank tail
+	}
 	// Compare against the target blank WITHOUT touching refcounts first:
 	// lookup takes no reference, so an all-match span costs only comparisons.
 	// If the style isn't interned at all, no cell can carry it and the span
@@ -140,6 +190,9 @@ func (g *Grid) fillSpan(row, col0, col1 int, bg Color) {
 			col0++
 		}
 		if col0 == col1 {
+			if clearsTail {
+				r.blankTail = int32(len(cells) - col0)
+			}
 			return // already erased
 		}
 	}
@@ -156,14 +209,14 @@ func (g *Grid) fillSpan(row, col0, col1 int, bg Color) {
 		g.styles.releaseN(cells[col].Style, run-col)
 		col = run
 	}
-	// Fill via doubling copy: one store, then exponentially larger memmoves.
-	blank := storedCell{Style: id, Char: ' ', Width: CellWidthNormal}
-	cells[col0] = blank
-	for n := 1; n < col1-col0; n *= 2 {
-		copy(cells[col0+n:col1], cells[col0:col0+n])
-	}
+	fillCells(cells[col0:col1], storedCell{Style: id, Char: ' ', Width: CellWidthNormal})
 	g.styles.release(id) // drop owner ref; cells hold (col1-col0) refs
-	g.rows[row].flags |= RowDirty
+	r.flags |= RowDirty
+	if clearsTail {
+		r.blankTail = int32(len(cells) - col0)
+	} else if id != 0 {
+		r.touch(col1)
+	}
 }
 
 // clearRow releases a row's existing style references and refills it with the
@@ -197,7 +250,7 @@ func (g *Grid) compactForHistory(r *Row) {
 	if r.flags&RowSoftWrapped != 0 {
 		return
 	}
-	n := len(r.cells)
+	n := r.used()
 	for n > 0 && r.cells[n-1] == blankStored {
 		n--
 	}
@@ -205,6 +258,7 @@ func (g *Grid) compactForHistory(r *Row) {
 		return
 	}
 	full := r.cells
+	r.blankTail = 0 // the compacted slice ends at content
 	if n == 0 {
 		r.cells = nil
 	} else {
@@ -216,6 +270,9 @@ func (g *Grid) compactForHistory(r *Row) {
 		copy(r.cells, full)
 	}
 	if len(full) == g.Cols && len(g.freeCells) < rowPoolMax {
+		// Pool the array all blank so blankRowN can skip refilling it. The
+		// prefix's style references moved with the copy; nothing to release.
+		fillCells(full[:n], blankStored)
 		g.freeCells = append(g.freeCells, full)
 	}
 }
@@ -225,7 +282,7 @@ func (g *Grid) compactForHistory(r *Row) {
 // one style id are released as a single run — a uniformly-styled row (the
 // common case) is one releaseN instead of one release per cell.
 func (g *Grid) releaseRow(r *Row) {
-	cells := r.cells
+	cells := r.cells[:r.used()] // the blank tail holds no references
 	i := 0
 	for i < len(cells) {
 		id := cells[i].Style

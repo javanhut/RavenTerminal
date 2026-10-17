@@ -85,7 +85,8 @@ func TestRavenTerminfoCompiles(t *testing.T) {
 	if err != nil {
 		t.Skipf("infocmp: %v", err)
 	}
-	caps := string(b)
+	// ncurses 5 (macOS) prints colors#256 and escapes colons as \:.
+	caps := strings.NewReplacer("colors#256,", "colors#0x100,", `\:`, ":").Replace(string(b))
 	for _, want := range []string{
 		"\tTc,", "\tRGB,", "\tSu,", "\tfullkbd,", "\tXT,", "\ths,", "\tbce,", "colors#0x100,",
 		"Smulx=\\E[4:%p1%dm,", "Setulc=\\E[58:2:", "Sync=\\E[?2026%?%p1%{1}%-%tl%eh%;,",

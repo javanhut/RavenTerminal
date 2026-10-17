@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"image"
 	"image/png"
+	"math/bits"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -54,6 +56,18 @@ func TestParseIPC(t *testing.T) {
 			t.Errorf("%v must be rejected", bad)
 		}
 	}
+}
+
+// socketTempDir is a temp dir short enough to hold a unix socket: macOS's
+// per-test t.TempDir paths overflow its 104-byte socket path limit.
+func socketTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "rt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
 }
 
 func uxIsolateHome(t *testing.T) {
@@ -150,7 +164,7 @@ func TestIPCDispatch(t *testing.T) {
 }
 
 func TestIPCSocketRoundTrip(t *testing.T) {
-	dir := t.TempDir()
+	dir := socketTempDir(t)
 	t.Setenv("XDG_RUNTIME_DIR", dir)
 	t.Setenv("RAVEN_TERMINAL_SOCKET", "")
 	path, stop, err := startIPCServerWith(func(req ipcRequest) ipcResponse {
@@ -189,6 +203,20 @@ func TestIPCSocketRoundTrip(t *testing.T) {
 	}
 }
 
+// leaderMods is what Leader stands for on this platform: Cmd on macOS,
+// Ctrl+Shift (Ctrl+Alt once Shift is in the chord) elsewhere.
+func leaderMods(shift bool) glfw.ModifierKey {
+	switch {
+	case runtime.GOOS == "darwin" && shift:
+		return glfw.ModSuper | glfw.ModShift
+	case runtime.GOOS == "darwin":
+		return glfw.ModSuper
+	case shift:
+		return glfw.ModControl | glfw.ModShift | glfw.ModAlt
+	}
+	return glfw.ModControl | glfw.ModShift
+}
+
 func TestParseChord(t *testing.T) {
 	ok := []struct {
 		in   string
@@ -200,10 +228,10 @@ func TestParseChord(t *testing.T) {
 		{"Esc", glfw.KeyEscape, 0},
 		{"j", glfw.KeyJ, 0},
 		{"J", glfw.KeyJ, 0},
-		{"Leader+H", glfw.KeyH, glfw.ModControl | glfw.ModShift},
-		{"Leader+Shift+Tab", glfw.KeyTab, glfw.ModControl | glfw.ModShift | glfw.ModAlt},
-		{"Leader+=", glfw.KeyEqual, glfw.ModControl | glfw.ModShift},
-		{"Leader+-", glfw.KeyMinus, glfw.ModControl | glfw.ModShift},
+		{"Leader+H", glfw.KeyH, leaderMods(false)},
+		{"Leader+Shift+Tab", glfw.KeyTab, leaderMods(true)},
+		{"Leader+=", glfw.KeyEqual, leaderMods(false)},
+		{"Leader+-", glfw.KeyMinus, leaderMods(false)},
 		{"Super+Shift+]", glfw.KeyRightBracket, glfw.ModSuper | glfw.ModShift},
 		{"shift+page_up", glfw.KeyPageUp, glfw.ModShift},
 		{"F11", glfw.KeyF11, 0},
@@ -261,8 +289,13 @@ func TestChordSteps(t *testing.T) {
 		}
 		return b.String()
 	}
+	// Cmd chords type nothing on macOS; elsewhere GLFW still delivers the char.
+	superT := "t"
+	if runtime.GOOS == "darwin" {
+		superT = ""
+	}
 	for in, out := range map[string]string{"shift+1": "!", "shift+j": "J", "alt+x": "x", "ctrl+c": "", "space": " ",
-		"escape": "", "shift+/": "?", "super+t": "t"} {
+		"escape": "", "shift+/": "?", "super+t": superT} {
 		if got := chars(in); got != out {
 			t.Errorf("%s types %q, want %q", in, got, out)
 		}
@@ -394,7 +427,8 @@ func TestIPCHarnessDispatch(t *testing.T) {
 	}
 	sent = nil
 	mustIPC(t, apps, "action", "hints")
-	if len(sent) != 6 || keybindings.TranslateKey(sent[2].Key, sent[2].Mods, false).Action != keybindings.ActionHints {
+	held := bits.OnesCount(uint(leaderMods(false)))
+	if len(sent) != 2*held+2 || keybindings.TranslateKey(sent[held].Key, sent[held].Mods, false).Action != keybindings.ActionHints {
 		t.Fatalf("action hints injected %+v", sent)
 	}
 
@@ -457,7 +491,7 @@ func TestIPCHarnessDispatch(t *testing.T) {
 }
 
 func TestIPCClientAbsolutizesScreenshot(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", socketTempDir(t))
 	t.Setenv("RAVEN_TERMINAL_SOCKET", "")
 	_, stop, err := startIPCServerWith(func(req ipcRequest) ipcResponse {
 		return ipcResponse{OK: true, Data: strings.Join(req.Args, ",")}

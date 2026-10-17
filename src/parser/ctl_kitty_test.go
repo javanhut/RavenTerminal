@@ -253,6 +253,42 @@ func TestKittyTempFileDeleted(t *testing.T) {
 	}
 }
 
+// macOS clients write t=t files to $TMPDIR, and its /tmp is a symlink to
+// /private/tmp: a temp dir reached through a symlinked parent is accepted,
+// a symlink as the file itself is not.
+func TestKittyTempFileInSymlinkedTMPDIR(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "private")
+	os.Mkdir(real, 0o700)
+	link := filepath.Join(base, "tmp")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip(err)
+	}
+	t.Setenv("TMPDIR", link)
+	term := NewTerminal(40, 10)
+	path := filepath.Join(link, "tty-graphics-protocol-a")
+	os.WriteFile(path, rgba(1, 1), 0o600)
+	term.Process(apc("a=t,t=t,f=32,s=1,v=1,i=11,q=2;" + b64([]byte(path))))
+	if _, ok := term.Images().Get(11); !ok {
+		t.Fatal("t=t in $TMPDIR via a symlinked dir not loaded")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("temp file not deleted")
+	}
+
+	target := filepath.Join(real, "tty-graphics-protocol-target")
+	os.WriteFile(target, rgba(1, 1), 0o600)
+	alias := filepath.Join(link, "tty-graphics-protocol-alias")
+	os.Symlink(target, alias)
+	term.Process(apc("a=t,t=t,f=32,s=1,v=1,i=12,q=2;" + b64([]byte(alias))))
+	if _, ok := term.Images().Get(12); ok {
+		t.Fatal("t=t followed a symlinked file")
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatal("symlink target was deleted")
+	}
+}
+
 func TestKittySharedMemory(t *testing.T) {
 	if _, err := os.Stat("/dev/shm"); err != nil {
 		t.Skip("no /dev/shm")

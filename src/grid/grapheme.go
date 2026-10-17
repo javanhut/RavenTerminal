@@ -150,6 +150,7 @@ func (g *Grid) joinCluster(c rune, w int) bool {
 	g.clusterBuf = cl
 	p.Grapheme = g.internGrapheme(cl)
 	r.flags |= RowDirty | RowHasCluster
+	r.touch(col + 1) // the previous cell may be a blank in the known-blank tail
 	if g.graphemeOff || crossRow {
 		return true
 	}
@@ -195,6 +196,7 @@ func (g *Grid) rewidth(r *Row, col, width int) {
 		g.putStored(r, 0, sc)
 	} else {
 		r.cells[col].Width = CellWidthWide
+		r.touch(col + 1)
 	}
 	if col+2 < len(r.cells) && r.cells[col+1].Width == CellWidthWide {
 		blankHalf(&r.cells[col+2])
@@ -217,6 +219,7 @@ func (g *Grid) putStored(r *Row, col int, sc storedCell) {
 	r.cells[col] = sc
 	g.styles.release(old)
 	r.flags |= RowDirty
+	r.touch(col + 1)
 	if col == len(r.cells)-1 {
 		r.flags &^= rowWrapFlags
 	}

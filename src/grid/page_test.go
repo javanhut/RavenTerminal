@@ -15,6 +15,7 @@ func TestPushHistoryWrapsWithoutLosingRows(t *testing.T) {
 	for i := range total {
 		r := g.blankRow(DefaultBg())
 		r.cells[0].Char = rune('a' + i%26) // tag the row so order is checkable
+		r.touch(1)                         // a raw store must record itself (Row.blankTail)
 		g.pushHistory(r)
 
 		if len(g.history) > cap_ {

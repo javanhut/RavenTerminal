@@ -450,7 +450,7 @@ func (ch keyChord) steps() []keyStep {
 		}
 	}
 	out = append(out, keyStep{Key: ch.Key, Action: glfw.Press, Mods: mods})
-	if r := chordRune(ch.Key); r != 0 && mods&glfw.ModControl == 0 {
+	if r := chordRune(ch.Key); r != 0 && typesText(mods) {
 		if mods&glfw.ModShift != 0 {
 			if s, ok := shiftedASCII[r]; ok {
 				r = s
@@ -467,6 +467,12 @@ func (ch keyChord) steps() []keyStep {
 		}
 	}
 	return out
+}
+
+// typesText reports whether a key pressed with mods also produces text, as
+// GLFW delivers it: never with Ctrl, nor with Cmd on macOS.
+func typesText(mods glfw.ModifierKey) bool {
+	return mods&glfw.ModControl == 0 && (runtime.GOOS != "darwin" || mods&glfw.ModSuper == 0)
 }
 
 // chordRune is the US-layout text of a printable key, 0 for the rest.

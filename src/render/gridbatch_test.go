@@ -1,6 +1,7 @@
 package render
 
 import (
+	"math"
 	"math/rand"
 	"testing"
 
@@ -266,12 +267,17 @@ func TestFitCellsMatchesClipPredicate(t *testing.T) {
 	}
 }
 
+// floatsEqual compares vertex data to within float32 rounding: arm64 fuses
+// a*b+c into one FMA, so the same expression can differ in the last bit
+// between two call sites.
 func floatsEqual(a, b []float32) bool {
 	if len(a) != len(b) {
 		return false
 	}
 	for i := range a {
-		if a[i] != b[i] {
+		d := float64(a[i]) - float64(b[i])
+		tol := 1e-6 * max(1, math.Abs(float64(a[i])), math.Abs(float64(b[i])))
+		if d > tol || d < -tol {
 			return false
 		}
 	}

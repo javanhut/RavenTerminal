@@ -795,7 +795,9 @@ func (c *Config) WriteInitScript() (string, error) {
 // bashOSC133 emits OSC 133 semantic prompt marks: D;<status> when the last
 // command finishes (only if one ran), A/B around PS1, and C from PS0 just
 // before a command executes. PS0's arithmetic side effect records that a
-// command ran without printing anything.
+// command ran without printing anything. Bash before 4.4 (macOS's 3.2) has no
+// PS0, so a DEBUG trap stands in for it, unless the user already set one; it
+// sees every command but a bare ( ) subshell.
 const bashOSC133 = `# OSC 133 semantic prompt marks
 __raven_osc133_status() {
     local _st=$?
@@ -810,11 +812,23 @@ __raven_osc133_ps1() {
         *'133;A'*) ;;
         *) PS1='\[\e]133;A\a\]'"$PS1"'\[\e]133;B\a\]' ;;
     esac
+    __raven_osc133_armed=1
 }
-case "$PS0" in
-    *'133;C'*) ;;
-    *) PS0="$PS0"'${PS0:0:$((__raven_osc133_ran=1,0))}\e]133;C\a' ;;
-esac
+if [ "${BASH_VERSINFO[0]}" -gt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 4 ]; }; then
+    case "$PS0" in
+        *'133;C'*) ;;
+        *) PS0="$PS0"'${PS0:0:$((__raven_osc133_ran=1,0))}\e]133;C\a' ;;
+    esac
+elif [ -z "$(trap -p DEBUG)" ]; then
+    __raven_osc133_preexec() {
+        case "$BASH_COMMAND" in __raven_osc133_*|__raven_prompt*) return ;; esac
+        [ -n "$__raven_osc133_armed" ] || return
+        __raven_osc133_armed=
+        __raven_osc133_ran=1
+        printf '\e]133;C\a'
+    }
+    trap '__raven_osc133_preexec' DEBUG
+fi
 
 `
 

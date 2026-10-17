@@ -113,7 +113,7 @@ func TestIPCDirRejectsInsecureDirs(t *testing.T) {
 		t.Fatalf("client trusted %s", p)
 	}
 
-	good := t.TempDir()
+	good := socketTempDir(t)
 	t.Setenv("XDG_RUNTIME_DIR", good)
 	os.Mkdir(filepath.Join(good, "raven-terminal"), 0o755)
 	_, stop, err := startIPCServerWith(func(ipcRequest) ipcResponse { return ipcResponse{} })

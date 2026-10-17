@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"runtime"
+	"sync/atomic"
 
 	"github.com/go-gl/gl/v4.1-core/gl"
 	"github.com/go-gl/glfw/v3.3/glfw"
@@ -69,7 +70,8 @@ type Window struct {
 // the sense that it does nothing on repeat, but pairing each Init with the
 // Terminate in Destroy would tear down every other window's context when one
 // closes. Init happens once here; Terminate is an explicit process-exit call.
-var glfwReady bool
+// It is atomic because PostEmptyEvent reads it from any goroutine.
+var glfwReady atomic.Bool
 
 // glReady guards one-time OpenGL function-pointer loading. gl.Init binds the
 // entry points for the current context; contexts created afterwards share the
@@ -80,9 +82,9 @@ var glReady bool
 // the process is exiting — never from Window.Destroy, which may be closing one
 // of several open windows.
 func Terminate() {
-	if glfwReady {
+	if glfwReady.Load() {
+		glfwReady.Store(false)
 		glfw.Terminate()
-		glfwReady = false
 	}
 }
 
@@ -114,11 +116,11 @@ func intHints(config Config) []intHint {
 
 // NewWindow creates a new GLFW window with OpenGL context
 func NewWindow(config Config) (*Window, error) {
-	if !glfwReady {
+	if !glfwReady.Load() {
 		if err := glfw.Init(); err != nil {
 			return nil, fmt.Errorf("failed to initialize GLFW: %w", err)
 		}
-		glfwReady = true
+		glfwReady.Store(true)
 	}
 
 	for _, h := range intHints(config) {
@@ -291,7 +293,10 @@ func WaitEventsTimeout(seconds float64) {
 }
 
 // PostEmptyEvent wakes a thread blocked in WaitEventsTimeout. It is safe to call
-// from any goroutine (e.g. the PTY reader) to request a prompt re-render.
+// from any goroutine (e.g. the PTY reader) to request a prompt re-render, and
+// a no-op before GLFW is initialised, when there is no loop to wake.
 func PostEmptyEvent() {
-	glfw.PostEmptyEvent()
+	if glfwReady.Load() {
+		glfw.PostEmptyEvent()
+	}
 }

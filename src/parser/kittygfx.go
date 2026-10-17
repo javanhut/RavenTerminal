@@ -199,8 +199,19 @@ func loadKittyImage(ctrl map[string]string, data []byte) (*images.Image, error) 
 	return decodeKittyImage(ctrlInt(ctrl, "f", 32), ctrlInt(ctrl, "s", 0), ctrlInt(ctrl, "v", 0), data)
 }
 
+// inKittyTempDir reports whether a resolved path lies in a directory t=t
+// files may come from: /tmp, /dev/shm or the user's $TMPDIR.
+func inKittyTempDir(real string) bool {
+	for _, d := range []string{"/tmp", "/dev/shm", os.TempDir()} {
+		if r, err := filepath.EvalSymlinks(d); err == nil && strings.HasPrefix(real, r+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 // readKittyMedium reads image data from a file (t=f), a temporary file that is
-// deleted afterwards (t=t, only under /tmp or /dev/shm and named with
+// deleted afterwards (t=t, only under /tmp, /dev/shm or $TMPDIR and named with
 // "tty-graphics-protocol"), or a POSIX shared-memory object (t=s). Only
 // regular files are read, never from /proc, /sys or /dev (except /dev/shm).
 func readKittyMedium(medium, path string, size, offset int) ([]byte, error) {
@@ -220,8 +231,15 @@ func readKittyMedium(medium, path string, size, offset int) ([]byte, error) {
 		return nil, kerr("EBADF", "cannot open file")
 	}
 	inShm := strings.HasPrefix(real, "/dev/shm/")
-	// Media that are deleted after reading never follow a symlink.
-	if (medium == "s" || medium == "t") && real != clean || medium == "s" && !inShm {
+	// Media that are deleted after reading are never a symlink themselves; a
+	// symlinked parent such as macOS's /tmp -> /private/tmp is fine.
+	if medium == "s" || medium == "t" {
+		dir, err := filepath.EvalSymlinks(filepath.Dir(clean))
+		if err != nil || real != filepath.Join(dir, filepath.Base(clean)) {
+			return nil, kerr("EPERM", "refusing symlinked or out-of-place file")
+		}
+	}
+	if medium == "s" && !inShm {
 		return nil, kerr("EPERM", "refusing symlinked or out-of-place file")
 	}
 	for _, bad := range []string{"/proc/", "/sys/", "/dev/"} {
@@ -230,7 +248,7 @@ func readKittyMedium(medium, path string, size, offset int) ([]byte, error) {
 		}
 	}
 	if medium == "t" {
-		if !(strings.HasPrefix(real, "/tmp/") || inShm) || !strings.Contains(filepath.Base(real), "tty-graphics-protocol") {
+		if !inKittyTempDir(real) || !strings.Contains(filepath.Base(real), "tty-graphics-protocol") {
 			return nil, kerr("EPERM", "temporary file outside temp dirs")
 		}
 	}

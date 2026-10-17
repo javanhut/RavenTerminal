@@ -7,11 +7,14 @@ import (
 )
 
 // Mirrors the three corpora from scripts/bench.sh so profiles line up with the
-// terminal-level numbers that motivated them.
+// terminal-level numbers that motivated them. Lines end in \r\n because that
+// is what the terminal receives: the PTY's ONLCR turns cat's \n into \r\n.
+// A bare \n keeps the column (LF semantics), so the cursor would drift right
+// and every row would fill to the margin, profiling a workload no shell sends.
 func corpusCursor(lines int) []byte {
 	var b bytes.Buffer
 	for i := range lines {
-		fmt.Fprintf(&b, "\033[s\033[1;1Hline %d\033[u\033[K%d\n", i, i)
+		fmt.Fprintf(&b, "\033[s\033[1;1Hline %d\033[u\033[K%d\r\n", i, i)
 	}
 	return b.Bytes()
 }
@@ -19,7 +22,7 @@ func corpusCursor(lines int) []byte {
 func corpusPlain(lines int) []byte {
 	var b bytes.Buffer
 	for range lines {
-		b.WriteString("The quick brown fox jumps over the lazy dog 0123456789\n")
+		b.WriteString("The quick brown fox jumps over the lazy dog 0123456789\r\n")
 	}
 	return b.Bytes()
 }
@@ -27,7 +30,7 @@ func corpusPlain(lines int) []byte {
 func corpusSGR(lines int) []byte {
 	var b bytes.Buffer
 	for i := range lines {
-		fmt.Fprintf(&b, "\033[31mred\033[32mgreen\033[34mblue\033[0m %d\n", i)
+		fmt.Fprintf(&b, "\033[31mred\033[32mgreen\033[34mblue\033[0m %d\r\n", i)
 	}
 	return b.Bytes()
 }

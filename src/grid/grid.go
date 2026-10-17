@@ -457,10 +457,67 @@ func (g *Grid) writeCharLocked(c rune, sr *styleRef, link uint16) {
 func (g *Grid) WriteBytesLocked(bs []byte, fg, bg Color, flags CellFlags, link uint16, ulStyle uint8, ulColor Color) {
 	// Intern the shared style ONCE for the whole run, as in WriteRunesLocked.
 	sr := g.styles.ref(Style{Fg: fg, Bg: bg, UnderlineColor: ulColor, Flags: flags, UnderlineStyle: ulStyle})
-	for _, b := range bs {
-		g.writeByteLocked(b, &sr, link)
+	for len(bs) > 0 {
+		if n := g.writeByteRun(bs, &sr, link); n > 0 {
+			bs = bs[n:]
+			continue
+		}
+		g.writeByteLocked(bs[0], &sr, link)
+		bs = bs[1:]
 	}
 	g.styles.done(sr)
+}
+
+// writeByteRun stores as much of bs as fits on the cursor row in one pass and
+// returns how many bytes it wrote. It returns 0, writing nothing, whenever a
+// byte needs writeByteLocked's handling: a pending wrap, OSC 66 blocks on the
+// row, or a wide character's half in the span. The result matches calling
+// writeByteLocked per byte, minus the per-byte bookkeeping.
+func (g *Grid) writeByteRun(bs []byte, sr *styleRef, link uint16) int {
+	if g.wrapPending {
+		return 0
+	}
+	row := g.rows[g.CursorRow]
+	col := g.CursorCol
+	lim := g.rowLimit(row)
+	n := min(len(bs), lim-col)
+	if n < 2 || len(row.sized) > 0 {
+		return 0
+	}
+	cells := row.cells[col : col+n]
+	for i := range cells {
+		if cells[i].Width != CellWidthNormal {
+			return 0 // overwriting it would orphan the other half
+		}
+	}
+	id := sr.takeN(n) // before releasing, so a shared style can't hit zero
+	for i := 0; i < n; {
+		j := i + 1
+		for j < n && cells[j].Style == cells[i].Style {
+			j++
+		}
+		g.styles.releaseN(cells[i].Style, j-i)
+		i = j
+	}
+	for i, b := range bs[:n] {
+		cells[i] = storedCell{Style: id, Char: rune(b), Width: CellWidthNormal, Link: link}
+	}
+	row.flags |= RowDirty
+	row.touch(col + n)
+	if col+n == len(row.cells) {
+		row.flags &^= rowWrapFlags // as putCellStyledRow does for the last column
+	}
+	g.CursorCol = col + n
+	if g.CursorCol >= lim {
+		if g.autoWrap {
+			g.wrapPending = true
+		}
+		g.CursorCol = lim - 1
+	}
+	g.lastChar = rune(bs[n-1])
+	g.lastStyle = sr.style
+	g.lastLink = link
+	return n
 }
 
 // writeByteLocked is writeCharLocked specialized for a printable ASCII byte
@@ -1664,6 +1721,7 @@ func (g *Grid) ResizeTracking(cols, rows int, pts ...*Point) {
 				copy(nr.cells[col:run], src.cells[col:run])
 				col = run
 			}
+			nr.touch(keepCols)
 		}
 		newRows[row] = nr
 	}

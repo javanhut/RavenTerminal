@@ -314,3 +314,8 @@ echo "Run 'imlazy list' for the full list with descriptions."
 """]
 
 # imlazy-generated-end: everything below this line is yours and survives re-sync
+
+
+[commands.run]
+desc = "Runs the terminal without needing to install"
+run = ["go run ./..."]

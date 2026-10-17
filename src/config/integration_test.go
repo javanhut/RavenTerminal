@@ -41,7 +41,9 @@ func runBashInteractive(t *testing.T, initPath, input string, env ...string) str
 	cmd := exec.Command(bash, "--noprofile", "--rcfile", initPath, "-i")
 	cmd.Stdin = strings.NewReader(input)
 	cmd.Dir = t.TempDir()
-	cmd.Env = append(os.Environ(), env...)
+	// TERM as the terminal sets it: unset, bash 3.2's readline falls back to
+	// a dumb display that redraws every prompt.
+	cmd.Env = append(append(os.Environ(), "TERM=xterm-256color"), env...)
 	out, _ := cmd.CombinedOutput()
 	return string(out)
 }
@@ -53,7 +55,9 @@ func TestBashOSC133(t *testing.T) {
 			cfg.Shell.SourceRC = false
 			cfg.Prompt.Style = style
 			initPath, _ := writeScripts(t, cfg)
-			out := runBashInteractive(t, initPath, "(exit 3)\n\ntrue\nexit\n")
+			// sh -c, not a ( ) subshell: bash < 4.4 has no PS0, and its
+			// DEBUG-trap fallback cannot see a bare subshell.
+			out := runBashInteractive(t, initPath, "sh -c 'exit 3'\n\ntrue\nexit\n")
 			for _, want := range []string{
 				"\x1b]133;C\a\x1b]133;D;3\a",
 				"\x1b]133;C\a\x1b]133;D;0\a",
