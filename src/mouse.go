@@ -3,6 +3,8 @@ package main
 import (
 	"math"
 
+	"github.com/go-gl/glfw/v3.3/glfw"
+
 	"github.com/javanhut/RavenTerminal/src/parser"
 	"github.com/javanhut/RavenTerminal/src/tab"
 )
@@ -25,6 +27,8 @@ func withPixels(ctx parser.MouseContext, x, y float64, rectX, rectY, rectW, rect
 // mouseCtxAt is mouseCtxFor plus the pointer's pixel position in the pane.
 func (a *App) mouseCtxAt(t *tab.Tab, pane *tab.Pane, shift bool, x, y float64) parser.MouseContext {
 	ctx := mouseCtxFor(pane, shift)
+	ctx.Ctrl = ctx.Ctrl || a.ipcMods&glfw.ModControl != 0
+	ctx.Alt = ctx.Alt || a.ipcMods&glfw.ModAlt != 0
 	width, height := a.win.GetFramebufferSize()
 	if rx, ry, rw, rh, ok := a.renderer.PaneRectFor(t, pane, width, height); ok {
 		ctx = withPixels(ctx, x, y, rx, ry, rw, rh, a.renderer.ContentScale())

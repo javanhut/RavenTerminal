@@ -3201,36 +3201,27 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 	// Draw cursor
 	if cursorVisible && snap.ScrollOffset == 0 {
 		cursorCol, cursorRow := snap.CursorCol, snap.CursorRow
-		cursorX := offsetX + float32(cursorCol)*r.cellWidth
-		cursorY := offsetY + float32(cursorRow)*r.cellHeight
-		if snap.LineSize(cursorRow) != grid.LineSingle {
-			cursorX += float32(cursorCol) * r.cellWidth
-			r.cellWidth *= 2
-			defer func(cw float32) { r.cellWidth = cw }(r.cellWidth / 2)
-		}
+		box := cursorBox(snap, cursorCol, cursorRow, offsetX, offsetY, r.cellWidth, r.cellHeight)
 
 		// Only draw cursor if within pane bounds
-		if cursorX+r.cellWidth <= offsetX+paneWidth && cursorY+r.cellHeight <= offsetY+paneHeight {
+		if box.x+box.w <= offsetX+paneWidth && box.y+box.h <= offsetY+paneHeight {
 			cell := snap.At(cursorCol, cursorRow)
 			switch cursorStyle {
 			case parser.CursorStyleUnderline:
-				h := r.cellHeight / 6
-				if h < 1 {
-					h = 1
-				}
-				r.drawRect(cursorX, cursorY+r.cellHeight-h, r.cellWidth, h, r.cursorColor(), proj)
+				h := max(r.cellHeight/6, 1)
+				r.drawRect(box.x, box.y+box.h-h, box.w, h, r.cursorColor(), proj)
 			case parser.CursorStyleBar:
-				w := r.cellWidth / 6
-				if w < 1 {
-					w = 1
-				}
-				r.drawRect(cursorX, cursorY, w, r.cellHeight, r.cursorColor(), proj)
+				w := max(r.cellWidth/6, 1)
+				r.drawRect(box.x, box.y, w, box.h, r.cursorColor(), proj)
 			default:
-				r.drawRect(cursorX, cursorY, r.cellWidth, r.cellHeight, r.cursorColor(), proj)
+				r.drawRect(box.x, box.y, box.w, box.h, r.cursorColor(), proj)
 				// Redraw character under cursor in inverse
 				if cell.Char != ' ' && cell.Char != 0 && cell.Flags&grid.FlagHidden == 0 {
-					if !r.drawGeometryRune(cursorX, cursorY, cell.Char, r.defaultBg(), proj) {
-						r.drawCursorGlyph(snap, cursorCol, cursorRow, cursorX, cursorY, offsetX, paneWidth, proj)
+					switch {
+					case box.size.Doubled():
+						r.drawScaledCursorGlyph(snap, cursorCol, cursorRow, box, proj)
+					case !r.drawGeometryRune(box.x, box.y, cell.Char, r.defaultBg(), proj):
+						r.drawCursorGlyph(snap, cursorCol, cursorRow, box.x, box.y, offsetX, paneWidth, proj)
 					}
 				}
 			}

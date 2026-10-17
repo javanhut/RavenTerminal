@@ -194,3 +194,34 @@ func (r *Renderer) emitSizedText(rowCells []grid.Cell, blocks []grid.SizedText, 
 		r.scaledGlyphs.reset()
 	}
 }
+
+// cursorRect is where the cursor is drawn: the box it fills and, for text
+// under a block cursor, where the top of the (possibly 2x) glyph sits. A
+// cursor on a double-height pair spans both rows.
+type cursorRect struct {
+	x, y, w, h, glyphTop float32
+	size                 grid.LineSize
+}
+
+func cursorBox(snap *grid.Snapshot, col, row int, ox, oy, cw, ch float32) cursorRect {
+	ls := snap.LineSize(row)
+	rowTop := oy + float32(row)*ch
+	b := cursorRect{x: ox + float32(col)*cw, y: rowTop, w: cw, h: ch, glyphTop: rowTop, size: ls}
+	if !ls.Doubled() {
+		return b
+	}
+	b.x += float32(col) * cw
+	b.w = 2 * cw
+	switch ls {
+	case grid.LineDoubleTop:
+		if snap.LineSize(row+1) == grid.LineDoubleBottom {
+			b.h = 2 * ch
+		}
+	case grid.LineDoubleBottom:
+		b.glyphTop = rowTop - ch
+		if row > 0 && snap.LineSize(row-1) == grid.LineDoubleTop {
+			b.y, b.h = rowTop-ch, 2*ch
+		}
+	}
+	return b
+}

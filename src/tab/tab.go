@@ -1055,7 +1055,12 @@ func (t *Tab) WriteFocus(focused bool) bool {
 	if t.activeNode == nil || !t.activeNode.IsLeaf() || t.activeNode.Pane == nil {
 		return false
 	}
-	p := t.activeNode.Pane
+	return t.activeNode.Pane.WriteFocus(focused)
+}
+
+// WriteFocus sends a focus report (CSI I / CSI O) when the pane's
+// application enabled ?1004.
+func (p *Pane) WriteFocus(focused bool) bool {
 	if p.Terminal == nil || !p.Terminal.FocusReportingEnabled() {
 		return false
 	}

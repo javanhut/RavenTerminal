@@ -1254,8 +1254,7 @@ func (a *App) onScroll(w *glfw.Window, xoff, yoff float64) {
 	width, height := a.win.GetFramebufferSize()
 	x, y := a.cursorPos()
 	if pane, col, row, ok := a.renderer.HitTestPane(activeTab, x, y, width, height); ok && pane != nil {
-		shift := w.GetKey(glfw.KeyLeftShift) == glfw.Press || w.GetKey(glfw.KeyRightShift) == glfw.Press
-		ctx := a.mouseCtxAt(activeTab, pane, shift, x, y)
+		ctx := a.mouseCtxAt(activeTab, pane, a.modDown(w, glfw.ModShift), x, y)
 		sent := false
 		for _, st := range wheelSteps(xoff, yoff) {
 			act := parser.DecideMouse(ctx, st.kind, 0, col, row, -1, false)
@@ -1738,7 +1737,7 @@ func (a *App) onCursorPos(w *glfw.Window, xpos, ypos float64) {
 			}
 		}
 		if target != nil {
-			shift := w.GetKey(glfw.KeyLeftShift) == glfw.Press || w.GetKey(glfw.KeyRightShift) == glfw.Press
+			shift := a.modDown(w, glfw.ModShift)
 			held := -1
 			if a.report.pane == target {
 				held = a.report.held
@@ -1778,8 +1777,7 @@ func (a *App) refreshLinkHover(activeTab *tab.Tab, x, y float64) {
 		return
 	}
 	if mode, _, _, _ := pane.Terminal.MouseState(); mode != 0 {
-		w := a.win.GLFW()
-		if w.GetKey(glfw.KeyLeftControl) != glfw.Press && w.GetKey(glfw.KeyRightControl) != glfw.Press {
+		if !a.modDown(a.win.GLFW(), glfw.ModControl) {
 			a.renderer.ClearHoverURL()
 			return
 		}
@@ -1792,11 +1790,54 @@ func (a *App) refreshLinkHover(activeTab *tab.Tab, x, y float64) {
 	a.renderer.ClearHoverURL()
 }
 
+// modKeys are the physical keys behind each modifier bit modDown polls.
+var modKeys = map[glfw.ModifierKey][2]glfw.Key{
+	glfw.ModShift:   {glfw.KeyLeftShift, glfw.KeyRightShift},
+	glfw.ModControl: {glfw.KeyLeftControl, glfw.KeyRightControl},
+	glfw.ModAlt:     {glfw.KeyLeftAlt, glfw.KeyRightAlt},
+}
+
+// modDown reports whether a modifier is held, physically or by an injected
+// IPC pointer event.
+func (a *App) modDown(w *glfw.Window, mod glfw.ModifierKey) bool {
+	if a.ipcMods&mod != 0 {
+		return true
+	}
+	k, ok := modKeys[mod]
+	return ok && w != nil && (w.GetKey(k[0]) == glfw.Press || w.GetKey(k[1]) == glfw.Press)
+}
+
+// hoverRecheckNeeded reports whether the link underline must be re-evaluated
+// because the text under a resting pointer changed or scrolled.
+func (a *App) hoverRecheckNeeded(contentChanged bool) bool {
+	return contentChanged && a.haveCursorPos && !a.settingsMenu.IsOpen() && !a.showHelp
+}
+
 // onFocus implements focus reporting (?1004): tell apps that requested it
 // when the window gains/loses focus.
 func (a *App) onFocus(w *glfw.Window, focused bool) {
 	a.windowFocused = focused // drives cursor-blink pausing on focus loss
-	if activeTab := a.tabManager.ActiveTab(); activeTab != nil {
-		activeTab.WriteFocus(focused)
+	a.syncFocus()
+}
+
+var writePaneFocus = func(p *tab.Pane, focused bool) { p.WriteFocus(focused) }
+
+// syncFocus moves focus reporting with the focused pane: across pane and tab
+// switches and window focus changes, the pane that had focus gets CSI O and
+// the one that has it now CSI I.
+func (a *App) syncFocus() {
+	var now *tab.Pane
+	if a.windowFocused {
+		now = activePane(a.tabManager.ActiveTab())
 	}
+	if now == a.focusPane {
+		return
+	}
+	if a.focusPane != nil {
+		writePaneFocus(a.focusPane, false)
+	}
+	if now != nil {
+		writePaneFocus(now, true)
+	}
+	a.focusPane = now
 }

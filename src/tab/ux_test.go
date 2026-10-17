@@ -160,3 +160,15 @@ func TestFocusReportGoesToActivePaneOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestPaneWriteFocusNeedsReporting(t *testing.T) {
+	isolateHome(t)
+	p := cmdPane(t, 1, "cat")
+	if p.WriteFocus(true) {
+		t.Fatal("focus report sent without ?1004")
+	}
+	p.Terminal.Process([]byte("\x1b[?1004h"))
+	if !p.WriteFocus(true) {
+		t.Fatal("focus report not sent with ?1004 on")
+	}
+}

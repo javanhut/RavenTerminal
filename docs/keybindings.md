@@ -177,7 +177,7 @@ raven-terminal @ screenshot [--id N] shot.png      # next frame as PNG; --id cro
 raven-terminal @ action hints                      # run a keybinding action by (part of) its name
 raven-terminal @ send-key ctrl+shift+space         # press and release a chord (Leader+H, escape, j)
 raven-terminal @ state                             # overlay modes, focus, size, pointer, IME preedit
-raven-terminal @ send-mouse 300 60 left:press      # move the pointer (window coords); click, press or release
+raven-terminal @ send-mouse 300 60 ctrl+left:press # move the pointer (window coords); click, press or release, modifiers held
 ```
 
 `action` takes any unambiguous part of a name from the help list or the

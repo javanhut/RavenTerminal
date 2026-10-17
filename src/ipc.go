@@ -60,11 +60,12 @@ type ipcCommand struct {
 }
 
 // ipcMouse moves the pointer to X,Y (window coordinates) and, when Press or
-// Release is set, presses or releases Button there.
+// Release is set, presses or releases Button there, with Mods held.
 type ipcMouse struct {
 	X, Y           float64
 	Button         glfw.MouseButton
 	Press, Release bool
+	Mods           glfw.ModifierKey
 }
 
 type ipcPane struct {
@@ -107,8 +108,8 @@ func ipcUsage() string {
   screenshot [--id N] FILE.png         next frame as PNG, cropped to pane N
   action NAME                          run a keybinding action (hints, copy mode, palette, zoom ...)
   send-key CHORD                       press and release a key (ctrl+shift+space, escape, j)
-  send-mouse X Y [BUTTON[:press|:release]]
-                                       move the pointer; click left|middle|right, or press/release it
+  send-mouse X Y [MODS+BUTTON[:press|:release]]
+                                       move the pointer; click left|middle|right (ctrl+left), or press/release it
   state                                overlay modes, focus, size, pointer and IME preedit as JSON
 `
 }
@@ -303,7 +304,16 @@ func parseMouse(pos []string) (ipcMouse, error) {
 	if len(pos) == 2 {
 		return m, nil
 	}
-	name, phase, _ := strings.Cut(pos[2], ":")
+	chord, phase, _ := strings.Cut(strings.ToLower(pos[2]), ":")
+	parts := strings.Split(chord, "+")
+	name := parts[len(parts)-1]
+	for _, p := range parts[:len(parts)-1] {
+		mod, ok := modNames[p]
+		if !ok {
+			return m, fmt.Errorf("send-mouse: unknown modifier %q", p)
+		}
+		m.Mods |= mod
+	}
 	b, ok := mouseButtons[name]
 	if !ok {
 		return m, fmt.Errorf("send-mouse: unknown button %q", name)
@@ -819,12 +829,14 @@ var ipcInjectKeys = func(a *App, steps []keyStep) {
 // ipcInjectMouse feeds pointer events through the window's own callbacks.
 var ipcInjectMouse = func(a *App, m ipcMouse) {
 	w := a.win.GLFW()
+	a.ipcMods = m.Mods
+	defer func() { a.ipcMods = 0 }()
 	a.onCursorPos(w, m.X, m.Y)
 	if m.Press {
-		a.onMouseButton(w, m.Button, glfw.Press, 0)
+		a.onMouseButton(w, m.Button, glfw.Press, m.Mods)
 	}
 	if m.Release {
-		a.onMouseButton(w, m.Button, glfw.Release, 0)
+		a.onMouseButton(w, m.Button, glfw.Release, m.Mods)
 	}
 }
 

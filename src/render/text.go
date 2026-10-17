@@ -795,6 +795,33 @@ func (r *Renderer) drawCursorGlyph(snap *grid.Snapshot, col, row int, x, yTop, o
 	r.drawCellGlyph(x, yTop, cells, col, r.defaultBg(), r.cursorColor(), proj)
 }
 
+// drawScaledCursorGlyph is drawCursorGlyph for a DECDWL/DECDHL row: the glyph
+// is laid out at 1x, then scaled into the cursor box like the row's text.
+func (r *Renderer) drawScaledCursorGlyph(snap *grid.Snapshot, col, row int, box cursorRect, proj [16]float32) {
+	if row < 0 || row >= snap.Rows || col < 0 || col >= snap.Cols {
+		return
+	}
+	cells := snap.Cells[row*snap.Cols : (row+1)*snap.Cols]
+	cells = cells[:max(col+1, min(len(cells), max(snap.Cols/2, 1)))]
+	r.uiEnsure(uiKindGlyph, proj)
+	r.prepareRowShaping(cells)
+	if r.uiAtlasGen != r.atlasGen {
+		r.uiGlyphs.reset()
+		r.uiAtlasGen = r.atlasGen
+	}
+	x0 := float32(col) * r.cellWidth
+	r.scaledGlyphs.setBg(r.cursorColor())
+	r.emitCellGlyph(&r.scaledGlyphs, cells, col, x0, 0, math.MaxFloat32, r.defaultBg())
+	r.scaledGlyphs.clearBg()
+	sy := float32(1)
+	if box.size != grid.LineDoubleWidth {
+		sy = 2
+	}
+	clip := clipBox{box.x, box.y, box.x + box.w, box.y + box.h}
+	appendScaled(&r.uiGlyphs, &r.scaledGlyphs, x0, 0, box.x, box.glyphTop, 2, sy, clip)
+	r.scaledGlyphs.reset()
+}
+
 // textLine lays text out as a row of cells, one per grapheme cluster, as
 // the grid stores it; zero-width clusters (stray format characters) are
 // dropped.

@@ -484,13 +484,15 @@ func TestParseIPCSendMouse(t *testing.T) {
 		{[]string{"1", "2", "middle"}, ipcMouse{X: 1, Y: 2, Button: glfw.MouseButtonMiddle, Press: true, Release: true}},
 		{[]string{"1", "2", "right:press"}, ipcMouse{X: 1, Y: 2, Button: glfw.MouseButtonRight, Press: true}},
 		{[]string{"1", "2", "left:release"}, ipcMouse{X: 1, Y: 2, Button: glfw.MouseButtonLeft, Release: true}},
+		{[]string{"1", "2", "ctrl+left"}, ipcMouse{X: 1, Y: 2, Button: glfw.MouseButtonLeft, Press: true, Release: true, Mods: glfw.ModControl}},
+		{[]string{"1", "2", "Shift+Alt+right:press"}, ipcMouse{X: 1, Y: 2, Button: glfw.MouseButtonRight, Press: true, Mods: glfw.ModShift | glfw.ModAlt}},
 	} {
 		c, err := parseIPC(ipcRequest{Cmd: "send-mouse", Args: tc.args})
 		if err != nil || c.Mouse != tc.want {
 			t.Errorf("send-mouse %v = %+v, %v; want %+v", tc.args, c.Mouse, err, tc.want)
 		}
 	}
-	for _, bad := range [][]string{nil, {"1"}, {"x", "2"}, {"1", "2", "thumb"}, {"1", "2", "left:hold"}, {"1", "2", "left", "x"}, {"-1", "2"}} {
+	for _, bad := range [][]string{nil, {"1"}, {"x", "2"}, {"1", "2", "thumb"}, {"1", "2", "left:hold"}, {"1", "2", "left", "x"}, {"-1", "2"}, {"1", "2", "hyper+left"}, {"1", "2", "ctrl+"}, {"1", "2", "ctrl+shift"}} {
 		if _, err := parseIPC(ipcRequest{Cmd: "send-mouse", Args: bad}); err == nil {
 			t.Errorf("send-mouse %v must be rejected", bad)
 		}
@@ -522,5 +524,18 @@ func TestCursorPosFollowsCallback(t *testing.T) {
 	a := &App{lastCursorX: 12.5, lastCursorY: 99, haveCursorPos: true}
 	if x, y := a.cursorPos(); x != 12.5 || y != 99 {
 		t.Fatalf("cursorPos = %v,%v, want the last callback position", x, y)
+	}
+}
+
+// Injected modifiers count as held for the code that polls key state, so a
+// send-mouse ctrl+ or shift+ behaves like a physical chord.
+func TestIPCModsCountAsHeld(t *testing.T) {
+	a := &App{}
+	if a.modDown(nil, glfw.ModControl) {
+		t.Fatal("ctrl reported held with nothing pressed")
+	}
+	a.ipcMods = glfw.ModControl | glfw.ModShift
+	if !a.modDown(nil, glfw.ModControl) || !a.modDown(nil, glfw.ModShift) || a.modDown(nil, glfw.ModAlt) {
+		t.Fatalf("modDown ignores injected mods %v", a.ipcMods)
 	}
 }

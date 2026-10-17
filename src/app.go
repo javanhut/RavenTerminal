@@ -56,6 +56,8 @@ type App struct {
 	lastCursorX    float64
 	lastCursorY    float64
 	haveCursorPos  bool
+	ipcMods        glfw.ModifierKey // modifiers held by an injected send-mouse
+	focusPane      *tab.Pane        // pane last sent a ?1004 focus-in
 	lastAutoScroll time.Time
 
 	// ctx lives as long as the window; background requests derive from it
@@ -928,6 +930,11 @@ func (a *App) renderFrame(now time.Time) {
 				break
 			}
 		}
+	}
+
+	a.syncFocus()
+	if activeTab != nil && a.hoverRecheckNeeded(paneDirty || gridSwapped) {
+		a.refreshLinkHover(activeTab, a.lastCursorX, a.lastCursorY)
 	}
 
 	toastVisible := now.Before(a.toast.expiresAt)
