@@ -215,7 +215,7 @@ func TestAnimationGaplessFramesAndUnplacedImages(t *testing.T) {
 		t.Fatal("an image with no placement scheduled frames")
 	}
 	s.Place(&Placement{ImageID: 1, Cols: 1, Rows: 1})
-	s.Tick(t0.Add(40 * time.Millisecond)) // root's default 40ms gap ends; frame 2 is gapless
+	s.Tick(t0.Add(40 * time.Millisecond)) // the root and frame 2 are gapless, so frame 3 shows
 	if s.CurrentFrame(1) != 3 {
 		t.Fatalf("gapless frame was shown: %d", s.CurrentFrame(1))
 	}
@@ -237,5 +237,26 @@ func TestFramesCountAgainstBudgetAndDieWithImage(t *testing.T) {
 	s.DeleteImage(1)
 	if s.totalBytes != 0 {
 		t.Fatalf("bytes after delete = %d", s.totalBytes)
+	}
+}
+
+// The kitty spec: "The root frame defaults to zero gap", so a running
+// animation skips it until the client gives it one with a=a r=1 z=....
+func TestAnimationRootFrameDefaultsGapless(t *testing.T) {
+	s := NewStore(0)
+	s.Add(1, 1, 1, solid(1, 1, red))
+	s.LoadFrame(1, FrameData{Pixels: solid(1, 1, green), W: 1, H: 1, Gap: 50})
+	s.Place(&Placement{ImageID: 1, Cols: 1, Rows: 1})
+	t0 := time.Unix(1000, 0)
+	s.ControlAnimation(1, AnimControl{State: AnimRunning}, t0)
+	s.Tick(t0)
+	if s.CurrentFrame(1) != 2 {
+		t.Fatalf("root frame was shown with no gap set: frame %d", s.CurrentFrame(1))
+	}
+
+	s.ControlAnimation(1, AnimControl{GapFrame: 1, Gap: 30, Current: 1}, t0)
+	s.Tick(t0.Add(10 * time.Millisecond))
+	if s.CurrentFrame(1) != 1 {
+		t.Fatalf("root with a 30ms gap left after 10ms: frame %d", s.CurrentFrame(1))
 	}
 }

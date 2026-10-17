@@ -1,6 +1,7 @@
 package grid
 
 import (
+	"slices"
 	"strings"
 	"sync"
 	"unicode"
@@ -1586,23 +1587,7 @@ func (g *Grid) DeleteLinesWithBgLocked(n int, bg Color) {
 		n = bottom + 1 - g.CursorRow
 	}
 
-	// Shift lines up within the scroll region (move transfers style ownership).
-	// The soft-wrap mark describes the line's content, so it travels with it.
-	for row := g.CursorRow; row <= bottom-n; row++ {
-		for col := 0; col < g.Cols; col++ {
-			g.moveCell(g.index(col, row), g.index(col, row+n))
-		}
-		g.rows[row].flags = g.rows[row].flags&^rowWrapFlags | g.rows[row+n].flags&rowWrapFlags
-		g.rows[row].size = g.rows[row+n].size
-		g.rows[row].sized = g.rows[row+n].sized
-	}
-
-	// Clear bottom n lines of the scroll region with background color
-	for row := bottom - n + 1; row <= bottom; row++ {
-		g.rows[row].sized = nil
-		g.fillSpan(row, 0, g.Cols, bg)
-		g.rows[row].size = LineSingle
-	}
+	g.rotateRows(g.CursorRow, bottom, n, bg)
 }
 
 // InsertLines inserts n blank lines at cursor within scroll region, shifting down
@@ -1634,22 +1619,39 @@ func (g *Grid) InsertLinesWithBgLocked(n int, bg Color) {
 		n = bottom + 1 - g.CursorRow
 	}
 
-	// Shift lines down within the scroll region (move transfers style ownership).
-	// The soft-wrap mark describes the line's content, so it travels with it.
-	for row := bottom; row >= g.CursorRow+n; row-- {
-		for col := 0; col < g.Cols; col++ {
-			g.moveCell(g.index(col, row), g.index(col, row-n))
-		}
-		g.rows[row].flags = g.rows[row].flags&^rowWrapFlags | g.rows[row-n].flags&rowWrapFlags
-		g.rows[row].size = g.rows[row-n].size
-		g.rows[row].sized = g.rows[row-n].sized
-	}
+	g.rotateRows(g.CursorRow, bottom, -n, bg)
+}
 
-	// Clear n lines at cursor position with background color
-	for row := g.CursorRow; row < g.CursorRow+n && row <= bottom; row++ {
-		g.rows[row].sized = nil
-		g.fillSpan(row, 0, g.Cols, bg)
-		g.rows[row].size = LineSingle
+// rotateRows shifts rows [top, bottom] up by n (down for negative n) by
+// rotating row pointers, then clears the n rows that wrapped around to the
+// vacated end with the given background. A line keeps everything that
+// describes its content (cells, wrap flags, line size, OSC 66 blocks, OSC 133
+// mark) as it moves, and the cost is per row, not per cell: full-screen apps
+// (vim, less, tmux) issue IL/DL on every scroll inside a region.
+func (g *Grid) rotateRows(top, bottom, n int, bg Color) {
+	span := g.rows[top : bottom+1]
+	k := min(max(n, -n), len(span))
+	if k == 0 {
+		return
+	}
+	// Rotate left by m with three in-place reversals (no allocation).
+	m := k
+	if n < 0 {
+		m = len(span) - k
+	}
+	slices.Reverse(span[:m])
+	slices.Reverse(span[m:])
+	slices.Reverse(span)
+	// Every row in the span now sits at a new display position.
+	for _, r := range span {
+		r.flags |= RowDirty
+	}
+	cleared := span[len(span)-k:]
+	if n < 0 {
+		cleared = span[:k]
+	}
+	for _, r := range cleared {
+		g.clearRow(r, bg)
 	}
 }
 

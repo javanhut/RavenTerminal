@@ -393,7 +393,11 @@ func (t *Terminal) placeImage(img *images.Image, ctrl map[string]string) error {
 		Virtual: virtual,
 	}
 	relative := false
-	if pid := ctrlInt(ctrl, "P", 0); pid > 0 && !virtual {
+	if pid := ctrlInt(ctrl, "P", 0); pid > 0 && virtual {
+		// Kitty spec: "If a client attempts to make a virtual placement
+		// relative the terminal must respond with the EINVAL error code."
+		return kerr("EINVAL", "virtual placements cannot be relative")
+	} else if pid > 0 {
 		p.ParentImage, p.ParentPlacement = images.ImageID(pid), uint32(ctrlInt(ctrl, "Q", 0))
 		p.RelCol, p.RelRow = ctrlInt(ctrl, "H", 0), ctrlInt(ctrl, "V", 0)
 		if err := t.activeImages().PlaceRelative(p); err != nil {

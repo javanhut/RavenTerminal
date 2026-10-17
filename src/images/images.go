@@ -46,6 +46,11 @@ type Placement struct {
 	ParentImage     ImageID
 	ParentPlacement uint32
 	RelCol, RelRow  int
+	// VirtualRoot marks a relative placement whose chain of parents ends at
+	// a virtual placement. The store can't know where that is: the renderer
+	// derives it from the placeholder cells showing the root (VirtualAnchor),
+	// so AnchorCol/AnchorAbsRow are not used for drawing or pruning.
+	VirtualRoot bool
 }
 
 // Per-store caps on image and placement counts.
@@ -247,7 +252,7 @@ func (s *Store) ClearPlacements() {
 func (s *Store) PrunePlacementsBelow(minAbsRow int) {
 	kept := make([]*Placement, 0, len(s.placements))
 	for _, p := range s.placements {
-		if p.AnchorAbsRow+p.Rows > minAbsRow {
+		if p.VirtualRoot || p.AnchorAbsRow+p.Rows > minAbsRow {
 			kept = append(kept, p)
 		}
 	}

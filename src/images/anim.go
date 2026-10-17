@@ -24,7 +24,7 @@ const (
 )
 
 const (
-	defaultGap = 40 // ms, for frames sent without z
+	defaultGap = 40 // ms, for frames after the root sent without z
 	maxFrames  = 1024
 )
 
@@ -78,7 +78,9 @@ type Compose struct {
 func (s *Store) anim(img *Image) *animation {
 	if img.anim == nil {
 		img.anim = &animation{
-			frames: []*frame{{pixels: img.Pixels, gap: defaultGap, root: true, view: img}},
+			// The root frame starts gapless; the client sets its gap with
+			// a=a r=1 z=... (kitty spec: "The root frame defaults to zero gap").
+			frames: []*frame{{pixels: img.Pixels, gap: 0, root: true, view: img}},
 			state:  AnimStopped,
 		}
 	}

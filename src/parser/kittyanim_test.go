@@ -161,3 +161,33 @@ func TestKittyRelativePlacementFollowsAndDies(t *testing.T) {
 		t.Fatal("deleting the parent kept the child")
 	}
 }
+
+// Kitty spec: a relative placement may hang from a virtual (Unicode
+// placeholder) placement, but a virtual placement may not itself be relative
+// ("the terminal must respond with the EINVAL error code").
+func TestKittyRelativePlacementVirtualParent(t *testing.T) {
+	term := NewTerminal(40, 10)
+	px := "AAAA/w=="
+	term.Process(apc("f=32,s=1,v=1,i=1,a=t,q=2;" + px))
+	term.Process(apc("f=32,s=1,v=1,i=2,a=t,q=2;" + px))
+	term.Process(apc("a=p,U=1,i=1,p=7,c=2,r=1,q=2"))
+	if got := reply(term, string(apc("a=p,i=2,p=1,P=1,Q=7,H=1,V=1"))); got != "\x1b_Gi=2,p=1;OK\x1b\\" {
+		t.Fatalf("relative-to-virtual reply = %q", got)
+	}
+	var child *images.Placement
+	for _, p := range term.Images().Placements() {
+		if p.ImageID == 2 {
+			child = p
+		}
+	}
+	if child == nil || !child.VirtualRoot {
+		t.Fatalf("child = %+v, want a VirtualRoot placement", child)
+	}
+
+	if got := reply(term, string(apc("a=p,U=1,i=2,p=5,P=1,Q=7"))); !strings.Contains(got, "EINVAL") {
+		t.Fatalf("relative virtual placement reply = %q", got)
+	}
+	if _, ok := term.Images().VirtualPlacement(2, 5); ok {
+		t.Fatal("a refused virtual placement was stored")
+	}
+}

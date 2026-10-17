@@ -252,10 +252,65 @@ func placeholderTile(p *images.Placement, img *images.Image, row, col int, cw, c
 	return clipQuad(full, cw, ch)
 }
 
-// placeholderDraw is a placeholder cell recorded during the grid pass.
+// placeholderDraw is a placeholder cell recorded during the grid pass, at
+// pixel (x, y) and view cell (col, row).
 type placeholderDraw struct {
-	x, y float32
-	info placeholderInfo
+	x, y     float32
+	col, row int
+	info     placeholderInfo
+}
+
+// matchVirtual returns the virtual placement a placeholder cell shows: the
+// newest one for its image id, restricted to its placement id when it names
+// one.
+func matchVirtual(virtuals []*images.Placement, info placeholderInfo) *images.Placement {
+	for _, v := range slices.Backward(virtuals) {
+		if uint32(v.ImageID) == info.id && (info.pid == 0 || v.PlacementID == info.pid) {
+			return v
+		}
+	}
+	return nil
+}
+
+// cellPos is a cell position: a column and an absolute row.
+type cellPos struct{ col, absRow int }
+
+// virtualOrigins records, for each virtual placement shown by placeholder
+// cells, the minimum column and minimum row of those cells. Per the kitty
+// spec that is the virtual placement's position when it parents a relative
+// placement. Rows are made absolute with viewTopAbs.
+func virtualOrigins(phs []placeholderDraw, virtuals []*images.Placement, viewTopAbs int, into map[*images.Placement]cellPos) {
+	clear(into)
+	for _, ph := range phs {
+		v := matchVirtual(virtuals, ph.info)
+		if v == nil {
+			continue
+		}
+		pos := cellPos{ph.col, viewTopAbs + ph.row}
+		if cur, ok := into[v]; ok {
+			pos = cellPos{min(cur.col, pos.col), min(cur.absRow, pos.absRow)}
+		}
+		into[v] = pos
+	}
+}
+
+// placedAt returns p ready to draw: p itself, or for a placement chained to
+// a virtual root, a copy anchored where that root's placeholders are. ok is
+// false when the root has no placeholder on screen.
+func (pi *paneImages) placedAt(p *images.Placement) (*images.Placement, bool) {
+	if !p.VirtualRoot {
+		return p, true
+	}
+	col, row, ok := images.VirtualAnchor(p, pi.frame.Placements, pi.frame.Virtuals, func(v *images.Placement) (int, int, bool) {
+		pos, ok := pi.origins[v]
+		return pos.col, pos.absRow, ok
+	})
+	if !ok {
+		return nil, false
+	}
+	cp := *p // placements are shared with the store: never mutate
+	cp.AnchorCol, cp.AnchorAbsRow = col, row
+	return &cp, true
 }
 
 // --- texture cache ---
@@ -406,6 +461,22 @@ type paneImages struct {
 	frame                    *parser.RenderFrame
 	below, under, over       []*images.Placement
 	offX, offY, paneW, paneH float32
+	// origins holds this frame's virtual-root positions (locateVirtualRoots).
+	origins map[*images.Placement]cellPos
+}
+
+// locateVirtualRoots records where this pane's virtual placements appear,
+// from the placeholder cells the grid pass just collected, so placements
+// chained to them can be drawn (placedAt).
+func (r *Renderer) locateVirtualRoots() {
+	pi := &r.paneImgs
+	if pi.frame == nil {
+		return
+	}
+	if pi.origins == nil {
+		pi.origins = map[*images.Placement]cellPos{}
+	}
+	virtualOrigins(r.placeholders, pi.frame.Virtuals, pi.frame.ViewTopAbs, pi.origins)
 }
 
 func (r *Renderer) prepareImages(f *parser.RenderFrame, offX, offY, paneW, paneH float32) {
@@ -430,6 +501,10 @@ func (r *Renderer) drawPlacements(layer []*images.Placement, proj [16]float32) {
 		if img == nil {
 			continue
 		}
+		p, ok := pi.placedAt(p)
+		if !ok {
+			continue
+		}
 		q, ok := placementQuad(p, img, pi.frame.ViewTopAbs, r.cellWidth, r.cellHeight, pi.frame.CellW, pi.frame.CellH)
 		if !ok {
 			continue
@@ -446,14 +521,7 @@ func (r *Renderer) drawPlaceholders(proj [16]float32) {
 		return
 	}
 	for _, ph := range r.placeholders {
-		var p *images.Placement
-		for _, v := range slices.Backward(pi.frame.Virtuals) {
-
-			if uint32(v.ImageID) == ph.info.id && (ph.info.pid == 0 || v.PlacementID == ph.info.pid) {
-				p = v
-				break
-			}
-		}
+		p := matchVirtual(pi.frame.Virtuals, ph.info)
 		if p == nil {
 			continue
 		}

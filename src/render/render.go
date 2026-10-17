@@ -3181,6 +3181,8 @@ func (r *Renderer) renderGridAt(snap *grid.Snapshot, g *grid.Grid, offsetX, offs
 			break
 		}
 	}
+	// Needs this pass's placeholders, and must run before any placement draws.
+	r.locateVirtualRoots()
 	r.uiFlush() // anything batched earlier (tab bar, chrome) lands under grid content
 	r.drawPlacements(r.paneImgs.below, proj)
 	r.flushRects(&r.gridRects, proj)
@@ -3322,7 +3324,11 @@ func (r *Renderer) buildGridBatches(snap *grid.Snapshot, offsetX, offsetY, paneW
 			hidden := cell.Flags&grid.FlagHidden != 0 || len(sized) > 0 && inSized(sized, col)
 			if cell.Char == placeholderRune {
 				prevPH = decodePlaceholder(cell, prevPH)
-				r.placeholders = append(r.placeholders, placeholderDraw{x: x, y: y, info: prevPH})
+				screenCol := col
+				if ls != grid.LineSingle {
+					screenCol = 2 * col // double-width cells span two columns
+				}
+				r.placeholders = append(r.placeholders, placeholderDraw{x: x, y: y, col: screenCol, row: row, info: prevPH})
 				continue
 			}
 			prevPH = placeholderInfo{}

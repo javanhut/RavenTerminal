@@ -56,9 +56,52 @@ func TestRelativePlacementErrors(t *testing.T) {
 	if find(s, 1, 1).ParentImage != 0 {
 		t.Fatal("a rejected placement replaced the old one")
 	}
-	s.Place(&Placement{ImageID: 9, PlacementID: 1, Cols: 1, Rows: 1, Virtual: true})
-	if err := s.PlaceRelative(&Placement{ImageID: 3, PlacementID: 1, ParentImage: 9, ParentPlacement: 1, Cols: 1, Rows: 1}); errCode(err) != "ENOPARENT" {
+}
+
+// The kitty spec allows a virtual placement as a parent; the chain is then
+// positioned from the root's placeholder cells, which the store can't see.
+func TestRelativePlacementVirtualParent(t *testing.T) {
+	s := NewStore(0)
+	s.Place(&Placement{ImageID: 9, PlacementID: 1, Cols: 4, Rows: 2, Virtual: true})
+	if err := s.PlaceRelative(&Placement{ImageID: 3, PlacementID: 1, ParentImage: 9, ParentPlacement: 1, RelCol: 2, RelRow: -1, Cols: 1, Rows: 1}); err != nil {
 		t.Fatalf("virtual parent: %v", err)
+	}
+	if err := s.PlaceRelative(&Placement{ImageID: 4, PlacementID: 1, ParentImage: 3, ParentPlacement: 1, RelCol: 1, RelRow: 3, Cols: 1, Rows: 1}); err != nil {
+		t.Fatalf("grandchild: %v", err)
+	}
+	child, grand := find(s, 3, 1), find(s, 4, 1)
+	if child == nil || grand == nil || !child.VirtualRoot || !grand.VirtualRoot {
+		t.Fatalf("child %+v grandchild %+v: want both VirtualRoot", child, grand)
+	}
+
+	origin := func(v *Placement) (int, int, bool) {
+		if v.ImageID != 9 {
+			t.Fatalf("origin asked for %+v", v)
+		}
+		return 10, 100, true
+	}
+	if c, r, ok := VirtualAnchor(child, s.Placements(), s.VirtualPlacements(), origin); !ok || c != 12 || r != 99 {
+		t.Fatalf("child anchor (%d,%d,%v), want (12,99)", c, r, ok)
+	}
+	if c, r, ok := VirtualAnchor(grand, s.Placements(), s.VirtualPlacements(), origin); !ok || c != 13 || r != 102 {
+		t.Fatalf("grandchild anchor (%d,%d,%v), want (13,102)", c, r, ok)
+	}
+	offscreen := func(*Placement) (int, int, bool) { return 0, 0, false }
+	if _, _, ok := VirtualAnchor(child, s.Placements(), s.VirtualPlacements(), offscreen); ok {
+		t.Fatal("resolved with no placeholder on screen")
+	}
+
+	// The stored anchor means nothing for these, so scrollback pruning
+	// must not drop them.
+	s.PrunePlacementsBelow(1 << 30)
+	if find(s, 3, 1) == nil || find(s, 4, 1) == nil {
+		t.Fatal("pruned a placement anchored to a virtual root")
+	}
+
+	// Deleting the virtual root takes the whole chain with it.
+	s.DeletePlacements(func(p *Placement) bool { return p.ImageID == 9 }, false)
+	if len(s.Placements()) != 0 {
+		t.Fatalf("orphans left: %+v", s.Placements())
 	}
 }
 

@@ -10,3 +10,4 @@ node_modules/
 bun.lock
 package.json
 .lazy/*
+terminal_output.txt

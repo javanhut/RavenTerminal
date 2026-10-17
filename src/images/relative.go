@@ -5,9 +5,9 @@ import "slices"
 // MaxChainDepth caps chains of relative placements (kitty P/Q).
 const MaxChainDepth = 8
 
-// findReal returns the real placement with the given image and placement id.
-func (s *Store) findReal(id ImageID, pid uint32) *Placement {
-	for _, p := range s.placements {
+// findIn returns the placement in list with the given image and placement id.
+func findIn(list []*Placement, id ImageID, pid uint32) *Placement {
+	for _, p := range list {
 		if p.ImageID == id && p.PlacementID == pid {
 			return p
 		}
@@ -15,12 +15,22 @@ func (s *Store) findReal(id ImageID, pid uint32) *Placement {
 	return nil
 }
 
+// findParent returns the placement a relative placement may hang from: a
+// real one or, per the kitty spec, a virtual (Unicode placeholder) one.
+func (s *Store) findParent(id ImageID, pid uint32) *Placement {
+	if p := findIn(s.placements, id, pid); p != nil {
+		return p
+	}
+	return findIn(s.virtuals, id, pid)
+}
+
 // PlaceRelative records a placement positioned relative to its parent
 // (ParentImage/ParentPlacement) offset by RelCol/RelRow cells. It fails with
-// ENOPARENT when the parent is not a real placement, ECYCLE when the chain
-// would loop back to p, and ETOODEEP past MaxChainDepth.
+// ENOPARENT when the parent placement doesn't exist, ECYCLE when the chain
+// would loop back to p, and ETOODEEP past MaxChainDepth. A parent may be
+// virtual; p is then positioned at draw time (VirtualRoot).
 func (s *Store) PlaceRelative(p *Placement) error {
-	parent := s.findReal(p.ParentImage, p.ParentPlacement)
+	parent := s.findParent(p.ParentImage, p.ParentPlacement)
 	if parent == nil {
 		return errorf("ENOPARENT", "parent placement not found")
 	}
@@ -35,10 +45,11 @@ func (s *Store) PlaceRelative(p *Placement) error {
 		if depth++; depth > MaxChainDepth {
 			return errorf("ETOODEEP", "relative placement chain too deep")
 		}
-		q = s.findReal(q.ParentImage, q.ParentPlacement)
+		q = s.findParent(q.ParentImage, q.ParentPlacement)
 	}
 	p.AnchorCol = parent.AnchorCol + p.RelCol
 	p.AnchorAbsRow = parent.AnchorAbsRow + p.RelRow
+	p.VirtualRoot = parent.Virtual || parent.VirtualRoot
 	s.relative = true
 	s.Place(p)
 	return nil
@@ -63,6 +74,7 @@ func (s *Store) reposition(parent *Placement) {
 			nc := *c
 			nc.AnchorCol = par.AnchorCol + nc.RelCol
 			nc.AnchorAbsRow = par.AnchorAbsRow + nc.RelRow
+			nc.VirtualRoot = par.Virtual || par.VirtualRoot
 			list[i] = &nc
 			queue = append(queue, &nc)
 		}
@@ -76,6 +88,35 @@ func (s *Store) orphans() func(*Placement) bool {
 		return func(*Placement) bool { return false }
 	}
 	return func(p *Placement) bool {
-		return p.ParentImage != 0 && s.findReal(p.ParentImage, p.ParentPlacement) == nil
+		return p.ParentImage != 0 && s.findParent(p.ParentImage, p.ParentPlacement) == nil
 	}
+}
+
+// VirtualAnchor resolves where a VirtualRoot placement sits: the RelCol/RelRow
+// offsets along its chain, summed onto origin's position for the virtual
+// root. Per the kitty spec that position is the minimum column and minimum
+// row of the placeholder cells showing the root, which only the renderer
+// sees. ok is false when the chain is broken or origin doesn't know the root
+// (none of its placeholders is on screen); such a placement isn't drawn.
+func VirtualAnchor(p *Placement, real, virtuals []*Placement, origin func(*Placement) (col, absRow int, ok bool)) (col, absRow int, ok bool) {
+	col, absRow = p.RelCol, p.RelRow
+	q := p
+	for range MaxChainDepth + 1 {
+		// Same precedence as findParent: a real placement wins.
+		if parent := findIn(real, q.ParentImage, q.ParentPlacement); parent != nil {
+			if parent.ParentImage == 0 {
+				return 0, 0, false // rooted at a real placement after all
+			}
+			col, absRow = col+parent.RelCol, absRow+parent.RelRow
+			q = parent
+			continue
+		}
+		v := findIn(virtuals, q.ParentImage, q.ParentPlacement)
+		if v == nil {
+			return 0, 0, false
+		}
+		oc, or, ok := origin(v)
+		return oc + col, or + absRow, ok
+	}
+	return 0, 0, false
 }
