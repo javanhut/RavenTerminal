@@ -7,7 +7,12 @@
 # same window size, and on the same display. Results are only comparable
 # under those conditions.
 #
-# Usage: ./scripts/bench.sh
+# Usage: ./scripts/bench.sh            benchmark, then compare against the
+#                                      latest run of the other terminal
+#        ./scripts/bench.sh --compare  reprint that comparison only
+#
+# BENCH_VS=<name> compares against that terminal's latest run (its
+# TERM_PROGRAM, e.g. ghostty) instead of whichever non-Raven run is newest.
 #
 
 set -e
@@ -26,6 +31,102 @@ NC='\033[0m'
 print_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
 print_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+
+# Raven against the most recent run of another terminal, both read back from
+# $RESULTS. hyperfine's own Change/Factor columns compare each corpus to
+# `plain` within one terminal, which reads like a cross-terminal result and
+# isn't one. Plain POSIX awk: this also runs under macOS's BWK awk.
+compare_latest() {
+    if [ ! -f "$RESULTS" ]; then
+        print_error "No results file at $RESULTS"
+        return 1
+    fi
+    awk -v vs="${BENCH_VS:-}" -v results="$RESULTS" \
+        -v yellow="$YELLOW" -v nc="$NC" '
+    function pad(n,   s) { s = ""; while (n-- > 0) s = s " "; return s }
+    function max(a, b) { return a > b ? a : b }
+    # "62.0 ± 4.6" left-aligned in w columns. Width is measured from the
+    # numbers, not the string: awks disagree on whether ± is 1 or 2 long.
+    function cell(m, s, w,   a, b) {
+        a = sprintf("%.1f", m); b = sprintf("%.1f", s)
+        return a " ± " b pad(w - length(a) - length(b) - 3)
+    }
+
+    /^## / {
+        n++
+        i = index($0, " — ")
+        name[n] = substr($0, 4, i - 4)
+        when[n] = substr($0, i + length(" — "))
+        next
+    }
+    /^- Geometry:/ { geom[n] = $3; next }
+    /^- Corpus:/   { corpus[n] = substr($0, 11); next }
+    # Older hyperfine writes "Mean [s]" for slow runs; normalise to ms.
+    /^\| Command/ {
+        split($0, f, "|")
+        unit = f[3]; sub(/.*\[/, "", unit); sub(/\].*/, "", unit)
+        scale = (unit == "s") ? 1000 : (unit == "µs") ? 0.001 : 1
+        next
+    }
+    /^\| `/ {
+        split($0, f, "|")
+        cmd = f[2]; gsub(/[` ]/, "", cmd)
+        split(f[3], v, " ")          # "63.2 ± 4.2"
+        mean[n, cmd] = v[1] * scale
+        sd[n, cmd] = v[3] * scale
+        cmds[n] = cmds[n] " " cmd
+    }
+
+    END {
+        for (k = n; k >= 1; k--) {
+            if (cmds[k] == "") continue
+            lname = tolower(name[k])
+            if (lname ~ /^raven/) { if (!r) r = k }
+            else if (!o && (vs == "" || lname == tolower(vs))) o = k
+        }
+        if (!r || !o) {
+            missing = !r ? "RavenTerminal" : (vs != "" ? vs : "other-terminal")
+            printf "No %s run in %s yet; run ./scripts/bench.sh there to get the comparison.\n", missing, results
+            exit 0
+        }
+
+        nw = max(length(name[r]), length(name[o]))
+        printf "\nRaven vs %s (latest run of each)\n", name[o]
+        printf "  %s%s  %s  %s\n", name[r], pad(nw - length(name[r])), when[r], geom[r]
+        printf "  %s%s  %s  %s\n\n", name[o], pad(nw - length(name[o])), when[o], geom[o]
+
+        rl = name[r] " [ms]"; ol = name[o] " [ms]"
+        rw = max(16, length(rl) + 2); ow = max(16, length(ol) + 2)
+        printf "  %-8s%s%s%s%sresult\n", "corpus", rl, pad(rw - length(rl)), ol, pad(ow - length(ol))
+
+        split(substr(cmds[r], 2), list, " ")
+        for (j = 1; list[j] != ""; j++) {
+            c = list[j]
+            if (!((o, c) in mean)) continue
+            mr = mean[r, c]; mo = mean[o, c]
+            if (mr <= mo) verdict = sprintf("Raven %.2fx faster", mo / mr)
+            else          verdict = sprintf("Raven %.2fx slower", mr / mo)
+            # A gap smaller than the two spreads combined could flip on rerun.
+            diff = mo - mr; if (diff < 0) diff = -diff
+            if (diff <= sd[r, c] + sd[o, c]) verdict = verdict " (within noise)"
+            printf "  %-8s%s%s%s\n", c, cell(mr, sd[r, c], rw), cell(mo, sd[o, c], ow), verdict
+        }
+
+        if (geom[r] != geom[o])
+            printf "\n%s[WARNING]%s Geometry differs (%s vs %s): resize both windows to match and rerun.\n", \
+                yellow, nc, geom[r], geom[o]
+        if (corpus[r] != corpus[o])
+            printf "%s[WARNING]%s Corpus sizes differ (%s vs %s): rerun both.\n", \
+                yellow, nc, corpus[r], corpus[o]
+    }' "$RESULTS"
+}
+
+# --compare reprints the table from saved results without benchmarking, so it
+# skips the terminal check below.
+if [ "$1" = "--compare" ]; then
+    compare_latest
+    exit $?
+fi
 
 # The whole point is to time the terminal's render loop. Piped into a file or
 # another process there is no renderer involved and the numbers are garbage,
@@ -124,6 +225,8 @@ hyperfine --warmup 1 --runs 5 --show-output \
     echo
     cat "$SUMMARY"
 } >> "$RESULTS"
+
+compare_latest
 
 echo
 # ponytail: cat returns when the PTY drains, not when pixels land. A terminal
